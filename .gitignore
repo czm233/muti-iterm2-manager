@@ -1,0 +1,7 @@
+.venv/
+.run/
+__pycache__/
+*.pyc
+.DS_Store
+src/*.egg-info/
+src/multi_iterm2_manager.egg-info/

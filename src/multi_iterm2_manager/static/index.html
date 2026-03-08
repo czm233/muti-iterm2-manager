@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>iTerm 监控墙</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css" />
+    <link rel="stylesheet" href="/assets/styles.css" />
+  </head>
+  <body>
+    <div class="page">
+      <div class="dashboard-layout">
+        <aside class="dashboard-sidebar">
+          <header class="hero">
+            <div class="hero-copy">
+              <div class="hero-meta">
+                <span id="ws-status" class="status-pill status-connecting">连接中</span>
+                <span id="build-version" class="status-pill">{{BUILD_VERSION}}</span>
+                <button id="sidebar-toggle" class="status-pill sidebar-toggle" type="button" aria-label="折叠侧栏">«</button>
+              </div>
+              <p class="eyebrow">Monitor Wall</p>
+              <h1>iTerm 监控墙</h1>
+            </div>
+            <div class="hero-actions">
+              <button id="create-demo">创建示例任务</button>
+              <button id="monitor-mode" class="secondary">回到监控模式</button>
+              <button id="refresh-all" class="secondary">刷新全部</button>
+              <button id="close-all" class="ghost">关闭全部</button>
+            </div>
+          </header>
+
+          <section class="toolbar panel">
+            <div class="panel-title">创建新任务</div>
+            <form id="create-form" class="create-form">
+              <input id="name" name="name" type="text" placeholder="任务名称，例如：Claude 任务 A（可留空）" />
+              <button type="submit">启动并纳入监控</button>
+            </form>
+          </section>
+
+          <section id="wall-controls" class="panel wall-controls"></section>
+
+          <section class="status-bar panel">
+            <div class="panel-title">监控概览</div>
+            <div id="stats" class="stats"></div>
+          </section>
+        </aside>
+
+        <section class="monitor-stage">
+          <div id="hero-dock" class="hero-dock" hidden></div>
+          <main id="grid" class="monitor-wall"></main>
+        </section>
+      </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+    <script type="module" src="/assets/app.js"></script>
+  </body>
+</html>
