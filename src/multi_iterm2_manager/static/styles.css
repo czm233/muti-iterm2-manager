@@ -743,3 +743,87 @@ button.is-active {
 .dashboard-layout[data-sidebar-collapsed="true"] .hero-dock {
   margin-left: 0 !important;
 }
+
+
+.monitor-wall[data-engine="split"] {
+  display: block;
+  width: 100%;
+  min-height: 100%;
+}
+
+.split-node,
+.split-pane {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex: 1 1 auto;
+}
+
+.split-node {
+  gap: 6px;
+  width: 100%;
+  height: 100%;
+}
+
+.split-node--row {
+  flex-direction: row;
+}
+
+.split-node--column {
+  flex-direction: column;
+}
+
+.split-pane > .wall-card {
+  width: 100%;
+}
+
+.wall-card.split-preview-left,
+.wall-card.split-preview-right,
+.wall-card.split-preview-top,
+.wall-card.split-preview-bottom {
+  position: relative;
+}
+
+.wall-card.split-preview-left::after,
+.wall-card.split-preview-right::after,
+.wall-card.split-preview-top::after,
+.wall-card.split-preview-bottom::after {
+  content: "";
+  position: absolute;
+  background: rgba(104, 210, 255, 0.18);
+  border: 2px solid rgba(104, 210, 255, 0.42);
+  pointer-events: none;
+  z-index: 3;
+}
+
+.wall-card.split-preview-left::after {
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 50%;
+}
+
+.wall-card.split-preview-right::after {
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 50%;
+}
+
+.wall-card.split-preview-top::after {
+  left: 0;
+  top: 0;
+  right: 0;
+  height: 50%;
+}
+
+.wall-card.split-preview-bottom::after {
+  left: 0;
+  bottom: 0;
+  right: 0;
+  height: 50%;
+}
+
+.terminal-mirror-rich {
+  background: transparent;
+}

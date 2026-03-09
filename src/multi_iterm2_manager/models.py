@@ -49,6 +49,7 @@ class TerminalRecord:
     status: TerminalStatus = TerminalStatus.idle
     summary: str = ""
     screen_text: str = ""
+    screen_html: str = ""
     frame: TerminalFrame | None = None
     markers: list[str] = field(default_factory=list)
     updated_at: str = field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))
@@ -67,6 +68,7 @@ class TerminalRecord:
             "status": self.status.value,
             "summary": self.summary,
             "screenText": self.screen_text,
+            "screenHtml": self.screen_html,
             "frame": self.frame.to_dict() if self.frame else None,
             "markers": self.markers,
             "updatedAt": self.updated_at,

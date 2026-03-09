@@ -44,6 +44,12 @@ class MockTerminalBackend:
         }
         return handle
 
+    async def get_screen_render(self, handle: TerminalHandle) -> tuple[str, str]:
+        item = self._items[handle.session_id]
+        text = str(item["text"])
+        html = '<pre class="terminal-mirror">' + text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;') + '</pre>'
+        return text, html
+
     async def get_screen_text(self, handle: TerminalHandle) -> str:
         item = self._items[handle.session_id]
         return str(item["text"])

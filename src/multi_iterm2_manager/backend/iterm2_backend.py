@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import os
 import signal
 import subprocess
@@ -98,7 +99,6 @@ class ITerm2Backend:
                             role = None
                         if owner == MANAGED_OWNER_VALUE and role == ANCHOR_ROLE_VALUE:
                             return
-
             window = await iterm2.Window.async_create(self._connection, command="/bin/zsh -l")
             if window is None:
                 return
@@ -120,20 +120,14 @@ class ITerm2Backend:
     async def create_terminal(self, params: CreateTerminalParams) -> TerminalHandle:
         async def _inner():
             connection, app = await self._get_runtime()
-            window = await iterm2.Window.async_create(
-                connection,
-                profile=params.profile,
-                command=params.command,
-            )
+            window = await iterm2.Window.async_create(connection, profile=params.profile, command=params.command)
             if window is None:
                 raise RuntimeError("iTerm2 返回了空窗口")
-
             await app.async_refresh()
             fresh_window = app.get_window_by_id(window.window_id) or window
             tab = fresh_window.current_tab
             if tab is None or tab.current_session is None:
                 raise RuntimeError("无法从新窗口中解析当前 session")
-
             session = tab.current_session
             try:
                 await session.async_set_variable(MANAGED_FLAG_VAR, True)
@@ -141,32 +135,44 @@ class ITerm2Backend:
                 await session.async_set_variable(ANCHOR_ROLE_VAR, "managed")
             except Exception:
                 pass
-
             if params.name:
                 try:
                     await session.async_set_name(params.name)
                 except Exception:
                     pass
-
             target_frame = params.frame or build_maximized_frame()
-            handle = TerminalHandle(
-                window_id=fresh_window.window_id,
-                session_id=session.session_id,
-                tab_id=tab.tab_id,
-            )
+            handle = TerminalHandle(window_id=fresh_window.window_id, session_id=session.session_id, tab_id=tab.tab_id)
             await self.set_frame(handle, target_frame)
             await self.hide_app()
             return handle
-
         return await self._run_with_reconnect(_inner)
 
-    async def get_screen_text(self, handle: TerminalHandle) -> str:
+    async def get_screen_render(self, handle: TerminalHandle) -> tuple[str, str]:
         async def _inner():
             session = await self._get_session(handle.session_id)
-            contents = await session.async_get_screen_contents()
-            return self._screen_to_text(contents)
+            response = await iterm2.rpc.async_get_screen_contents(
+                connection=self._connection,
+                session=session.session_id,
+                windowed_coord_range=None,
+                style=True,
+            )
+            if response.get_buffer_response.status != iterm2.api_pb2.GetBufferResponse.Status.Value("OK"):
+                raise RuntimeError("读取终端屏幕失败")
+            contents = iterm2.screen.ScreenContents(response.get_buffer_response)
+            return self._screen_to_text(contents), self._screen_to_html(contents)
+        try:
+            return await self._run_with_reconnect(_inner)
+        except Exception:
+            async def _fallback():
+                session = await self._get_session(handle.session_id)
+                contents = await session.async_get_screen_contents()
+                plain_text = self._screen_to_text(contents)
+                return plain_text, f'<pre class="terminal-mirror">{html.escape(plain_text or "暂无输出")}</pre>'
+            return await self._run_with_reconnect(_fallback)
 
-        return await self._run_with_reconnect(_inner)
+    async def get_screen_text(self, handle: TerminalHandle) -> str:
+        text, _ = await self.get_screen_render(handle)
+        return text
 
     async def stream_screen(self, handle: TerminalHandle):
         sent_initial = False
@@ -175,12 +181,11 @@ class ITerm2Backend:
                 session = await self._get_session(handle.session_id)
                 async with session.get_screen_streamer() as streamer:
                     if not sent_initial:
-                        initial = await self.get_screen_text(handle)
-                        yield initial
+                        yield await self.get_screen_render(handle)
                         sent_initial = True
                     while True:
-                        contents = await streamer.async_get()
-                        yield self._screen_to_text(contents)
+                        await streamer.async_get()
+                        yield await self.get_screen_render(handle)
             except Exception as exc:
                 if not self._is_connection_lost_error(exc):
                     raise
@@ -192,7 +197,6 @@ class ITerm2Backend:
         async def _inner():
             session = await self._get_session(handle.session_id)
             await session.async_send_text(text)
-
         await self._run_with_reconnect(_inner)
 
     async def focus(self, handle: TerminalHandle) -> None:
@@ -201,15 +205,12 @@ class ITerm2Backend:
             session = await self._get_session(handle.session_id)
             await app.async_activate()
             await session.async_activate(select_tab=True, order_window_front=True)
-
         await self._run_with_reconnect(_inner)
-
 
     async def rename(self, handle: TerminalHandle, name: str) -> None:
         async def _inner():
             session = await self._get_session(handle.session_id)
             await session.async_set_name(name)
-
         await self._run_with_reconnect(_inner)
 
     async def hide_app(self) -> None:
@@ -221,12 +222,7 @@ class ITerm2Backend:
                     return
             except Exception:
                 pass
-        subprocess.run(
-            ["/usr/bin/osascript", "-e", 'tell application "iTerm" to hide'],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
+        subprocess.run(["/usr/bin/osascript", "-e", 'tell application "iTerm" to hide'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
 
     async def maybe_quit_app(self) -> None:
         try:
@@ -248,18 +244,12 @@ class ITerm2Backend:
                 if has_non_anchor:
                     real_windows += 1
             if real_windows == 0 and len(app.terminal_windows) == 0:
-                subprocess.run(
-                    ["/usr/bin/osascript", "-e", 'tell application "iTerm" to quit'],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    check=False,
-                )
+                subprocess.run(["/usr/bin/osascript", "-e", 'tell application "iTerm" to quit'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
         except Exception:
             return
 
     async def close(self, handle: TerminalHandle) -> None:
         await self._terminate_tty_processes(handle)
-
         async def _inner():
             try:
                 session = await self._get_session(handle.session_id)
@@ -271,7 +261,6 @@ class ITerm2Backend:
                 await window.async_close(force=True)
             except Exception:
                 pass
-
         await self._run_with_reconnect(_inner)
 
     async def set_frame(self, handle: TerminalHandle, frame: TerminalFrame) -> None:
@@ -283,7 +272,6 @@ class ITerm2Backend:
             native_frame.size.width = frame.width
             native_frame.size.height = frame.height
             await window.async_set_frame(native_frame)
-
         await self._run_with_reconnect(_inner)
 
     async def get_frame(self, handle: TerminalHandle) -> TerminalFrame | None:
@@ -296,7 +284,6 @@ class ITerm2Backend:
                 width=float(native_frame.size.width),
                 height=float(native_frame.size.height),
             )
-
         return await self._run_with_reconnect(_inner)
 
     async def _terminate_tty_processes(self, handle: TerminalHandle) -> None:
@@ -309,12 +296,7 @@ class ITerm2Backend:
             return
         short = tty.replace('/dev/', '')
         try:
-            proc = subprocess.run(
-                ['bash', '-lc', f"ps -t {short} -o pid="],
-                capture_output=True,
-                text=True,
-                check=False,
-            )
+            proc = subprocess.run(['bash', '-lc', f"ps -t {short} -o pid="], capture_output=True, text=True, check=False)
             pids = [int(item) for item in proc.stdout.split() if item.strip()]
             for pid in pids:
                 try:
@@ -360,21 +342,13 @@ class ITerm2Backend:
 
     def _is_connection_lost_error(self, exc: Exception) -> bool:
         message = str(exc).lower()
-        patterns = [
-            'no close frame received or sent',
-            'connection closed',
-            'connection refused',
-            'socket closed',
-            'socket is closed',
-            'broken pipe',
-        ]
+        patterns = ['no close frame received or sent', 'connection closed', 'connection refused', 'socket closed', 'socket is closed', 'broken pipe']
         return any(pattern in message for pattern in patterns)
 
     async def _ensure_connection(self):
         async with self._lock:
             if self._connection is not None:
                 return self._connection
-
             self._launch_iterm2()
             last_error: Exception | None = None
             for _ in range(self._connect_retries):
@@ -391,9 +365,7 @@ class ITerm2Backend:
                     except Exception:
                         pass
                     await asyncio.sleep(self._retry_delay)
-            raise RuntimeError(
-                "无法连接 iTerm2 Python API。请确认已开启 Python API，并在 iTerm 中允许脚本授权请求。"
-            ) from last_error
+            raise RuntimeError("无法连接 iTerm2 Python API。请确认已开启 Python API，并在 iTerm 中允许脚本授权请求。") from last_error
 
     def _launch_iterm2(self) -> None:
         try:
@@ -424,14 +396,7 @@ class ITerm2Backend:
     def _request_cookie_and_key_via_osascript(self, app_name: str, timeout: int) -> str:
         script = f'tell application "iTerm2" to request cookie and key for app named "{app_name}"'
         try:
-            result = subprocess.run(
-                ["/usr/bin/osascript", "-"],
-                input=script.encode("utf-8"),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=timeout,
-                check=False,
-            )
+            result = subprocess.run(["/usr/bin/osascript", "-"], input=script.encode("utf-8"), stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, check=False)
         except subprocess.TimeoutExpired as exc:
             raise RuntimeError("iTerm 授权请求超时，请检查 iTerm 是否弹出了允许脚本访问的确认框") from exc
         stdout = result.stdout.decode("utf-8", errors="replace").strip()
@@ -464,3 +429,44 @@ class ITerm2Backend:
             line = contents.line(index).string.rstrip()
             lines.append(line)
         return "\n".join(lines).rstrip()
+
+    def _screen_to_html(self, contents) -> str:
+        if contents is None or contents.number_of_lines == 0:
+            return '<pre class="terminal-mirror">暂无输出</pre>'
+        html_lines = []
+        for index in range(contents.number_of_lines):
+            line = contents.line(index)
+            segments = []
+            text = line.string or ""
+            max_len = len(text)
+            for pos in range(max_len):
+                ch = html.escape(line.string_at(pos) or " ")
+                style = line.style_at(pos)
+                if style is None:
+                    segments.append(ch)
+                    continue
+                css = []
+                try:
+                    fg = style.fg_color
+                    if fg and fg.is_rgb:
+                        css.append(f"color: rgb({fg.rgb.red}, {fg.rgb.green}, {fg.rgb.blue})")
+                except Exception:
+                    pass
+                try:
+                    bg = style.bg_color
+                    if bg and bg.is_rgb:
+                        css.append(f"background-color: rgb({bg.rgb.red}, {bg.rgb.green}, {bg.rgb.blue})")
+                except Exception:
+                    pass
+                if getattr(style, 'bold', False):
+                    css.append('font-weight: 700')
+                if getattr(style, 'italic', False):
+                    css.append('font-style: italic')
+                if getattr(style, 'underline', False):
+                    css.append('text-decoration: underline')
+                if css:
+                    segments.append(f'<span style="{"; ".join(css)}">{ch}</span>')
+                else:
+                    segments.append(ch)
+            html_lines.append(''.join(segments) if segments else '&nbsp;')
+        return '<pre class="terminal-mirror terminal-mirror-rich">' + '\n'.join(html_lines) + '</pre>'

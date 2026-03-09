@@ -4,14 +4,58 @@ const state = {
   views: new Map(),
   layout: { count: 0, columns: 1, rows: 1 },
   layoutMode: 2,
+  layoutEngineMode: "grid",
   fitMode: false,
+  splitLayoutTree: null,
   draggedTerminalId: null,
+  hoverTargetPaneId: null,
+  hoverDropZone: null,
   editingTitleTerminalId: null,
   filter: "active",
   page: 1,
   pageSize: 6,
   focusedInputTerminalId: null,
 };
+
+const VIEW_STATE_STORAGE_KEY = "mitm-monitor-view-state";
+
+function saveViewState() {
+  try {
+    const payload = {
+      orderedTerminalIds: state.orderedTerminalIds,
+      layoutMode: state.layoutMode,
+      layoutEngineMode: state.layoutEngineMode,
+      fitMode: state.fitMode,
+      splitLayoutTree: state.splitLayoutTree,
+      sidebarCollapsed: dashboardSidebar?.classList.contains("is-collapsed") || false,
+    };
+    window.localStorage.setItem(VIEW_STATE_STORAGE_KEY, JSON.stringify(payload));
+  } catch {
+  }
+}
+
+function loadViewState() {
+  try {
+    const raw = window.localStorage.getItem(VIEW_STATE_STORAGE_KEY);
+    if (!raw) return;
+    const payload = JSON.parse(raw);
+    if (Array.isArray(payload.orderedTerminalIds)) {
+      state.orderedTerminalIds = payload.orderedTerminalIds;
+    }
+    if (payload.layoutMode === 1 || payload.layoutMode === 2) {
+      state.layoutMode = payload.layoutMode;
+    }
+    if (payload.layoutEngineMode === "grid" || payload.layoutEngineMode === "split") {
+      state.layoutEngineMode = payload.layoutEngineMode;
+    }
+    state.fitMode = Boolean(payload.fitMode);
+    state.splitLayoutTree = payload.splitLayoutTree || null;
+    if (payload.sidebarCollapsed && dashboardSidebar) {
+      dashboardSidebar.classList.add("is-collapsed");
+    }
+  } catch {
+  }
+}
 
 const grid = document.getElementById("grid");
 const stats = document.getElementById("stats");
@@ -149,6 +193,187 @@ function normalizeText(text) {
   return text.replace(/\n/g, "\r\n");
 }
 
+function createLayoutId(prefix = "node") {
+  return `${prefix}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function createTerminalLayoutNode(terminalId) {
+  return {
+    id: createLayoutId("terminal"),
+    type: "terminal",
+    terminalId,
+  };
+}
+
+function createSplitLayoutNode(direction, children) {
+  return {
+    id: createLayoutId("split"),
+    type: "split",
+    direction,
+    children,
+  };
+}
+
+function getActiveTerminalRecords() {
+  return state.orderedTerminalIds
+    .map((id) => state.terminals.get(id))
+    .filter((record) => record && record.status !== "closed");
+}
+
+function buildInitialSplitTree(terminals) {
+  const items = terminals.filter((record) => record.status !== "closed");
+  if (items.length === 0) return null;
+  if (items.length === 1) return createTerminalLayoutNode(items[0].id);
+  return items.slice(1).reduce((root, record) => {
+    return createSplitLayoutNode("row", [root, createTerminalLayoutNode(record.id)]);
+  }, createTerminalLayoutNode(items[0].id));
+}
+
+function getTerminalIdsFromTree(node) {
+  if (!node) return [];
+  if (node.type === "terminal") return [node.terminalId];
+  return node.children.flatMap((child) => getTerminalIdsFromTree(child));
+}
+
+function removeTerminalFromTree(node, terminalId) {
+  if (!node) return null;
+  if (node.type === "terminal") {
+    return node.terminalId === terminalId ? null : node;
+  }
+  const nextChildren = node.children
+    .map((child) => removeTerminalFromTree(child, terminalId))
+    .filter(Boolean);
+  if (nextChildren.length === 0) return null;
+  if (nextChildren.length === 1) return nextChildren[0];
+  return { ...node, children: nextChildren };
+}
+
+function zoneToDirection(zone) {
+  return zone === "left" || zone === "right" ? "row" : "column";
+}
+
+function insertWithZone(targetNode, draggedNode, zone) {
+  const direction = zoneToDirection(zone);
+  if (direction === "row") {
+    return createSplitLayoutNode(direction, zone === "left" ? [draggedNode, targetNode] : [targetNode, draggedNode]);
+  }
+  return createSplitLayoutNode(direction, zone === "top" ? [draggedNode, targetNode] : [targetNode, draggedNode]);
+}
+
+function insertTerminalBySplit(node, targetTerminalId, draggedNode, zone) {
+  if (!node) return draggedNode;
+  if (node.type === "terminal") {
+    if (node.terminalId === targetTerminalId) {
+      return insertWithZone(node, draggedNode, zone);
+    }
+    return node;
+  }
+  const direction = zoneToDirection(zone);
+  const targetChildIndex = node.children.findIndex((child) => child.type === "terminal" && child.terminalId === targetTerminalId);
+  if (targetChildIndex !== -1 && node.direction === direction) {
+    const nextChildren = [...node.children];
+    const insertIndex = (zone === "left" || zone === "top") ? targetChildIndex : targetChildIndex + 1;
+    nextChildren.splice(insertIndex, 0, draggedNode);
+    return { ...node, children: nextChildren };
+  }
+  return {
+    ...node,
+    children: node.children.map((child) => insertTerminalBySplit(child, targetTerminalId, draggedNode, zone)),
+  };
+}
+
+function appendTerminalToSplitTree(root, terminalId) {
+  const node = createTerminalLayoutNode(terminalId);
+  if (!root) return node;
+  if (root.type === "split" && root.direction === "row") {
+    return { ...root, children: [...root.children, node] };
+  }
+  return createSplitLayoutNode("row", [root, node]);
+}
+
+function syncSplitTree() {
+  if (state.layoutEngineMode !== "split") {
+    return;
+  }
+  const active = getActiveTerminalRecords();
+  if (!state.splitLayoutTree) {
+    state.splitLayoutTree = buildInitialSplitTree(active);
+    return;
+  }
+  const activeIds = active.map((record) => record.id);
+  const treeIds = getTerminalIdsFromTree(state.splitLayoutTree);
+  let nextTree = state.splitLayoutTree;
+  for (const treeId of treeIds) {
+    if (!activeIds.includes(treeId)) {
+      nextTree = removeTerminalFromTree(nextTree, treeId);
+    }
+  }
+  const nextIds = getTerminalIdsFromTree(nextTree);
+  for (const record of active) {
+    if (!nextIds.includes(record.id)) {
+      nextTree = appendTerminalToSplitTree(nextTree, record.id);
+    }
+  }
+  state.splitLayoutTree = nextTree;
+}
+
+function getDropZone(event, element) {
+  const rect = element.getBoundingClientRect();
+  const localX = event.clientX - rect.left;
+  const localY = event.clientY - rect.top;
+  const width = rect.width;
+  const height = rect.height;
+
+  const horizontalBand = Math.max(28, Math.min(96, width * 0.24));
+  const verticalBand = Math.max(28, Math.min(96, height * 0.24));
+
+  const inLeft = localX <= horizontalBand;
+  const inRight = localX >= width - horizontalBand;
+  const inTop = localY <= verticalBand;
+  const inBottom = localY >= height - verticalBand;
+
+  const candidates = [];
+  if (inLeft) candidates.push({ zone: 'left', value: localX });
+  if (inRight) candidates.push({ zone: 'right', value: width - localX });
+  if (inTop) candidates.push({ zone: 'top', value: localY });
+  if (inBottom) candidates.push({ zone: 'bottom', value: height - localY });
+
+  if (candidates.length === 0) {
+    return null;
+  }
+
+  candidates.sort((a, b) => a.value - b.value);
+  return candidates[0].zone;
+}
+
+function clearSplitDropPreview() {
+  state.hoverTargetPaneId = null;
+  state.hoverDropZone = null;
+  document.querySelectorAll('.wall-card').forEach((card) => {
+    card.classList.remove('split-preview-left', 'split-preview-right', 'split-preview-top', 'split-preview-bottom');
+  });
+}
+
+function applySplitDropPreview(card, terminalId, zone) {
+  clearSplitDropPreview();
+  if (!card || !zone) return;
+  state.hoverTargetPaneId = terminalId;
+  state.hoverDropZone = zone;
+  card.classList.add(`split-preview-${zone}`);
+}
+
+function commitSplitDrop(targetTerminalId, zone) {
+  if (!state.draggedTerminalId || !targetTerminalId || !zone) return;
+  if (state.draggedTerminalId === targetTerminalId) return;
+  const active = getActiveTerminalRecords();
+  const draggedNode = createTerminalLayoutNode(state.draggedTerminalId);
+  const removed = removeTerminalFromTree(state.splitLayoutTree || buildInitialSplitTree(active), state.draggedTerminalId);
+  state.splitLayoutTree = insertTerminalBySplit(removed, targetTerminalId, draggedNode, zone);
+  clearSplitDropPreview();
+  saveViewState();
+  refreshWall();
+}
+
 function escapeHtml(text) {
   return (text || "")
     .replaceAll("&", "&amp;")
@@ -163,7 +388,7 @@ function updateTerminalSnapshot(record, mount) {
     return;
   }
   const text = record.screenText && record.screenText.trim() ? record.screenText : "暂无输出";
-  mount.innerHTML = `<pre class="terminal-mirror">${escapeHtml(text)}</pre>`;
+  mount.innerHTML = record.screenHtml || `<pre class="terminal-mirror">${escapeHtml(text)}</pre>`;
   window.requestAnimationFrame(() => {
     mount.scrollTop = mount.scrollHeight;
     const mirror = mount.querySelector(".terminal-mirror");
@@ -181,12 +406,14 @@ function inferLayout(terminals) {
 }
 
 function applyLayout(_layoutFromServer = null) {
-  const active = [...state.terminals.values()].filter((record) => record.status !== "closed");
+  const active = getActiveTerminalRecords();
   const layout = inferLayout(active);
   state.layout = layout;
   grid.dataset.columns = String(Math.min(layout.columns || 1, 4));
   grid.dataset.rows = String(layout.rows || 1);
   grid.dataset.fitMode = layout.fitMode ? "true" : "false";
+  grid.dataset.engine = state.layoutEngineMode;
+  syncSplitTree();
 }
 
 function getFilteredTerminals() {
@@ -206,7 +433,7 @@ function shouldPaginateCurrentFilter() {
 
 function getPagedTerminals() {
   const filtered = getFilteredTerminals();
-  if (!shouldPaginateCurrentFilter()) {
+  if (state.layoutEngineMode === "split" || !shouldPaginateCurrentFilter()) {
     state.page = 1;
     return {
       items: filtered,
@@ -254,6 +481,7 @@ function reorderTerminals(sourceId, targetId) {
   const [item] = ids.splice(sourceIndex, 1);
   ids.splice(targetIndex, 0, item);
   state.orderedTerminalIds = ids;
+  saveViewState();
   refreshWall();
 }
 
@@ -325,20 +553,38 @@ function bindCardActions(card, record) {
   card.ondragend = () => {
     state.draggedTerminalId = null;
     card.classList.remove('is-dragging');
+    clearSplitDropPreview();
   };
   card.ondragover = (event) => {
     if (!state.draggedTerminalId || state.draggedTerminalId === record.id) {
       return;
     }
     event.preventDefault();
+    if (state.layoutEngineMode === 'split') {
+      const zone = getDropZone(event, card);
+      if (zone) {
+        applySplitDropPreview(card, record.id, zone);
+      } else {
+        clearSplitDropPreview();
+      }
+      return;
+    }
     card.classList.add('is-drag-over');
   };
   card.ondragleave = () => {
     card.classList.remove('is-drag-over');
+    if (state.layoutEngineMode === 'split') {
+      clearSplitDropPreview();
+    }
   };
   card.ondrop = (event) => {
     event.preventDefault();
     card.classList.remove('is-drag-over');
+    if (state.layoutEngineMode === 'split') {
+      const zone = getDropZone(event, card);
+      commitSplitDrop(record.id, zone);
+      return;
+    }
     reorderTerminals(state.draggedTerminalId, record.id);
   };
   const startRename = () => {
@@ -522,6 +768,38 @@ function bindCardActions(card, record) {
   };
 }
 
+function renderTerminalCard(record) {
+  return renderTerminal(record);
+}
+
+function renderLayoutNode(node) {
+  if (!node) {
+    return null;
+  }
+  if (node.type === 'terminal') {
+    const record = state.terminals.get(node.terminalId);
+    if (!record || record.status === 'closed') {
+      return null;
+    }
+    const pane = document.createElement('div');
+    pane.className = 'split-pane';
+    pane.dataset.terminalId = node.terminalId;
+    const card = renderTerminalCard(record);
+    pane.appendChild(card);
+    return pane;
+  }
+  const wrap = document.createElement('div');
+  wrap.className = `split-node split-node--${node.direction}`;
+  wrap.dataset.nodeId = node.id;
+  for (const child of node.children) {
+    const childElement = renderLayoutNode(child);
+    if (childElement) {
+      wrap.appendChild(childElement);
+    }
+  }
+  return wrap;
+}
+
 function renderTerminal(record) {
   let card = document.getElementById(`card-${record.id}`);
   if (!card) {
@@ -583,9 +861,14 @@ function renderToolbarExtras(pageInfo) {
   wallControls.innerHTML = `
     <div class="panel-title">布局 / 筛选 / 翻页</div>
     <div class="wall-control-actions">
-      <button data-layout="1" class="secondary ${state.layoutMode === 1 ? "is-active" : ""}">每行 1 个</button>
-      <button data-layout="2" class="secondary ${state.layoutMode === 2 ? "is-active" : ""}">每行 2 个</button>
-      <button id="toggle-fit-mode" class="secondary ${state.fitMode ? "is-active" : ""}">四终端铺满</button>
+      <button data-engine="grid" class="secondary ${state.layoutEngineMode === "grid" ? "is-active" : ""}">网格布局</button>
+      <button data-engine="split" class="secondary ${state.layoutEngineMode === "split" ? "is-active" : ""}">Split（Beta）</button>
+      <button id="reset-grid" class="ghost">重置为网格</button>
+    </div>
+    <div class="wall-control-actions">
+      <button data-layout="1" class="secondary ${state.layoutMode === 1 ? "is-active" : ""}" ${state.layoutEngineMode === "split" ? "disabled" : ""}>每行 1 个</button>
+      <button data-layout="2" class="secondary ${state.layoutMode === 2 ? "is-active" : ""}" ${state.layoutEngineMode === "split" ? "disabled" : ""}>每行 2 个</button>
+      <button id="toggle-fit-mode" class="secondary ${state.fitMode ? "is-active" : ""}" ${state.layoutEngineMode === "split" ? "disabled" : ""}>四终端铺满</button>
     </div>
     <div class="wall-control-actions">
       <button data-filter="active" class="secondary ${state.filter === "active" ? "is-active" : ""}">活跃</button>
@@ -600,15 +883,36 @@ function renderToolbarExtras(pageInfo) {
     </div>
   `;
 
+  wallControls.querySelectorAll("[data-engine]").forEach((button) => {
+    button.onclick = () => {
+      state.layoutEngineMode = button.dataset.engine;
+      if (state.layoutEngineMode === 'split') {
+        state.splitLayoutTree = buildInitialSplitTree(getActiveTerminalRecords());
+      }
+      saveViewState();
+      refreshWall();
+    };
+  });
+
+  wallControls.querySelector("#reset-grid").onclick = () => {
+    state.layoutEngineMode = 'grid';
+    state.splitLayoutTree = null;
+    clearSplitDropPreview();
+    saveViewState();
+    refreshWall();
+  };
+
   wallControls.querySelectorAll("[data-layout]").forEach((button) => {
     button.onclick = () => {
       state.layoutMode = Number(button.dataset.layout || 2);
+      saveViewState();
       refreshWall();
     };
   });
 
   wallControls.querySelector("#toggle-fit-mode").onclick = () => {
     state.fitMode = !state.fitMode;
+    saveViewState();
     refreshWall();
   };
 
@@ -616,17 +920,20 @@ function renderToolbarExtras(pageInfo) {
     button.onclick = () => {
       state.filter = button.dataset.filter;
       state.page = 1;
+      saveViewState();
       refreshWall();
     };
   });
 
   wallControls.querySelector("#prev-page").onclick = () => {
     state.page = Math.max(1, state.page - 1);
+    saveViewState();
     refreshWall();
   };
 
   wallControls.querySelector("#next-page").onclick = () => {
     state.page = Math.min(pageInfo.totalPages, state.page + 1);
+    saveViewState();
     refreshWall();
   };
 
@@ -647,10 +954,17 @@ function renderToolbarExtras(pageInfo) {
 function refreshWall(layout = null) {
   applyLayout(layout);
   const pageInfo = getPagedTerminals();
+  grid.innerHTML = "";
   if (pageInfo.items.length === 0) {
     renderEmptyState();
+  } else if (state.layoutEngineMode === 'split' && state.splitLayoutTree) {
+    const treeElement = renderLayoutNode(state.splitLayoutTree);
+    if (treeElement) {
+      grid.appendChild(treeElement);
+    } else {
+      renderEmptyState();
+    }
   } else {
-    grid.innerHTML = "";
     for (const record of pageInfo.items) {
       grid.appendChild(renderTerminal(record));
     }
@@ -665,15 +979,19 @@ function applySnapshot(terminals, layout = null) {
     state.terminals.set(record.id, record);
   }
   syncTerminalOrder(terminals);
+  syncSplitTree();
   refreshWall(layout);
 }
 
 async function loadInitialState() {
+  loadViewState();
+  applySidebarState();
   const [terminalsData, healthData] = await Promise.all([request("/api/terminals"), request("/api/health")]);
   applySnapshot(terminalsData.items || [], terminalsData.layout || null);
   if (buildVersion && healthData.version) {
     buildVersion.textContent = `v${healthData.version}`;
   }
+  saveViewState();
 }
 
 function connectWebSocket() {
@@ -692,6 +1010,7 @@ function connectWebSocket() {
       if (!state.orderedTerminalIds.includes(payload.terminal.id)) {
         state.orderedTerminalIds.push(payload.terminal.id);
       }
+      syncSplitTree();
       refreshWall(payload.layout || null);
       return;
     }
@@ -768,6 +1087,7 @@ if (sidebarToggle) {
   sidebarToggle.onclick = () => {
     dashboardSidebar?.classList.toggle("is-collapsed");
     applySidebarState();
+    saveViewState();
   };
   applySidebarState();
 }

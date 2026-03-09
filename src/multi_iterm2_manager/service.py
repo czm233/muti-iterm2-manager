@@ -192,12 +192,12 @@ class DashboardService:
     async def refresh_terminal(self, terminal_id: str) -> dict:
         record = self._get_record(terminal_id)
         try:
-            text = await self.backend.get_screen_text(record.handle)
+            text, screen_html = await self.backend.get_screen_render(record.handle)
         except Exception as exc:
             if self._is_missing_terminal_error(exc):
                 return await self._mark_terminal_closed(record, reason="真实窗口已被手动关闭")
             raise
-        self._apply_screen_text(record, text, is_live=False)
+        self._apply_screen_text(record, text, screen_html, is_live=False)
         await self._broadcast(self.record_event(terminal_id))
         return record.to_dict()
 
@@ -272,8 +272,8 @@ class DashboardService:
     async def _monitor_terminal(self, terminal_id: str) -> None:
         record = self._get_record(terminal_id)
         try:
-            async for text in self.backend.stream_screen(record.handle):
-                self._apply_screen_text(record, text, is_live=True)
+            async for text, screen_html in self.backend.stream_screen(record.handle):
+                self._apply_screen_text(record, text, screen_html, is_live=True)
                 await self._broadcast(self.record_event(terminal_id))
         except asyncio.CancelledError:
             raise
@@ -315,9 +315,10 @@ class DashboardService:
         ]
         return any(pattern in message for pattern in patterns)
 
-    def _apply_screen_text(self, record: TerminalRecord, text: str, is_live: bool) -> None:
+    def _apply_screen_text(self, record: TerminalRecord, text: str, screen_html: str, is_live: bool) -> None:
         status, markers, summary = analyze_screen_text(text)
         record.screen_text = text
+        record.screen_html = screen_html
         record.status = status
         record.markers = markers
         record.summary = summary
