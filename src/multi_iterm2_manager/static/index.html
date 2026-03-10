@@ -10,43 +10,59 @@
   <body>
     <div class="page">
       <div class="dashboard-layout">
-        <aside class="dashboard-sidebar">
-          <header class="hero">
-            <div class="hero-copy">
-              <div class="hero-meta">
-                <span id="ws-status" class="status-pill status-connecting">连接中</span>
-                <span id="build-version" class="status-pill">{{BUILD_VERSION}}</span>
-                <button id="sidebar-toggle" class="status-pill sidebar-toggle" type="button" aria-label="折叠侧栏">«</button>
+        <header class="hero topbar">
+          <div class="topbar-brand">
+            <h1>iTerm 监控墙</h1>
+            <p class="eyebrow">Monitor Wall</p>
+            <span id="build-version" class="status-pill">{{BUILD_VERSION}}</span>
+            <span id="ws-status" class="status-pill status-connecting">连接中</span>
+          </div>
+
+          <div class="topbar-menus">
+            <details class="topbar-menu">
+              <summary>任务</summary>
+              <div class="topbar-menu-panel topbar-menu-panel--form">
+                <div class="panel-title">创建新任务</div>
+                <form id="create-form" class="create-form topbar-form">
+                  <input id="name" name="name" type="text" placeholder="任务名称，例如：Claude 任务 A（可留空）" />
+                  <button type="submit">启动并纳入监控</button>
+                </form>
+                <div class="topbar-menu-actions">
+                  <button id="create-demo">创建示例任务</button>
+                </div>
+                <div class="panel-divider"></div>
+                <div class="panel-title">接管已有终端</div>
+                <div id="adopt-session-list" class="adopt-session-list">
+                  <button id="scan-sessions" class="secondary">扫描可用终端</button>
+                </div>
               </div>
-              <p class="eyebrow">Monitor Wall</p>
-              <h1>iTerm 监控墙</h1>
-            </div>
-            <div class="hero-actions">
-              <button id="create-demo">创建示例任务</button>
-              <button id="monitor-mode" class="secondary">收起所有</button>
-              <button id="refresh-all" class="secondary">刷新全部</button>
-              <button id="close-all" class="ghost">关闭全部</button>
-            </div>
-          </header>
+            </details>
 
-          <section class="toolbar panel">
-            <div class="panel-title">创建新任务</div>
-            <form id="create-form" class="create-form">
-              <input id="name" name="name" type="text" placeholder="任务名称，例如：Claude 任务 A（可留空）" />
-              <button type="submit">启动并纳入监控</button>
-            </form>
-          </section>
+            <details class="topbar-menu topbar-menu--wide">
+              <summary>布局</summary>
+              <section id="wall-controls" class="topbar-menu-panel wall-controls"></section>
+            </details>
 
-          <section id="wall-controls" class="panel wall-controls"></section>
+            <details class="topbar-menu">
+              <summary>概览</summary>
+              <div class="topbar-menu-panel">
+                <div class="panel-title">监控概览</div>
+                <div id="stats" class="stats"></div>
+              </div>
+            </details>
 
-          <section class="status-bar panel">
-            <div class="panel-title">监控概览</div>
-            <div id="stats" class="stats"></div>
-          </section>
-        </aside>
+            <details class="topbar-menu">
+              <summary>操作</summary>
+              <div class="topbar-menu-panel topbar-menu-actions">
+                <button id="monitor-mode" class="secondary">收起所有</button>
+                <button id="refresh-all" class="secondary">刷新全部</button>
+                <button id="close-all" class="ghost">关闭全部</button>
+              </div>
+            </details>
+          </div>
+        </header>
 
         <section class="monitor-stage">
-          <div id="hero-dock" class="hero-dock" hidden></div>
           <main id="grid" class="monitor-wall"></main>
         </section>
       </div>

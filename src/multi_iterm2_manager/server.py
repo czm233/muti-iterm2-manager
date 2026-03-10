@@ -53,6 +53,11 @@ class GridLayoutPayload(BaseModel):
     padding: float = Field(default=36.0, ge=0.0, le=128.0)
 
 
+class AdoptPayload(BaseModel):
+    session_id: str
+    name: str | None = Field(default=None, max_length=60)
+
+
 @app.on_event("startup")
 async def on_startup() -> None:
     await service.start()
@@ -160,6 +165,38 @@ async def close_terminal(terminal_id: str) -> dict:
         return {"item": await service.close_terminal(terminal_id), "layout": service.monitor_layout()}
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/terminals/{terminal_id}/detach")
+async def detach_terminal(terminal_id: str) -> dict:
+    try:
+        return await service.detach_terminal(terminal_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.get("/api/iterm2/sessions")
+async def scan_sessions() -> dict:
+    try:
+        sessions = await service.scan_sessions()
+        return {"items": sessions}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/terminals/adopt")
+async def adopt_terminal(payload: AdoptPayload) -> dict:
+    try:
+        terminal = await service.adopt_terminal(payload.session_id, payload.name)
+        return {"item": terminal, "layout": service.monitor_layout()}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 

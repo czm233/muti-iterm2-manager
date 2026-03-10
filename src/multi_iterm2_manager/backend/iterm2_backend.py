@@ -22,7 +22,6 @@ MANAGED_OWNER_VAR = "user.mitm_owner"
 MANAGED_OWNER_VALUE = "multi-iterm2-manager"
 ANCHOR_ROLE_VAR = "user.mitm_role"
 ANCHOR_ROLE_VALUE = "anchor"
-ANCHOR_TERMINAL_NAME = "系统终端（请勿关闭）"
 
 
 class ITerm2Backend:
@@ -44,6 +43,9 @@ class ITerm2Backend:
                 pass
         self._connection = None
         self._app = None
+
+    def is_alive(self) -> bool:
+        return self._is_iterm2_running()
 
     async def ping(self) -> bool:
         try:
@@ -84,39 +86,6 @@ class ITerm2Backend:
         await self.maybe_quit_app()
         return len(handles)
 
-    async def ensure_anchor_terminal(self) -> None:
-        async def _inner():
-            _, app = await self._get_runtime()
-            await app.async_refresh()
-            for window in list(app.terminal_windows):
-                for tab in list(window.tabs):
-                    for session in list(tab.sessions):
-                        try:
-                            owner = await session.async_get_variable(MANAGED_OWNER_VAR)
-                            role = await session.async_get_variable(ANCHOR_ROLE_VAR)
-                        except Exception:
-                            owner = None
-                            role = None
-                        if owner == MANAGED_OWNER_VALUE and role == ANCHOR_ROLE_VALUE:
-                            return
-            window = await iterm2.Window.async_create(self._connection, command="/bin/zsh -l")
-            if window is None:
-                return
-            await app.async_refresh()
-            fresh_window = app.get_window_by_id(window.window_id) or window
-            tab = fresh_window.current_tab
-            if tab is None or tab.current_session is None:
-                return
-            session = tab.current_session
-            try:
-                await session.async_set_variable(MANAGED_FLAG_VAR, True)
-                await session.async_set_variable(MANAGED_OWNER_VAR, MANAGED_OWNER_VALUE)
-                await session.async_set_variable(ANCHOR_ROLE_VAR, ANCHOR_ROLE_VALUE)
-                await session.async_set_name(ANCHOR_TERMINAL_NAME)
-            except Exception:
-                pass
-        await self._run_with_reconnect(_inner)
-
     async def create_terminal(self, params: CreateTerminalParams) -> TerminalHandle:
         async def _inner():
             connection, app = await self._get_runtime()
@@ -147,13 +116,34 @@ class ITerm2Backend:
             return handle
         return await self._run_with_reconnect(_inner)
 
+    # 最大捕获行数（包括滚动回看历史）
+    SCREEN_MAX_LINES = 500
+
     async def get_screen_render(self, handle: TerminalHandle) -> tuple[str, str]:
         async def _inner():
             session = await self._get_session(handle.session_id)
+            line_info = await session.async_get_line_info()
+            history = line_info.scrollback_buffer_height
+            height = line_info.mutable_area_height
+            overflow = line_info.overflow
+            total = history + height
+            max_lines = min(total, self.SCREEN_MAX_LINES)
+            start_y = overflow + total - max_lines
+            end_y = overflow + total
+            print(f"[DEBUG] session={handle.session_id} history={history} height={height} overflow={overflow} total={total} max_lines={max_lines}")
+
+            coord_range = iterm2.api_pb2.CoordRange()
+            coord_range.start.x = 0
+            coord_range.start.y = start_y
+            coord_range.end.x = 0
+            coord_range.end.y = end_y
+            wcr = iterm2.api_pb2.WindowedCoordRange()
+            wcr.coord_range.CopyFrom(coord_range)
+
             response = await iterm2.rpc.async_get_screen_contents(
                 connection=self._connection,
                 session=session.session_id,
-                windowed_coord_range=None,
+                windowed_coord_range=wcr,
                 style=True,
             )
             if response.get_buffer_response.status != iterm2.api_pb2.GetBufferResponse.Status.Value("OK"):
@@ -184,13 +174,24 @@ class ITerm2Backend:
                         yield await self.get_screen_render(handle)
                         sent_initial = True
                     while True:
-                        await streamer.async_get()
+                        try:
+                            await asyncio.wait_for(streamer.async_get(), timeout=10)
+                        except asyncio.TimeoutError:
+                            if not self._is_iterm2_running():
+                                raise RuntimeError("无法连接 iTerm2 — 应用未在运行")
+                        # 每次都检查 session 是否还存在（检测窗口关闭）
+                        try:
+                            await self._get_session(handle.session_id)
+                        except Exception:
+                            raise RuntimeError(f"找不到 session: {handle.session_id}")
                         yield await self.get_screen_render(handle)
             except Exception as exc:
+                print(f"[stream_screen] 异常: {type(exc).__name__}: {exc}", flush=True)
+                print(f"[stream_screen] _is_connection_lost={self._is_connection_lost_error(exc)}", flush=True)
                 if not self._is_connection_lost_error(exc):
                     raise
                 await self._reset_runtime()
-                await self._ensure_connection()
+                await self._ensure_connection(launch=False)
                 await asyncio.sleep(0.2)
 
     async def send_text(self, handle: TerminalHandle, text: str) -> None:
@@ -206,6 +207,90 @@ class ITerm2Backend:
             await app.async_activate()
             await session.async_activate(select_tab=True, order_window_front=True)
         await self._run_with_reconnect(_inner)
+
+    async def detach(self, handle: TerminalHandle) -> None:
+        async def _inner():
+            _, app = await self._get_runtime()
+            session = await self._get_session(handle.session_id)
+            # 先清除管理标记
+            await session.async_set_variable(MANAGED_FLAG_VAR, "")
+            await session.async_set_variable(MANAGED_OWNER_VAR, "")
+            await session.async_set_variable(ANCHOR_ROLE_VAR, "")
+            # 只激活目标 session 的窗口，不调用 app.async_activate()
+            # 避免锚点终端等其他窗口一起显现
+            await session.async_activate(select_tab=True, order_window_front=True)
+        await self._run_with_reconnect(_inner)
+
+    async def scan_unmanaged_sessions(self) -> list[dict]:
+        async def _inner():
+            _, app = await self._get_runtime()
+            await app.async_refresh()
+            results: list[dict] = []
+            for window in list(app.terminal_windows):
+                for tab in list(window.tabs):
+                    for session in list(tab.sessions):
+                        if await self._is_managed_session(session):
+                            continue
+                        try:
+                            role = await session.async_get_variable(ANCHOR_ROLE_VAR)
+                        except Exception:
+                            role = None
+                        if role == ANCHOR_ROLE_VALUE:
+                            continue
+                        try:
+                            name = await session.async_get_variable("name") or session.session_id
+                        except Exception:
+                            name = session.session_id
+                        try:
+                            title = await session.async_get_variable("terminalTitle") or ""
+                        except Exception:
+                            title = ""
+                        results.append({
+                            "session_id": session.session_id,
+                            "window_id": window.window_id,
+                            "tab_id": tab.tab_id,
+                            "name": name,
+                            "title": title,
+                        })
+            return results
+        return await self._run_with_reconnect(_inner)
+
+    async def adopt(self, session_id: str, name: str | None = None) -> TerminalHandle:
+        async def _inner():
+            _, app = await self._get_runtime()
+            await app.async_refresh()
+            target_session = None
+            target_window_id = None
+            target_tab_id = None
+            for window in list(app.terminal_windows):
+                for tab in list(window.tabs):
+                    for session in list(tab.sessions):
+                        if session.session_id == session_id:
+                            target_session = session
+                            target_window_id = window.window_id
+                            target_tab_id = tab.tab_id
+                            break
+                    if target_session:
+                        break
+                if target_session:
+                    break
+            if target_session is None:
+                raise ValueError(f"找不到 session: {session_id}")
+            await target_session.async_set_variable(MANAGED_FLAG_VAR, True)
+            await target_session.async_set_variable(MANAGED_OWNER_VAR, MANAGED_OWNER_VALUE)
+            await target_session.async_set_variable(ANCHOR_ROLE_VAR, "managed")
+            if name:
+                try:
+                    await target_session.async_set_name(name)
+                except Exception:
+                    pass
+            await self.hide_app()
+            return TerminalHandle(
+                window_id=target_window_id,
+                session_id=session_id,
+                tab_id=target_tab_id,
+            )
+        return await self._run_with_reconnect(_inner)
 
     async def rename(self, handle: TerminalHandle, name: str) -> None:
         async def _inner():
@@ -328,7 +413,7 @@ class ITerm2Backend:
             if not self._is_connection_lost_error(exc):
                 raise
             await self._reset_runtime()
-            await self._ensure_connection()
+            await self._ensure_connection(launch=False)
             return await asyncio.wait_for(callback(), timeout=8)
 
     async def _reset_runtime(self) -> None:
@@ -345,11 +430,14 @@ class ITerm2Backend:
         patterns = ['no close frame received or sent', 'connection closed', 'connection refused', 'socket closed', 'socket is closed', 'broken pipe']
         return any(pattern in message for pattern in patterns)
 
-    async def _ensure_connection(self):
+    async def _ensure_connection(self, *, launch: bool = True):
         async with self._lock:
             if self._connection is not None:
                 return self._connection
-            self._launch_iterm2()
+            if launch:
+                self._launch_iterm2()
+            elif not self._is_iterm2_running():
+                raise RuntimeError("无法连接 iTerm2 — 应用未在运行")
             last_error: Exception | None = None
             for _ in range(self._connect_retries):
                 try:
@@ -359,6 +447,8 @@ class ITerm2Backend:
                     return self._connection
                 except Exception as exc:
                     last_error = exc
+                    if not launch and not self._is_iterm2_running():
+                        break
                     self._clear_auth_env()
                     try:
                         self._prime_auth_env(force=True)
@@ -367,7 +457,15 @@ class ITerm2Backend:
                     await asyncio.sleep(self._retry_delay)
             raise RuntimeError("无法连接 iTerm2 Python API。请确认已开启 Python API，并在 iTerm 中允许脚本授权请求。") from last_error
 
+    def _is_iterm2_running(self) -> bool:
+        try:
+            result = subprocess.run(["pgrep", "-x", "iTerm2"], capture_output=True, check=False)
+            return result.returncode == 0
+        except Exception:
+            return False
+
     def _launch_iterm2(self) -> None:
+        print("[backend] _launch_iterm2() 被调用!", flush=True)
         try:
             subprocess.run(["/usr/bin/open", "-a", "iTerm"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
         except Exception:
@@ -380,6 +478,7 @@ class ITerm2Backend:
             return
 
     def _prime_auth_env(self, force: bool) -> None:
+        print(f"[backend] _prime_auth_env(force={force}) 被调用!", flush=True)
         if not force and os.environ.get("ITERM2_COOKIE") and os.environ.get("ITERM2_KEY"):
             return
         if force:
@@ -421,20 +520,39 @@ class ITerm2Backend:
             raise RuntimeError(f"找不到 window: {window_id}")
         return window
 
+    def _is_visually_blank_line(self, text: str | None) -> bool:
+        if not text:
+            return True
+        normalized = text.replace("\xa0", " ").replace("\u2007", " ").replace("\u202f", " ")
+        return not normalized.strip()
+
+    def _visible_line_count(self, contents) -> int:
+        if contents is None:
+            return 0
+        last_visible_index = -1
+        for index in range(contents.number_of_lines):
+            line = contents.line(index)
+            text = line.string if line is not None else ""
+            if not self._is_visually_blank_line(text):
+                last_visible_index = index
+        return last_visible_index + 1
+
     def _screen_to_text(self, contents) -> str:
         if contents is None:
             return ""
         lines: list[str] = []
-        for index in range(contents.number_of_lines):
+        visible_count = self._visible_line_count(contents)
+        for index in range(visible_count):
             line = contents.line(index).string.rstrip()
             lines.append(line)
         return "\n".join(lines).rstrip()
 
     def _screen_to_html(self, contents) -> str:
-        if contents is None or contents.number_of_lines == 0:
+        visible_count = self._visible_line_count(contents)
+        if contents is None or visible_count == 0:
             return '<pre class="terminal-mirror">暂无输出</pre>'
         html_lines = []
-        for index in range(contents.number_of_lines):
+        for index in range(visible_count):
             line = contents.line(index)
             segments = []
             text = line.string or ""

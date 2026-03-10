@@ -21,6 +21,7 @@ class DashboardService:
         self._subscribers: set[asyncio.Queue[dict]] = set()
         self._lock = asyncio.Lock()
         self.backend: Any = self._build_backend()
+        self._watchdog_task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
         await self.backend.start()
@@ -32,8 +33,14 @@ class DashboardService:
             await asyncio.wait_for(self.backend.maybe_quit_app(), timeout=3)
         except Exception:
             pass
+        self._watchdog_task = asyncio.create_task(self._watchdog_loop())
 
     async def stop(self) -> None:
+        if self._watchdog_task is not None:
+            self._watchdog_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._watchdog_task
+            self._watchdog_task = None
         try:
             await self.close_all_terminals()
         except Exception:
@@ -93,10 +100,6 @@ class DashboardService:
 
     async def create_terminal(self, params: CreateTerminalParams) -> dict:
         final_name = (params.name or '').strip() or self._next_default_name()
-        try:
-            await asyncio.wait_for(self.backend.ensure_anchor_terminal(), timeout=6)
-        except Exception:
-            pass
         handle = await self.backend.create_terminal(CreateTerminalParams(name=final_name, command=params.command, profile=params.profile, frame=params.frame))
         frame = await self.backend.get_frame(handle)
         record = TerminalRecord(
@@ -173,20 +176,49 @@ class DashboardService:
         if record.status != TerminalStatus.closed:
             try:
                 await self.backend.close(record.handle)
-            except Exception as exc:
-                if not self._is_missing_terminal_error(exc):
-                    raise
+            except Exception:
+                pass
         return await self._mark_terminal_closed(record)
+
+    async def detach_terminal(self, terminal_id: str) -> dict:
+        record = self._get_record(terminal_id)
+        if record.status == TerminalStatus.closed:
+            raise ValueError("终端已关闭，无法解绑")
+        await self.backend.detach(record.handle)
+        task = self.monitor_tasks.pop(record.id, None)
+        if task is not None:
+            task.cancel()
+        async with self._lock:
+            del self.records[record.id]
+        await self._broadcast(self.snapshot_event())
+        return {"detached": True, "terminalId": terminal_id}
+
+    async def scan_sessions(self) -> list[dict]:
+        return await self.backend.scan_unmanaged_sessions()
+
+    async def adopt_terminal(self, session_id: str, name: str | None = None) -> dict:
+        final_name = (name or '').strip() or self._next_default_name()
+        handle = await self.backend.adopt(session_id, final_name)
+        frame = await self.backend.get_frame(handle)
+        record = TerminalRecord(
+            id=new_terminal_id(),
+            name=final_name,
+            handle=handle,
+            frame=frame,
+        )
+        async with self._lock:
+            self.records[record.id] = record
+        await self.refresh_terminal(record.id)
+        self._start_monitor(record.id)
+        await self.enter_monitor_mode()
+        await self._broadcast(self.record_event(record.id))
+        return record.to_dict()
 
     async def close_all_terminals(self) -> list[dict]:
         target_ids = [record.id for record in self.records.values() if record.status != TerminalStatus.closed]
         result: list[dict] = []
         for terminal_id in target_ids:
             result.append(await self.close_terminal(terminal_id))
-        try:
-            await asyncio.wait_for(self.backend.ensure_anchor_terminal(), timeout=6)
-        except Exception:
-            pass
         return result
 
     async def refresh_terminal(self, terminal_id: str) -> dict:
@@ -312,6 +344,7 @@ class DashboardService:
             "no such window",
             "no such session",
             "session ended",
+            "无法连接",
         ]
         return any(pattern in message for pattern in patterns)
 
@@ -345,6 +378,27 @@ class DashboardService:
             return ITerm2Backend()
         except Exception:
             return MockTerminalBackend()
+
+    async def _watchdog_loop(self) -> None:
+        while True:
+            await asyncio.sleep(5)
+            alive = not hasattr(self.backend, 'is_alive') or self.backend.is_alive()
+            print(f"[watchdog] iTerm2 alive={alive}, terminals={len(self.records)}", flush=True)
+            if alive:
+                continue
+            active = [r for r in self.records.values() if r.status != TerminalStatus.closed]
+            if not active:
+                continue
+            print(f"[watchdog] iTerm2 已退出，关闭 {len(active)} 个终端", flush=True)
+            for record in active:
+                record.status = TerminalStatus.closed
+                record.updated_at = self._now()
+                record.is_live = False
+                record.summary = "iTerm2 已退出"
+                task = self.monitor_tasks.pop(record.id, None)
+                if task is not None:
+                    task.cancel()
+            await self._broadcast(self.snapshot_event())
 
     def _now(self) -> str:
         return datetime.now().isoformat(timespec="seconds")

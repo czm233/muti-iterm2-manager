@@ -19,13 +19,16 @@ class MockTerminalBackend:
     async def stop(self) -> None:
         return None
 
+    async def ping(self) -> bool:
+        return True
+
+    def is_alive(self) -> bool:
+        return True
+
     async def cleanup_managed_terminals(self) -> int:
         count = len(self._items)
         self._items.clear()
         return count
-
-    async def ensure_anchor_terminal(self) -> None:
-        return None
 
     async def create_terminal(self, params: CreateTerminalParams) -> TerminalHandle:
         index = next(self._counter)
@@ -59,7 +62,7 @@ class MockTerminalBackend:
             item = self._items[handle.session_id]
             now = datetime.now().strftime("%H:%M:%S")
             item["text"] = str(item["text"]) + f"[{now}] 模拟输出仍在刷新\n"
-            yield str(item["text"])
+            yield await self.get_screen_render(handle)
             await asyncio.sleep(2)
 
     async def send_text(self, handle: TerminalHandle, text: str) -> None:
@@ -82,6 +85,28 @@ class MockTerminalBackend:
 
     async def close(self, handle: TerminalHandle) -> None:
         self._items.pop(handle.session_id, None)
+
+    async def detach(self, handle: TerminalHandle) -> None:
+        self._items.pop(handle.session_id, None)
+
+    async def scan_unmanaged_sessions(self) -> list[dict]:
+        return []
+
+    async def adopt(self, session_id: str, name: str | None = None) -> TerminalHandle:
+        index = next(self._counter)
+        handle = TerminalHandle(
+            window_id=f"mock-window-{index}",
+            session_id=session_id,
+            tab_id=f"mock-tab-{index}",
+        )
+        frame = build_maximized_frame()
+        self._items[session_id] = {
+            "name": name or f"adopted-{session_id}",
+            "command": "",
+            "text": f"[adopted] mock terminal {session_id}\n",
+            "frame": frame,
+        }
+        return handle
 
     async def set_frame(self, handle: TerminalHandle, frame: TerminalFrame) -> None:
         if handle.session_id in self._items:
