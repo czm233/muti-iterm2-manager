@@ -15,6 +15,10 @@
 - 用户不需要主动记忆或输入 BMAD 命令。
 - 代理应主动完成“理解问题 → 选择合适 BMAD 流程 → 执行/解释结果”这一层路由。
 - 在回复中可简短说明“这次我按哪个 BMAD 流程处理”，但不要把回复变成一堆命令教学，除非用户明确要求解释。
+- 只要本次对仓库代码做了实际修改，就必须同步更新项目版本号：
+  - `src/multi_iterm2_manager/__init__.py` 中的 `__version__`
+  - `pyproject.toml` 中的 `version`
+  - 页面顶部显示的版本号依赖上述值，不能漏改
 
 ## 例外情况
 
@@ -32,4 +36,3 @@
 - 较大新功能：优先考虑从 `bmad-bmm-create-prd` 开始的完整流程
 - 重构或架构调整：优先考虑 `bmad-bmm-create-architecture`
 - 迭代规划：优先考虑 `bmad-bmm-sprint-planning`
-

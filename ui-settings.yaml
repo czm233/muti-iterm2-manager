@@ -1,0 +1,12 @@
+ui:
+  dashboard_padding_px: 4
+  dashboard_gap_px: 6
+  monitor_grid_gap_px: 5
+  wall_card_padding_px: 10
+  wall_card_border_radius_px: 10
+  wall_card_border_width_px: 1.0
+  wall_card_terminal_border_width_px: 1.0
+  split_resizer_hit_area_px: 4
+  split_resizer_line_width_px: 0
+  grid_resizer_hit_area_px: 16
+  grid_resizer_line_width_px: 0

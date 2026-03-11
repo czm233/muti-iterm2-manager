@@ -55,6 +55,8 @@ class TerminalRecord:
     updated_at: str = field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))
     is_live: bool = False
     last_error: str | None = None
+    content_hash: str = ""
+    content_stable_since: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return {

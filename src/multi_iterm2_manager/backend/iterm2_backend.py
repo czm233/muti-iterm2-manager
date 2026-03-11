@@ -17,6 +17,62 @@ except Exception:
 
 import iterm2  # type: ignore
 
+# ANSI 256 色调色板：索引 0-255 对应的 (r, g, b) 值
+_ANSI_256_PALETTE: list[tuple[int, int, int]] = [
+    # 索引 0-7：标准 ANSI 8 色
+    (0, 0, 0),        # 0 黑
+    (205, 0, 0),      # 1 红
+    (0, 205, 0),      # 2 绿
+    (205, 205, 0),    # 3 黄
+    (0, 0, 238),      # 4 蓝
+    (205, 0, 205),    # 5 洋红
+    (0, 205, 205),    # 6 青
+    (229, 229, 229),  # 7 白
+    # 索引 8-15：亮色 ANSI 8 色
+    (127, 127, 127),  # 8  亮黑(灰)
+    (255, 0, 0),      # 9  亮红
+    (0, 255, 0),      # 10 亮绿
+    (255, 255, 0),    # 11 亮黄
+    (92, 92, 255),    # 12 亮蓝
+    (255, 0, 255),    # 13 亮洋红
+    (0, 255, 255),    # 14 亮青
+    (255, 255, 255),  # 15 亮白
+]
+
+# 索引 16-231：216 色立方体（6x6x6）
+for _i in range(216):
+    _r = _i // 36
+    _g = (_i % 36) // 6
+    _b = _i % 6
+    _ANSI_256_PALETTE.append((
+        _r * 40 + 55 if _r else 0,
+        _g * 40 + 55 if _g else 0,
+        _b * 40 + 55 if _b else 0,
+    ))
+
+# 索引 232-255：24 级灰度
+for _i in range(24):
+    _v = 8 + _i * 10
+    _ANSI_256_PALETTE.append((_v, _v, _v))
+
+
+def _color_to_css(color, css_prop: str) -> str | None:
+    """将 CellStyle.Color 转为 CSS 颜色字符串，返回 None 表示使用默认色"""
+    if color is None:
+        return None
+    try:
+        if color.is_rgb:
+            return f"{css_prop}: rgb({color.rgb.red}, {color.rgb.green}, {color.rgb.blue})"
+        if color.is_standard:
+            idx = color.standard
+            if 0 <= idx < 256:
+                r, g, b = _ANSI_256_PALETTE[idx]
+                return f"{css_prop}: rgb({r}, {g}, {b})"
+    except Exception:
+        pass
+    return None
+
+
 MANAGED_FLAG_VAR = "user.mitm_managed"
 MANAGED_OWNER_VAR = "user.mitm_owner"
 MANAGED_OWNER_VALUE = "multi-iterm2-manager"
@@ -130,15 +186,13 @@ class ITerm2Backend:
             max_lines = min(total, self.SCREEN_MAX_LINES)
             start_y = overflow + total - max_lines
             end_y = overflow + total
-            print(f"[DEBUG] session={handle.session_id} history={history} height={height} overflow={overflow} total={total} max_lines={max_lines}")
 
-            coord_range = iterm2.api_pb2.CoordRange()
-            coord_range.start.x = 0
-            coord_range.start.y = start_y
-            coord_range.end.x = 0
-            coord_range.end.y = end_y
-            wcr = iterm2.api_pb2.WindowedCoordRange()
-            wcr.coord_range.CopyFrom(coord_range)
+
+            coord_range = iterm2.util.CoordRange(
+                iterm2.util.Point(0, start_y),
+                iterm2.util.Point(0, end_y),
+            )
+            wcr = iterm2.util.WindowedCoordRange(coord_range)
 
             response = await iterm2.rpc.async_get_screen_contents(
                 connection=self._connection,
@@ -152,7 +206,8 @@ class ITerm2Backend:
             return self._screen_to_text(contents), self._screen_to_html(contents)
         try:
             return await self._run_with_reconnect(_inner)
-        except Exception:
+        except Exception as exc:
+            print(f"[get_screen_render] fallback: {type(exc).__name__}: {exc}", flush=True)
             async def _fallback():
                 session = await self._get_session(handle.session_id)
                 contents = await session.async_get_screen_contents()
@@ -334,7 +389,10 @@ class ITerm2Backend:
             return
 
     async def close(self, handle: TerminalHandle) -> None:
-        await self._terminate_tty_processes(handle)
+        try:
+            await asyncio.wait_for(self._terminate_tty_processes(handle), timeout=5)
+        except Exception:
+            pass
         async def _inner():
             try:
                 session = await self._get_session(handle.session_id)
@@ -383,7 +441,11 @@ class ITerm2Backend:
         try:
             proc = subprocess.run(['bash', '-lc', f"ps -t {short} -o pid="], capture_output=True, text=True, check=False)
             pids = [int(item) for item in proc.stdout.split() if item.strip()]
+            # 跳过当前进程自身，避免服务器从被管理终端启动时误杀自己
+            my_pid = os.getpid()
             for pid in pids:
+                if pid == my_pid:
+                    continue
                 try:
                     os.kill(pid, signal.SIGKILL)
                 except Exception:
@@ -466,16 +528,17 @@ class ITerm2Backend:
 
     def _launch_iterm2(self) -> None:
         print("[backend] _launch_iterm2() 被调用!", flush=True)
+        if self._is_iterm2_running():
+            return
         try:
-            subprocess.run(["/usr/bin/open", "-a", "iTerm"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+            subprocess.run(
+                ["/usr/bin/open", "-g", "-j", "-a", "iTerm"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
         except Exception:
             pass
-        if AppKit is None:
-            return
-        try:
-            AppKit.NSWorkspace.sharedWorkspace().launchApplication_("iTerm2")
-        except Exception:
-            return
 
     def _prime_auth_env(self, force: bool) -> None:
         print(f"[backend] _prime_auth_env(force={force}) 被调用!", flush=True)
@@ -564,18 +627,12 @@ class ITerm2Backend:
                     segments.append(ch)
                     continue
                 css = []
-                try:
-                    fg = style.fg_color
-                    if fg and fg.is_rgb:
-                        css.append(f"color: rgb({fg.rgb.red}, {fg.rgb.green}, {fg.rgb.blue})")
-                except Exception:
-                    pass
-                try:
-                    bg = style.bg_color
-                    if bg and bg.is_rgb:
-                        css.append(f"background-color: rgb({bg.rgb.red}, {bg.rgb.green}, {bg.rgb.blue})")
-                except Exception:
-                    pass
+                fg_css = _color_to_css(style.fg_color, "color")
+                if fg_css:
+                    css.append(fg_css)
+                bg_css = _color_to_css(style.bg_color, "background-color")
+                if bg_css:
+                    css.append(bg_css)
                 if getattr(style, 'bold', False):
                     css.append('font-weight: 700')
                 if getattr(style, 'italic', False):

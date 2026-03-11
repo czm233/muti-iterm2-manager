@@ -9,13 +9,13 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from multi_iterm2_manager import __version__
-from multi_iterm2_manager.config import load_settings
+from multi_iterm2_manager.config import UiSettings, load_settings
 from multi_iterm2_manager.models import CreateTerminalParams, GridLayoutParams, TerminalFrame
 from multi_iterm2_manager.service import DashboardService
 
 settings = load_settings()
 service = DashboardService(settings)
-app = FastAPI(title="多 iTerm2 管理器", version="0.1.0")
+app = FastAPI(title="多 iTerm2 管理器", version=__version__)
 app.mount("/assets", StaticFiles(directory=service.static_dir()), name="assets")
 
 
@@ -58,6 +58,20 @@ class AdoptPayload(BaseModel):
     name: str | None = Field(default=None, max_length=60)
 
 
+class UiSettingsPayload(BaseModel):
+    dashboard_padding_px: int = Field(default=4, ge=0, le=48)
+    dashboard_gap_px: int = Field(default=6, ge=0, le=48)
+    monitor_grid_gap_px: int = Field(default=6, ge=0, le=48)
+    wall_card_padding_px: int = Field(default=10, ge=0, le=48)
+    wall_card_border_radius_px: int = Field(default=22, ge=0, le=48)
+    wall_card_border_width_px: float = Field(default=1.0, ge=0.0, le=8.0)
+    wall_card_terminal_border_width_px: float = Field(default=1.0, ge=0.0, le=8.0)
+    split_resizer_hit_area_px: int = Field(default=14, ge=4, le=48)
+    split_resizer_line_width_px: int = Field(default=2, ge=0, le=8)
+    grid_resizer_hit_area_px: int = Field(default=16, ge=4, le=48)
+    grid_resizer_line_width_px: int = Field(default=2, ge=0, le=8)
+
+
 @app.on_event("startup")
 async def on_startup() -> None:
     await service.start()
@@ -86,6 +100,21 @@ async def health() -> dict:
     status = await service.health_status()
     status["version"] = __version__
     return status
+
+
+@app.get("/api/ui-settings")
+async def get_ui_settings() -> dict:
+    payload = service.ui_settings_payload()
+    payload["defaults"] = UiSettings().to_dict()
+    return payload
+
+
+@app.put("/api/ui-settings")
+async def put_ui_settings(payload: UiSettingsPayload) -> dict:
+    try:
+        return await service.update_ui_settings(payload.model_dump())
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.get("/api/terminals")

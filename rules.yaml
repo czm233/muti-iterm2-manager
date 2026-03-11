@@ -1,0 +1,93 @@
+settings:
+  default_status: running
+  default_last_n_lines: 20
+
+rules:
+  # --- 内容规则：等待人类（Claude Code 特征） ---
+  - name: claude-code-permission
+    status: waiting
+    type: content
+    priority: 100
+    last_n_lines: 5
+    patterns:
+      - "Allow this action\\?"
+      - "Do you want to proceed\\?"
+      - "approve|deny"
+
+  - name: claude-code-plan-mode
+    status: waiting
+    type: content
+    priority: 100
+    last_n_lines: 5
+    patterns:
+      - "\\(yes/no\\)"
+      - "Yes.*No.*Always"
+
+  - name: claude-code-ask-user
+    status: waiting
+    type: content
+    priority: 95
+    last_n_lines: 8
+    patterns:
+      - "AskUserQuestion"
+      - "waiting for your"
+
+  # --- 内容规则：等待人类（通用） ---
+  - name: generic-waiting
+    status: waiting
+    type: content
+    priority: 80
+    last_n_lines: 5
+    patterns:
+      - "等待输入"
+      - "请输入"
+      - "waiting for input"
+      - "press any key"
+
+  # --- 内容规则：错误（仅高置信度模式） ---
+  - name: error-traceback
+    status: error
+    type: content
+    priority: 70
+    last_n_lines: 15
+    patterns:
+      - "Traceback \\(most recent call last\\)"
+      - "\\bfatal\\b"
+      - "\\bpanic\\b"
+      - "CRITICAL"
+      - "Segmentation fault"
+
+  # --- 内容规则：完成 ---
+  - name: done-keywords
+    status: done
+    type: content
+    priority: 60
+    last_n_lines: 5
+    patterns:
+      - "任务完成"
+      - "已完成"
+      - "\\bcompleted successfully\\b"
+
+  # --- 超时规则：停滞且末尾有等待特征 -> waiting ---
+  - name: timeout-with-prompt
+    status: waiting
+    type: timeout
+    priority: 50
+    seconds: 30
+    last_n_lines: 3
+    require_patterns:
+      - "\\$\\s*$"
+      - "❯\\s*$"
+      - ">\\s*$"
+
+  # --- 超时规则：长时间停滞 -> done ---
+  - name: timeout-idle
+    status: done
+    type: timeout
+    priority: 10
+    seconds: 120
+    exclude_patterns:
+      - "Allow"
+      - "waiting"
+      - "approve"
+      - "\\(yes/no\\)"

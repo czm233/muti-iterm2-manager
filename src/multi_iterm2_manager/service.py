@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import time
 from contextlib import suppress
 from datetime import datetime
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from multi_iterm2_manager.analyzer import analyze_screen_text
+from multi_iterm2_manager.analyzer import analyze_screen_text, load_rules, RuleEngineConfig
 from multi_iterm2_manager.backend.mock import MockTerminalBackend
-from multi_iterm2_manager.config import Settings
+from multi_iterm2_manager.config import Settings, save_ui_settings
 from multi_iterm2_manager.display import suggest_monitor_grid
 from multi_iterm2_manager.models import CreateTerminalParams, GridLayoutParams, TerminalFrame, TerminalRecord, TerminalStatus, new_terminal_id
 
@@ -22,6 +25,9 @@ class DashboardService:
         self._lock = asyncio.Lock()
         self.backend: Any = self._build_backend()
         self._watchdog_task: asyncio.Task[None] | None = None
+        self._timeout_check_task: asyncio.Task[None] | None = None
+        self._rule_config: RuleEngineConfig = load_rules(settings.rules_file)
+        self.ui_settings = settings.ui_settings
 
     async def start(self) -> None:
         await self.backend.start()
@@ -34,6 +40,7 @@ class DashboardService:
         except Exception:
             pass
         self._watchdog_task = asyncio.create_task(self._watchdog_loop())
+        self._timeout_check_task = asyncio.create_task(self._timeout_check_loop())
 
     async def stop(self) -> None:
         if self._watchdog_task is not None:
@@ -41,6 +48,11 @@ class DashboardService:
             with suppress(asyncio.CancelledError):
                 await self._watchdog_task
             self._watchdog_task = None
+        if self._timeout_check_task is not None:
+            self._timeout_check_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._timeout_check_task
+            self._timeout_check_task = None
         try:
             await self.close_all_terminals()
         except Exception:
@@ -80,6 +92,24 @@ class DashboardService:
         count = len([record for record in self.records.values() if record.status != TerminalStatus.closed])
         columns, rows = suggest_monitor_grid(count)
         return {"count": count, "columns": columns, "rows": rows}
+
+    def ui_settings_payload(self) -> dict:
+        return {
+            "file": str(Path(self.settings.ui_settings_file)),
+            "settings": self.ui_settings.to_dict(),
+        }
+
+    async def update_ui_settings(self, updates: dict[str, Any]) -> dict:
+        self.ui_settings = replace(self.ui_settings, **updates)
+        self.settings.ui_settings = self.ui_settings
+        saved_path = save_ui_settings(self.settings.ui_settings_file, self.ui_settings)
+        payload = {
+            "type": "ui-settings-updated",
+            "file": str(saved_path),
+            "settings": self.ui_settings.to_dict(),
+        }
+        await self._broadcast(payload)
+        return payload
 
     def _next_default_name(self) -> str:
         existing = {record.name.strip().lower() for record in self.records.values() if record.name}
@@ -219,6 +249,13 @@ class DashboardService:
         result: list[dict] = []
         for terminal_id in target_ids:
             result.append(await self.close_terminal(terminal_id))
+        # 清理所有已关闭的记录，避免状态残留
+        closed_ids = [rid for rid, rec in self.records.items() if rec.status == TerminalStatus.closed]
+        async with self._lock:
+            for rid in closed_ids:
+                self.records.pop(rid, None)
+        # 广播 snapshot 确保前端拿到一致状态
+        await self._broadcast(self.snapshot_event())
         return result
 
     async def refresh_terminal(self, terminal_id: str) -> dict:
@@ -349,7 +386,22 @@ class DashboardService:
         return any(pattern in message for pattern in patterns)
 
     def _apply_screen_text(self, record: TerminalRecord, text: str, screen_html: str, is_live: bool) -> None:
-        status, markers, summary = analyze_screen_text(text)
+        # 已关闭的终端不再更新状态
+        if record.status == TerminalStatus.closed:
+            return
+
+        # 计算内容哈希，判断内容是否变化
+        new_hash = hashlib.md5(text.encode()).hexdigest()
+        if new_hash != record.content_hash:
+            record.content_hash = new_hash
+            record.content_stable_since = time.time()
+
+        # 计算停滞时间
+        stable_seconds = 0.0
+        if record.content_stable_since > 0:
+            stable_seconds = time.time() - record.content_stable_since
+
+        status, markers, summary = analyze_screen_text(text, stable_seconds, self._rule_config)
         record.screen_text = text
         record.screen_html = screen_html
         record.status = status
@@ -399,6 +451,33 @@ class DashboardService:
                 if task is not None:
                     task.cancel()
             await self._broadcast(self.snapshot_event())
+
+    async def _timeout_check_loop(self) -> None:
+        """定时扫描所有活跃终端，检查超时规则"""
+        while True:
+            await asyncio.sleep(10)
+            for record in list(self.records.values()):
+                if record.status == TerminalStatus.closed:
+                    continue
+                if not record.screen_text.strip():
+                    continue
+                # 计算停滞时间
+                stable_seconds = 0.0
+                if record.content_stable_since > 0:
+                    stable_seconds = time.time() - record.content_stable_since
+                new_status, markers, summary = analyze_screen_text(
+                    record.screen_text, stable_seconds, self._rule_config
+                )
+                if new_status != record.status:
+                    record.status = new_status
+                    record.markers = markers
+                    record.summary = summary
+                    record.updated_at = self._now()
+                    if new_status != TerminalStatus.error:
+                        record.last_error = None
+                    # 防止 record 在 await 期间被移除
+                    if record.id in self.records:
+                        await self._broadcast(self.record_event(record.id))
 
     def _now(self) -> str:
         return datetime.now().isoformat(timespec="seconds")

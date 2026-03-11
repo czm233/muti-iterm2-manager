@@ -19,6 +19,8 @@ const state = {
   page: 1,
   pageSize: 6,
   focusedInputTerminalId: null,
+  uiSettings: null,
+  defaultUiSettings: null,
 };
 
 const VIEW_STATE_STORAGE_KEY = "mitm-monitor-view-state";
@@ -65,13 +67,84 @@ const wallControls = document.getElementById("wall-controls");
 const wsStatus = document.getElementById("ws-status");
 const buildVersion = document.getElementById("build-version");
 const dashboardLayout = document.querySelector(".dashboard-layout");
+const uiSettingsForm = document.getElementById("ui-settings-form");
+const uiSettingsResetButton = document.getElementById("ui-settings-reset");
+const uiSettingsPath = document.getElementById("ui-settings-path");
 
-const GRID_GAP_PX = 6;
-const GRID_RESIZER_SIZE_PX = 16;
+const DEFAULT_UI_SETTINGS = {
+  dashboard_padding_px: 4,
+  dashboard_gap_px: 6,
+  monitor_grid_gap_px: 6,
+  wall_card_padding_px: 10,
+  wall_card_border_radius_px: 22,
+  wall_card_border_width_px: 1,
+  wall_card_terminal_border_width_px: 1,
+  split_resizer_hit_area_px: 14,
+  split_resizer_line_width_px: 2,
+  grid_resizer_hit_area_px: 16,
+  grid_resizer_line_width_px: 2,
+};
+
 const MIN_GRID_TRACK_RATIO = 0.18;
-const SPLIT_RESIZER_SIZE_PX = 14;
 const MIN_SPLIT_TRACK_RATIO = 0.12;
 const CARD_DRAG_START_THRESHOLD_PX = 6;
+
+function getUiSetting(key) {
+  return state.uiSettings?.[key] ?? DEFAULT_UI_SETTINGS[key];
+}
+
+function getGridGapPx() {
+  return getUiSetting("monitor_grid_gap_px");
+}
+
+function getGridResizerSizePx() {
+  return getUiSetting("grid_resizer_hit_area_px");
+}
+
+function getSplitResizerSizePx() {
+  return getUiSetting("split_resizer_hit_area_px");
+}
+
+function normalizeUiSettings(raw = {}) {
+  const next = {};
+  for (const [key, fallback] of Object.entries(DEFAULT_UI_SETTINGS)) {
+    const incoming = Number(raw[key]);
+    next[key] = Number.isFinite(incoming) ? incoming : fallback;
+  }
+  return next;
+}
+
+function syncUiSettingsForm() {
+  if (!uiSettingsForm || !state.uiSettings) {
+    return;
+  }
+  Object.entries(state.uiSettings).forEach(([key, value]) => {
+    const field = uiSettingsForm.elements.namedItem(key);
+    if (field) {
+      field.value = String(value);
+    }
+  });
+}
+
+function applyUiSettings(raw, options = {}) {
+  state.uiSettings = normalizeUiSettings(raw);
+  if (options.defaults) {
+    state.defaultUiSettings = normalizeUiSettings(options.defaults);
+  }
+  const rootStyle = document.documentElement.style;
+  rootStyle.setProperty("--dashboard-padding-px", `${getUiSetting("dashboard_padding_px")}px`);
+  rootStyle.setProperty("--dashboard-gap-px", `${getUiSetting("dashboard_gap_px")}px`);
+  rootStyle.setProperty("--monitor-grid-gap-px", `${getUiSetting("monitor_grid_gap_px")}px`);
+  rootStyle.setProperty("--wall-card-padding-px", `${getUiSetting("wall_card_padding_px")}px`);
+  rootStyle.setProperty("--wall-card-radius-px", `${getUiSetting("wall_card_border_radius_px")}px`);
+  rootStyle.setProperty("--wall-card-border-width-px", `${getUiSetting("wall_card_border_width_px")}px`);
+  rootStyle.setProperty("--wall-card-terminal-border-width-px", `${getUiSetting("wall_card_terminal_border_width_px")}px`);
+  rootStyle.setProperty("--split-resizer-hit-area-px", `${getUiSetting("split_resizer_hit_area_px")}px`);
+  rootStyle.setProperty("--split-resizer-line-width-px", `${getUiSetting("split_resizer_line_width_px")}px`);
+  rootStyle.setProperty("--grid-resizer-hit-area-px", `${getUiSetting("grid_resizer_hit_area_px")}px`);
+  rootStyle.setProperty("--grid-resizer-line-width-px", `${getUiSetting("grid_resizer_line_width_px")}px`);
+  syncUiSettingsForm();
+}
 
 
 
@@ -455,14 +528,15 @@ function stopSplitResize() {
 function handleSplitResizeMove(event) {
   const session = state.activeSplitResize;
   if (!session) return;
+  const splitResizerSizePx = getSplitResizerSizePx();
   const contentSize = session.direction === "row"
-    ? session.rect.width - SPLIT_RESIZER_SIZE_PX * Math.max(0, session.slotCount - 1)
-    : session.rect.height - SPLIT_RESIZER_SIZE_PX * Math.max(0, session.slotCount - 1);
+    ? session.rect.width - splitResizerSizePx * Math.max(0, session.slotCount - 1)
+    : session.rect.height - splitResizerSizePx * Math.max(0, session.slotCount - 1);
   const totalBefore = session.sizes.slice(0, session.index).reduce((acc, item) => acc + item, 0);
   const pairTotal = session.sizes[session.index] + session.sizes[session.index + 1];
   const pointer = session.direction === "row"
-    ? event.clientX - session.rect.left - SPLIT_RESIZER_SIZE_PX * session.index - SPLIT_RESIZER_SIZE_PX / 2
-    : event.clientY - session.rect.top - SPLIT_RESIZER_SIZE_PX * session.index - SPLIT_RESIZER_SIZE_PX / 2;
+    ? event.clientX - session.rect.left - splitResizerSizePx * session.index - splitResizerSizePx / 2
+    : event.clientY - session.rect.top - splitResizerSizePx * session.index - splitResizerSizePx / 2;
   const ratioPosition = clamp(
     pointer / Math.max(contentSize, 1),
     totalBefore + MIN_SPLIT_TRACK_RATIO,
@@ -529,14 +603,15 @@ function renderGridResizers() {
   removeGridResizers();
   if (!grid || state.layout.count <= 1 || state.layoutTree) return;
   const layout = state.layout;
+  const gridGapPx = getGridGapPx();
   const ratios = ensureGridTrackRatios(layout);
   if ((layout.columns || 1) <= 1 && (layout.rows || 1) <= 1) return;
 
   const overlay = document.createElement("div");
   overlay.className = "grid-resizer-overlay";
   const rect = grid.getBoundingClientRect();
-  const contentWidth = rect.width - GRID_GAP_PX * Math.max(0, (layout.columns || 1) - 1);
-  const contentHeight = rect.height - GRID_GAP_PX * Math.max(0, (layout.rows || 1) - 1);
+  const contentWidth = rect.width - gridGapPx * Math.max(0, (layout.columns || 1) - 1);
+  const contentHeight = rect.height - gridGapPx * Math.max(0, (layout.rows || 1) - 1);
 
   if ((layout.columns || 1) > 1) {
     let total = 0;
@@ -546,7 +621,7 @@ function renderGridResizers() {
       const handle = document.createElement("button");
       handle.type = "button";
       handle.className = "grid-resizer grid-resizer--vertical";
-      handle.style.left = `${total * contentWidth + GRID_GAP_PX * index + GRID_GAP_PX / 2}px`;
+      handle.style.left = `${total * contentWidth + gridGapPx * index + gridGapPx / 2}px`;
       handle.onpointerdown = (event) => startGridResize(event, "columns", index);
       overlay.appendChild(handle);
     });
@@ -560,7 +635,7 @@ function renderGridResizers() {
       const handle = document.createElement("button");
       handle.type = "button";
       handle.className = "grid-resizer grid-resizer--horizontal";
-      handle.style.top = `${total * contentHeight + GRID_GAP_PX * index + GRID_GAP_PX / 2}px`;
+      handle.style.top = `${total * contentHeight + gridGapPx * index + gridGapPx / 2}px`;
       handle.onpointerdown = (event) => startGridResize(event, "rows", index);
       overlay.appendChild(handle);
     });
@@ -584,6 +659,7 @@ function handleGridResizeMove(event) {
   const session = state.activeGridResize;
   if (!session) return;
   const layout = state.layout;
+  const gridGapPx = getGridGapPx();
   const key = getGridRatioKey(layout);
   if (session.key !== key) {
     stopGridResize();
@@ -594,11 +670,11 @@ function handleGridResizeMove(event) {
   const totalBefore = ratios.slice(0, session.index).reduce((acc, item) => acc + item, 0);
   const pairTotal = ratios[session.index] + ratios[session.index + 1];
   const contentSize = session.axis === "columns"
-    ? session.rect.width - GRID_GAP_PX * Math.max(0, layout.columns - 1)
-    : session.rect.height - GRID_GAP_PX * Math.max(0, layout.rows - 1);
+    ? session.rect.width - gridGapPx * Math.max(0, layout.columns - 1)
+    : session.rect.height - gridGapPx * Math.max(0, layout.rows - 1);
   const pointer = session.axis === "columns"
-    ? event.clientX - session.rect.left - GRID_GAP_PX * session.index - GRID_GAP_PX / 2
-    : event.clientY - session.rect.top - GRID_GAP_PX * session.index - GRID_GAP_PX / 2;
+    ? event.clientX - session.rect.left - gridGapPx * session.index - gridGapPx / 2
+    : event.clientY - session.rect.top - gridGapPx * session.index - gridGapPx / 2;
   const ratioPosition = clamp(pointer / Math.max(contentSize, 1), totalBefore + MIN_GRID_TRACK_RATIO, totalBefore + pairTotal - MIN_GRID_TRACK_RATIO);
   const firstRatio = ratioPosition - totalBefore;
   ratios[session.index] = firstRatio;
@@ -638,6 +714,8 @@ function getDropZoneAtPoint(clientX, clientY, element) {
   const localY = clientY - rect.top;
   const width = rect.width;
   const height = rect.height;
+  const centerX = width / 2;
+  const centerY = height / 2;
 
   const horizontalBand = Math.max(48, Math.min(180, width * 0.34));
   const verticalBand = Math.max(48, Math.min(180, height * 0.34));
@@ -675,7 +753,37 @@ function getDropZoneAtPoint(clientX, clientY, element) {
   if (inBottom) candidates.push({ zone: 'bottom', value: height - localY });
 
   if (candidates.length === 0) {
-    return null;
+    const offsetX = (localX - centerX) / Math.max(centerX, 1);
+    const offsetY = (localY - centerY) / Math.max(centerY, 1);
+    const absOffsetX = Math.abs(offsetX);
+    const absOffsetY = Math.abs(offsetY);
+    const centerDeadZone = 0.18;
+    const axisBias = 1.12;
+
+    if (absOffsetX < centerDeadZone && absOffsetY < centerDeadZone) {
+      return null;
+    }
+
+    if (absOffsetX >= absOffsetY * axisBias) {
+      return {
+        zone: offsetX < 0 ? 'left' : 'right',
+        score: 100 + (1 - absOffsetX),
+      };
+    }
+
+    if (absOffsetY >= absOffsetX * axisBias) {
+      return {
+        zone: offsetY < 0 ? 'top' : 'bottom',
+        score: 100 + (1 - absOffsetY),
+      };
+    }
+
+    return {
+      zone: absOffsetX >= absOffsetY
+        ? (offsetX < 0 ? 'left' : 'right')
+        : (offsetY < 0 ? 'top' : 'bottom'),
+      score: 120,
+    };
   }
 
   candidates.sort((a, b) => a.value - b.value);
@@ -902,6 +1010,9 @@ function syncTerminalOrder(terminals) {
 }
 
 function shouldIgnoreDragStart(target) {
+  if (target.closest('.wall-card-drag-handle')) {
+    return false;
+  }
   return Boolean(target.closest('.wall-card-terminal, button, input, textarea, details, summary, .wall-card-input, .wall-card-details-panel, .wall-card-details, .wall-card-title-input'));
 }
 
@@ -987,6 +1098,7 @@ function renderStats() {
     counts[record.status] = (counts[record.status] || 0) + 1;
   }
   const page = getPagedTerminals();
+  if (!stats) return;
   stats.innerHTML = [
     `<span class="stat-chip status-running">活跃 ${state.layout.count}</span>`,
     `<span class="stat-chip status-running">布局 ${state.layout.columns} × ${state.layout.rows}</span>`,
@@ -1034,7 +1146,6 @@ function restoreInputFocus(card, record) {
 
 function bindCardActions(card, record) {
   card.draggable = false;
-  card.onpointerdown = (event) => beginCardPointerDrag(card, record, event);
   card.onpointermove = handleCardPointerMove;
   card.onpointerup = handleCardPointerUp;
   card.onpointercancel = handleCardPointerUp;
@@ -1073,6 +1184,7 @@ function bindCardActions(card, record) {
   };
 
   const terminalArea = card.querySelector(".wall-card-terminal");
+  const dragHandle = card.querySelector(".wall-card-drag-handle");
   const detailsToggle = card.querySelector(".wall-card-more-button");
   const title = card.querySelector(".wall-card-title");
   const titleInput = card.querySelector(".wall-card-title-input");
@@ -1102,6 +1214,16 @@ function bindCardActions(card, record) {
     };
     titleInput.onblur = async () => {
       await finishRename(true);
+    };
+  }
+  if (dragHandle) {
+    dragHandle.onclick = (event) => {
+      event.stopPropagation();
+      event.preventDefault();
+    };
+    dragHandle.onpointerdown = (event) => {
+      event.stopPropagation();
+      beginCardPointerDrag(card, record, event);
     };
   }
   if (detailsToggle) {
@@ -1237,6 +1359,7 @@ function renderTerminal(record) {
   card.innerHTML = `
     <div class="wall-card-header">
       <div class="wall-card-title-row">
+        <button type="button" class="ghost wall-card-drag-handle" title="拖拽排序" aria-label="拖拽排序">::</button>
         <h2 class="wall-card-title" ${state.editingTitleTerminalId === record.id ? 'hidden' : ''}>${escapeHtml(record.name)}</h2>
         <input class="wall-card-title-input" type="text" value="${escapeHtml(record.name)}" ${state.editingTitleTerminalId === record.id ? '' : 'hidden'} />
         <button type="button" class="ghost wall-card-more-button" title="更多信息">⋯</button>
@@ -1284,6 +1407,7 @@ function renderEmptyState() {
 }
 
 function renderToolbarExtras(pageInfo) {
+  if (!wallControls) return;
   const nextAttention = getNextAttentionTerminal();
   wallControls.innerHTML = `
     <div class="panel-title">布局 / 筛选 / 翻页</div>
@@ -1402,9 +1526,18 @@ function applySnapshot(terminals, layout = null) {
   refreshWall(layout);
 }
 
+async function loadUiSettings() {
+  const data = await request("/api/ui-settings");
+  applyUiSettings(data.settings || DEFAULT_UI_SETTINGS, { defaults: data.defaults || DEFAULT_UI_SETTINGS });
+  if (uiSettingsPath && data.file) {
+    uiSettingsPath.textContent = `配置文件：${data.file}`;
+  }
+  return data;
+}
+
 async function loadInitialState() {
   loadViewState();
-  const [terminalsData, healthData] = await Promise.all([request("/api/terminals"), request("/api/health")]);
+  const [terminalsData, healthData] = await Promise.all([request("/api/terminals"), request("/api/health"), loadUiSettings()]);
   applySnapshot(terminalsData.items || [], terminalsData.layout || null);
   if (buildVersion && healthData.version) {
     buildVersion.textContent = `v${healthData.version}`;
@@ -1434,6 +1567,14 @@ function connectWebSocket() {
     }
     if (payload.type === "monitor-layout" || payload.type === "workspace-mode") {
       refreshWall(payload.layout || null);
+      return;
+    }
+    if (payload.type === "ui-settings-updated") {
+      applyUiSettings(payload.settings || DEFAULT_UI_SETTINGS);
+      if (uiSettingsPath && payload.file) {
+        uiSettingsPath.textContent = `配置文件：${payload.file}`;
+      }
+      refreshWall();
     }
   };
   socket.onerror = () => {
@@ -1552,11 +1693,61 @@ document.getElementById("scan-sessions").onclick = () => doScanSessions();
 closeAllButton.onclick = async () => {
   try {
     await request("/api/terminals/close-all", { method: "POST" });
+    // 主动从服务器获取最新状态，避免依赖 WebSocket 事件
+    const terminalsData = await request("/api/terminals");
+    applySnapshot(terminalsData.items || [], terminalsData.layout || null);
+    saveViewState();
     setMessage("已关闭全部真实窗口，并清空监控墙");
   } catch (error) {
     setMessage(error.message, true);
   }
 };
+
+if (uiSettingsForm) {
+  uiSettingsForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const payload = Object.fromEntries(
+      Object.keys(DEFAULT_UI_SETTINGS).map((key) => {
+        const field = uiSettingsForm.elements.namedItem(key);
+        return [key, Number(field?.value ?? DEFAULT_UI_SETTINGS[key])];
+      })
+    );
+    try {
+      const result = await request("/api/ui-settings", {
+        method: "PUT",
+        body: JSON.stringify(payload),
+      });
+      applyUiSettings(result.settings || payload);
+      if (uiSettingsPath && result.file) {
+        uiSettingsPath.textContent = `配置文件：${result.file}`;
+      }
+      refreshWall();
+      setMessage("界面调优配置已保存");
+    } catch (error) {
+      setMessage(error.message, true);
+    }
+  });
+}
+
+if (uiSettingsResetButton) {
+  uiSettingsResetButton.onclick = async () => {
+    const defaults = state.defaultUiSettings || DEFAULT_UI_SETTINGS;
+    try {
+      const result = await request("/api/ui-settings", {
+        method: "PUT",
+        body: JSON.stringify(defaults),
+      });
+      applyUiSettings(result.settings || defaults);
+      if (uiSettingsPath && result.file) {
+        uiSettingsPath.textContent = `配置文件：${result.file}`;
+      }
+      refreshWall();
+      setMessage("已恢复默认界面配置");
+    } catch (error) {
+      setMessage(error.message, true);
+    }
+  };
+}
 
 window.addEventListener("resize", () => {
   if (state.layout.count > 0) {
@@ -1564,13 +1755,19 @@ window.addEventListener("resize", () => {
   }
 });
 
+// 记录 mousedown 起始目标，防止从面板内拖选文字到外部松开时误关闭面板
+let mousedownTarget = null;
+document.addEventListener("mousedown", (e) => {
+  mousedownTarget = e.target;
+});
+
 // 点击外部或按 Esc 关闭顶部菜单和卡片详情面板
 document.addEventListener("click", (e) => {
   document.querySelectorAll(".topbar-menu[open]").forEach((d) => {
-    if (!d.contains(e.target)) d.removeAttribute("open");
+    if (!d.contains(e.target) && !d.contains(mousedownTarget)) d.removeAttribute("open");
   });
   document.querySelectorAll(".wall-card-details-panel:not([hidden])").forEach((panel) => {
-    if (!panel.contains(e.target) && !e.target.closest(".wall-card-more-button")) {
+    if (!panel.contains(e.target) && !panel.contains(mousedownTarget) && !e.target.closest(".wall-card-more-button")) {
       panel.hidden = true;
       const btn = panel.closest(".wall-card")?.querySelector(".wall-card-more-button");
       if (btn) btn.classList.remove("is-active");

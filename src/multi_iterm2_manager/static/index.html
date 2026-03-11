@@ -38,25 +38,71 @@
               </div>
             </details>
 
-            <details class="topbar-menu topbar-menu--wide">
-              <summary>布局</summary>
-              <section id="wall-controls" class="topbar-menu-panel wall-controls"></section>
-            </details>
 
-            <details class="topbar-menu">
-              <summary>概览</summary>
-              <div class="topbar-menu-panel">
-                <div class="panel-title">监控概览</div>
-                <div id="stats" class="stats"></div>
-              </div>
-            </details>
-
-            <details class="topbar-menu">
+<details class="topbar-menu">
               <summary>操作</summary>
               <div class="topbar-menu-panel topbar-menu-actions">
                 <button id="monitor-mode" class="secondary">收起所有</button>
                 <button id="refresh-all" class="secondary">刷新全部</button>
-                <button id="close-all" class="ghost">关闭全部</button>
+                <button id="close-all" class="danger">关闭全部</button>
+              </div>
+            </details>
+
+            <details class="topbar-menu topbar-menu--wide">
+              <summary>调优</summary>
+              <div class="topbar-menu-panel">
+                <div class="panel-title">界面调优</div>
+                <form id="ui-settings-form" class="topbar-form ui-settings-form">
+                  <label>
+                    <span>页面边距</span>
+                    <input name="dashboard_padding_px" type="number" min="0" max="48" step="1" />
+                  </label>
+                  <label>
+                    <span>区域间距</span>
+                    <input name="dashboard_gap_px" type="number" min="0" max="48" step="1" />
+                  </label>
+                  <label>
+                    <span>终端间距</span>
+                    <input name="monitor_grid_gap_px" type="number" min="0" max="48" step="1" />
+                  </label>
+                  <label>
+                    <span>终端外边框</span>
+                    <input name="wall_card_border_width_px" type="number" min="0" max="8" step="0.5" />
+                  </label>
+                  <label>
+                    <span>终端内边框</span>
+                    <input name="wall_card_terminal_border_width_px" type="number" min="0" max="8" step="0.5" />
+                  </label>
+                  <label>
+                    <span>终端内边距</span>
+                    <input name="wall_card_padding_px" type="number" min="0" max="48" step="1" />
+                  </label>
+                  <label>
+                    <span>终端圆角</span>
+                    <input name="wall_card_border_radius_px" type="number" min="0" max="48" step="1" />
+                  </label>
+                  <label>
+                    <span>分割透明边宽</span>
+                    <input name="split_resizer_hit_area_px" type="number" min="4" max="48" step="1" />
+                  </label>
+                  <label>
+                    <span>分割线宽</span>
+                    <input name="split_resizer_line_width_px" type="number" min="0" max="8" step="1" />
+                  </label>
+                  <label>
+                    <span>网格拖拽边宽</span>
+                    <input name="grid_resizer_hit_area_px" type="number" min="4" max="48" step="1" />
+                  </label>
+                  <label>
+                    <span>网格线宽</span>
+                    <input name="grid_resizer_line_width_px" type="number" min="0" max="8" step="1" />
+                  </label>
+                  <div class="topbar-menu-actions">
+                    <button type="submit" class="secondary">保存到配置文件</button>
+                    <button type="button" id="ui-settings-reset" class="ghost">恢复默认</button>
+                  </div>
+                  <div id="ui-settings-path" class="wall-page-text"></div>
+                </form>
               </div>
             </details>
           </div>

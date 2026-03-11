@@ -32,3 +32,11 @@
 - 较大新功能：优先考虑从 `bmad-bmm-create-prd` 开始的完整流程
 - 重构或架构调整：优先考虑 `bmad-bmm-create-architecture`
 - 迭代规划：优先考虑 `bmad-bmm-sprint-planning`
+
+## 版本号规则（强制执行）
+
+- **每次修改代码都必须更新版本号**
+- 版本号需要同步更新两个文件：
+  - `pyproject.toml` → `version = "x.x.x"`
+  - `src/multi_iterm2_manager/__init__.py` → `__version__ = "x.x.x"`
+- 采用 patch 递增（如 0.1.1 → 0.1.2 → 0.1.3）
