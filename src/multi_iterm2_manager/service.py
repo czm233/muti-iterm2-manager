@@ -10,7 +10,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from multi_iterm2_manager.analyzer import analyze_screen_text, load_rules, RuleEngineConfig
+from multi_iterm2_manager.analyzer import analyze_screen_text, analyze_timeout_only, load_rules, RuleEngineConfig
 from multi_iterm2_manager.backend.mock import MockTerminalBackend
 from multi_iterm2_manager.config import Settings, save_ui_settings
 from multi_iterm2_manager.display import get_all_screens, get_screen_bounds, suggest_monitor_grid
@@ -321,8 +321,12 @@ class DashboardService:
         return await self.backend.scan_unmanaged_sessions(known_session_ids=known_ids)
 
     async def adopt_terminal(self, session_id: str, name: str | None = None) -> dict:
-        final_name = (name or '').strip() or self._next_default_name()
-        handle = await self.backend.adopt(session_id, final_name)
+        explicit_name = (name or '').strip() if name else None
+        handle = await self.backend.adopt(session_id, explicit_name)
+        # 优先使用显式传入的名字，其次使用从 iTerm2 读取的原始名字，最后回退到默认名
+        final_name = explicit_name or (handle.adopted_name or '').strip() or self._next_default_name()
+        # 把最终名字写回 iTerm2 自定义变量，确保下次重启/接管时不会丢失
+        await self.backend.rename(handle, final_name)
         frame = await self.backend.get_frame(handle)
         record = TerminalRecord(
             id=new_terminal_id(),
@@ -452,11 +456,11 @@ class DashboardService:
         pending_broadcast: asyncio.Task[None] | None = None
         try:
             async for text, screen_html in self.backend.stream_screen(record.handle):
+                old_hash = record.content_hash
                 self._apply_screen_text(record, text, screen_html, is_live=True)
 
-                # 内容哈希没变，跳过广播
-                new_hash = hashlib.md5(screen_html.encode()).hexdigest()
-                if new_hash == record._last_broadcast_hash:
+                # text 哈希没变，跳过广播
+                if record.content_hash == old_hash:
                     continue
 
                 now = time.time()
@@ -467,7 +471,6 @@ class DashboardService:
                     if pending_broadcast is not None and not pending_broadcast.done():
                         pending_broadcast.cancel()
                         pending_broadcast = None
-                    record._last_broadcast_hash = new_hash
                     last_broadcast_time = now
                     await self._broadcast(self.record_event(terminal_id))
                 else:
@@ -476,15 +479,14 @@ class DashboardService:
                         pending_broadcast.cancel()
                     delay = min_interval - elapsed
 
-                    async def _deferred_broadcast(tid: str, rec: TerminalRecord, h: str, d: float) -> None:
+                    async def _deferred_broadcast(tid: str, d: float) -> None:
                         await asyncio.sleep(d)
-                        rec._last_broadcast_hash = h
                         nonlocal last_broadcast_time
                         last_broadcast_time = time.time()
                         await self._broadcast(self.record_event(tid))
 
                     pending_broadcast = asyncio.ensure_future(
-                        _deferred_broadcast(terminal_id, record, new_hash, delay)
+                        _deferred_broadcast(terminal_id, delay)
                     )
         except asyncio.CancelledError:
             if pending_broadcast is not None and not pending_broadcast.done():
@@ -599,7 +601,7 @@ class DashboardService:
             await self._broadcast(self.snapshot_event())
 
     async def _timeout_check_loop(self) -> None:
-        """定时扫描所有活跃终端，检查超时规则"""
+        """定时扫描所有活跃终端，只检查超时规则"""
         while True:
             await asyncio.sleep(10)
             for record in list(self.records.values()):
@@ -611,9 +613,12 @@ class DashboardService:
                 stable_seconds = 0.0
                 if record.content_stable_since > 0:
                     stable_seconds = time.time() - record.content_stable_since
-                new_status, markers, summary = analyze_screen_text(
+                result = analyze_timeout_only(
                     record.screen_text, stable_seconds, self._rule_config
                 )
+                if result is None:
+                    continue
+                new_status, markers, summary = result
                 if new_status != record.status:
                     record.status = new_status
                     record.markers = markers

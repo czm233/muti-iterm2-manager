@@ -37,6 +37,7 @@ class TerminalHandle:
     window_id: str
     session_id: str
     tab_id: str | None = None
+    adopted_name: str | None = None  # 接管时从 iTerm2 读取的原始名字
 
 
 @dataclass
@@ -57,7 +58,6 @@ class TerminalRecord:
     last_error: str | None = None
     content_hash: str = ""
     content_stable_since: float = 0.0
-    _last_broadcast_hash: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {

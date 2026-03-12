@@ -237,8 +237,25 @@ input {
   border-radius: 999px;
   font-size: 0.72rem;
   padding: 0 4px;
-  background: rgba(247, 201, 72, 0.3);
-  color: var(--fg);
+  background: rgba(148, 163, 184, 0.25);
+  color: rgba(148, 163, 184, 0.8);
+}
+
+.filter-tab--attention .filter-badge {
+  background: rgba(255, 214, 8, 0.22);
+  color: #FFD608;
+}
+.filter-tab--running .filter-badge {
+  background: rgba(96, 165, 250, 0.2);
+  color: rgba(96, 165, 250, 0.95);
+}
+.filter-tab--done .filter-badge {
+  background: rgba(74, 222, 128, 0.18);
+  color: rgba(74, 222, 128, 0.95);
+}
+.filter-tab--hidden .filter-badge {
+  background: rgba(148, 163, 184, 0.18);
+  color: rgba(148, 163, 184, 0.7);
 }
 
 .topbar-menu {
@@ -482,7 +499,7 @@ input {
   position: relative;
   overflow: hidden;
   display: flex;
-  flex-direction: row;
+  flex-direction: column;
 }
 
 .wall-card::before {
@@ -520,11 +537,11 @@ input {
 
 .wall-card-header {
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   align-items: center;
   gap: 6px;
   flex-shrink: 0;
-  padding-right: 6px;
+  padding-bottom: 6px;
 }
 
 .wall-card-topline {
@@ -538,12 +555,12 @@ input {
 
 .wall-card-title-row {
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   align-items: center;
   gap: 6px;
   position: relative;
   flex: 1;
-  min-height: 0;
+  min-width: 0;
 }
 
 .wall-card-drag-handle {
@@ -571,7 +588,7 @@ input {
   margin: 0;
   font-size: 0.82rem;
   letter-spacing: 0.08em;
-  writing-mode: vertical-rl;
+  writing-mode: horizontal-tb;
   white-space: nowrap;
   cursor: default;
   flex: 1;
@@ -583,7 +600,8 @@ input {
   font-size: 0.92rem;
 }
 
-.wall-card-more-button {
+.wall-card-more-button,
+.wall-card-hide-button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -596,8 +614,8 @@ input {
 
 .wall-card-details-panel {
   position: absolute;
-  bottom: var(--wall-card-padding-px);
-  left: 40px;
+  top: 40px;
+  left: var(--wall-card-padding-px);
   z-index: 10;
   min-width: 240px;
   max-width: min(360px, calc(100% - 50px));
@@ -1030,13 +1048,11 @@ body.is-resizing-split * {
 
 .wall-card-title-input {
   min-width: 0;
-  width: 28px;
   flex: 1;
   padding: 0.3rem 0.25rem;
   font-size: 0.82rem;
   font-weight: 700;
   border-radius: 10px;
-  writing-mode: vertical-rl;
 }
 
 

@@ -7,16 +7,39 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from multi_iterm2_manager import __version__
 from multi_iterm2_manager.config import UiSettings, load_settings
 from multi_iterm2_manager.models import CreateTerminalParams, GridLayoutParams, TerminalFrame
 from multi_iterm2_manager.service import DashboardService
 
+
+class CachedStaticFiles(StaticFiles):
+    """对静态资源响应添加 Cache-Control 头"""
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        async def _send_with_cache(message: dict) -> None:
+            if message["type"] == "http.response.start":
+                headers = list(message.get("headers", []))
+                headers.append((b"cache-control", b"max-age=86400"))
+                message["headers"] = headers
+            await send(message)
+
+        await super().__call__(scope, receive, _send_with_cache)
+
+
+def _live_version() -> str:
+    """实时读取版本号，避免修改后需要重启才能生效"""
+    import importlib, multi_iterm2_manager as _pkg
+    importlib.reload(_pkg)
+    return _pkg.__version__
+
+
 settings = load_settings()
 service = DashboardService(settings)
 app = FastAPI(title="多 iTerm2 管理器", version=__version__)
-app.mount("/assets", StaticFiles(directory=service.static_dir()), name="assets")
+app.mount("/assets", CachedStaticFiles(directory=service.static_dir()), name="assets")
 
 
 class FramePayload(BaseModel):
@@ -88,7 +111,7 @@ async def index() -> HTMLResponse:
     html = (static_dir / "index.html").read_text(encoding="utf-8")
     css_version = int((static_dir / "styles.css").stat().st_mtime)
     js_version = int((static_dir / "app.js").stat().st_mtime)
-    build_version = f"v{__version__}-{js_version}"
+    build_version = f"v{_live_version()}-{js_version}"
     html = html.replace('{{BUILD_VERSION}}', build_version)
     html = html.replace('/assets/styles.css', f'/assets/styles.css?v={css_version}')
     html = html.replace('/assets/app.js', f'/assets/app.js?v={js_version}')
@@ -98,7 +121,7 @@ async def index() -> HTMLResponse:
 @app.get("/api/health")
 async def health() -> dict:
     status = await service.health_status()
-    status["version"] = __version__
+    status["version"] = _live_version()
     return status
 
 

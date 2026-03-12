@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>iTerm 监控墙</title>
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css" />
+    <link rel="stylesheet" href="/assets/vendor/xterm/xterm.min.css" />
     <link rel="stylesheet" href="/assets/styles.css" />
   </head>
   <body>
@@ -22,7 +22,7 @@
             <button class="filter-tab is-active" data-filter="default">默认</button>
             <button class="filter-tab filter-tab--attention" data-filter="attention">待处理<span id="filter-attention-badge" class="filter-badge" hidden></span></button>
             <button class="filter-tab filter-tab--running" data-filter="running">工作中<span id="filter-running-badge" class="filter-badge" hidden></span></button>
-            <button class="filter-tab filter-tab--done" data-filter="done">已完成<span id="filter-done-badge" class="filter-badge" hidden></span></button>
+            <button class="filter-tab filter-tab--done" data-filter="done">空闲<span id="filter-done-badge" class="filter-badge" hidden></span></button>
             <button class="filter-tab" data-filter="all">全部</button>
             <button class="filter-tab filter-tab--hidden" data-filter="hidden">已隐藏<span id="filter-hidden-badge" class="filter-badge" hidden></span></button>
           </nav>
@@ -126,7 +126,7 @@
       </div>
     </div>
 
-    <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+    <script src="/assets/vendor/xterm/xterm.min.js"></script>
     <script type="module" src="/assets/app.js"></script>
   </body>
 </html>

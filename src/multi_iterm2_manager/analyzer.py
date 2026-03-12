@@ -166,6 +166,25 @@ def analyze_screen_text(
     return config.default_status, [], summarize_text(normalized)
 
 
+def analyze_timeout_only(
+    text: str,
+    stable_seconds: float,
+    config: RuleEngineConfig,
+) -> tuple[TerminalStatus, list[str], str] | None:
+    """只检查 timeout 类规则，跳过 content 规则。命中则返回结果，未命中返回 None。"""
+    normalized = text.strip()
+    if not normalized:
+        return None
+
+    for rule in config.rules:
+        if rule.type != "timeout":
+            continue
+        if _match_timeout_rule(rule, normalized, stable_seconds, config.default_last_n_lines):
+            return rule.status, [rule.name], summarize_text(normalized)
+
+    return None
+
+
 def summarize_text(text: str, max_lines: int = 3, max_chars: int = 240) -> str:
     lines = [line.rstrip() for line in text.splitlines() if line.strip()]
     if not lines:

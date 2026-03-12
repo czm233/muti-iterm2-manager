@@ -77,6 +77,7 @@ def _color_to_css(color, css_prop: str) -> str | None:
 MANAGED_FLAG_VAR = "user.mitm_managed"
 MANAGED_OWNER_VAR = "user.mitm_owner"
 MANAGED_OWNER_VALUE = "multi-iterm2-manager"
+MANAGED_NAME_VAR = "user.mitm_name"
 ANCHOR_ROLE_VAR = "user.mitm_role"
 ANCHOR_ROLE_VALUE = "anchor"
 
@@ -185,6 +186,7 @@ class ITerm2Backend:
             if params.name:
                 try:
                     await session.async_set_name(params.name)
+                    await session.async_set_variable(MANAGED_NAME_VAR, params.name)
                 except Exception:
                     pass
             target_frame = params.frame or build_maximized_frame()
@@ -357,7 +359,9 @@ class ITerm2Backend:
                             else:
                                 continue  # 当前服务已知的管理终端，跳过
                         try:
-                            name = await session.async_get_variable("name") or session.session_id
+                            name = await session.async_get_variable(MANAGED_NAME_VAR)
+                            if not name:
+                                name = await session.async_get_variable("name") or session.session_id
                         except Exception:
                             name = session.session_id
                         try:
@@ -398,9 +402,19 @@ class ITerm2Backend:
             await target_session.async_set_variable(MANAGED_FLAG_VAR, True)
             await target_session.async_set_variable(MANAGED_OWNER_VAR, MANAGED_OWNER_VALUE)
             await target_session.async_set_variable(ANCHOR_ROLE_VAR, "managed")
+            # 读取 iTerm2 中 session 的当前名字，用于接管时保留原始名
+            adopted_name = None
             if name:
                 try:
                     await target_session.async_set_name(name)
+                except Exception:
+                    pass
+            else:
+                # 没有显式传入名字，优先从自定义变量读取管理器设置的名字
+                try:
+                    adopted_name = await target_session.async_get_variable(MANAGED_NAME_VAR)
+                    if not adopted_name:
+                        adopted_name = await target_session.async_get_variable("session.name")
                 except Exception:
                     pass
             await self.hide_app()
@@ -408,6 +422,7 @@ class ITerm2Backend:
                 window_id=target_window_id,
                 session_id=session_id,
                 tab_id=target_tab_id,
+                adopted_name=adopted_name,
             )
         return await self._run_with_reconnect(_inner)
 
@@ -415,6 +430,7 @@ class ITerm2Backend:
         async def _inner():
             session = await self._get_session(handle.session_id)
             await session.async_set_name(name)
+            await session.async_set_variable(MANAGED_NAME_VAR, name)
         await self._run_with_reconnect(_inner)
 
     async def hide_app(self) -> None:

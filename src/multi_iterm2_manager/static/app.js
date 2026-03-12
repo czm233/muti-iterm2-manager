@@ -230,7 +230,7 @@ function statusLabel(status) {
   return {
     idle: "空闲",
     running: "运行中",
-    done: "已完成",
+    done: "空闲",
     error: "异常",
     waiting: "等待中",
     closed: "已关闭",
@@ -243,7 +243,7 @@ function filterLabel(filter) {
     default: "默认",
     active: "活跃",
     attention: "待处理",
-    done: "已完成",
+    done: "空闲",
     hidden: "已隐藏",
   }[filter] || filter;
 }
@@ -606,6 +606,28 @@ function reorderTerminalsByZone(sourceId, targetId, zone) {
   refreshWall();
 }
 
+function updateGridResizerPositions() {
+  const overlay = grid.querySelector(".grid-resizer-overlay");
+  if (!overlay) return;
+  const layout = state.layout;
+  const gridGapPx = getGridGapPx();
+  const ratios = ensureGridTrackRatios(layout);
+  const rect = grid.getBoundingClientRect();
+  const contentWidth = rect.width - gridGapPx * Math.max(0, (layout.columns || 1) - 1);
+  const contentHeight = rect.height - gridGapPx * Math.max(0, (layout.rows || 1) - 1);
+
+  overlay.querySelectorAll(".grid-resizer--vertical").forEach((handle, i) => {
+    let total = 0;
+    for (let j = 0; j <= i; j++) total += ratios.columns[j];
+    handle.style.left = `${total * contentWidth + gridGapPx * i + gridGapPx / 2}px`;
+  });
+  overlay.querySelectorAll(".grid-resizer--horizontal").forEach((handle, i) => {
+    let total = 0;
+    for (let j = 0; j <= i; j++) total += ratios.rows[j];
+    handle.style.top = `${total * contentHeight + gridGapPx * i + gridGapPx / 2}px`;
+  });
+}
+
 function removeGridResizers() {
   grid.querySelector(".grid-resizer-overlay")?.remove();
 }
@@ -695,7 +717,7 @@ function handleGridResizeMove(event) {
     [trackKey]: normalizeRatios(ratios, ratios.length),
   };
   applyGridTrackStyles();
-  renderGridResizers();
+  updateGridResizerPositions();
 }
 
 function startGridResize(event, axis, index) {
@@ -832,6 +854,10 @@ function stopCardPointerDrag() {
   if (!session) {
     return;
   }
+  if (_cardDragRafId) {
+    cancelAnimationFrame(_cardDragRafId);
+    _cardDragRafId = 0;
+  }
   window.removeEventListener('pointermove', handleCardPointerMove);
   window.removeEventListener('pointerup', handleCardPointerUp);
   window.removeEventListener('pointercancel', handleCardPointerUp);
@@ -854,6 +880,8 @@ function commitCardPointerDrag(clientX, clientY) {
   reorderTerminalsByZone(state.draggedTerminalId, target.terminalId, target.zone || 'right');
 }
 
+let _cardDragRafId = 0;
+
 function handleCardPointerMove(event) {
   const session = state.activeCardDrag;
   if (!session || event.pointerId !== session.pointerId) {
@@ -872,12 +900,18 @@ function handleCardPointerMove(event) {
     document.body.classList.add('is-dragging-card');
   }
   event.preventDefault();
-  const target = getDropTargetAtPoint(event.clientX, event.clientY);
-  if (target) {
-    applySplitDropPreview(target.card, target.terminalId, target.zone);
-  } else {
-    clearSplitDropPreview();
-  }
+  const cx = event.clientX;
+  const cy = event.clientY;
+  if (_cardDragRafId) return;
+  _cardDragRafId = requestAnimationFrame(() => {
+    _cardDragRafId = 0;
+    const target = getDropTargetAtPoint(cx, cy);
+    if (target) {
+      applySplitDropPreview(target.card, target.terminalId, target.zone);
+    } else {
+      clearSplitDropPreview();
+    }
+  });
 }
 
 function handleCardPointerUp(event) {
@@ -993,14 +1027,16 @@ function inferLayout(terminals) {
 }
 
 function applyLayout(_layoutFromServer = null) {
-  const active = getActiveTerminalRecords();
-  const layout = inferLayout(active);
+  const filtered = getFilteredTerminals();
+  const layout = inferLayout(filtered);
   state.layout = layout;
   grid.dataset.columns = String(Math.min(layout.columns || 1, 4));
   grid.dataset.rows = String(layout.rows || 1);
   grid.dataset.fitMode = layout.fitMode ? "true" : "false";
-  grid.dataset.engine = state.layoutTree ? "split" : "grid";
-  if (state.layoutTree) {
+  // split 引擎只在默认过滤器下生效；其他过滤器用简单卡片循环渲染，必须保持 grid 布局
+  const useSplitEngine = Boolean(state.layoutTree) && state.filter === "default";
+  grid.dataset.engine = useSplitEngine ? "split" : "grid";
+  if (useSplitEngine) {
     grid.style.removeProperty("grid-template-columns");
     grid.style.removeProperty("grid-template-rows");
   } else {
@@ -1014,7 +1050,7 @@ function getFilteredTerminals() {
   const all = state.orderedTerminalIds
     .map((id) => state.terminals.get(id))
     .filter(Boolean);
-  if (state.filter === "all") return all;
+  if (state.filter === "all") return all.filter((record) => record.status !== "closed");
   if (state.filter === "hidden") return all.filter((record) => state.hiddenTerminalIds.has(record.id));
   if (state.filter === "done") return all.filter((record) => record.status === "done" && !state.hiddenTerminalIds.has(record.id));
   if (state.filter === "running") return all.filter((record) => record.status === "running" && !state.hiddenTerminalIds.has(record.id));
@@ -1025,8 +1061,8 @@ function getFilteredTerminals() {
     }
     return all.filter((record) => ["error", "waiting"].includes(record.status) && !state.hiddenTerminalIds.has(record.id));
   }
-  // default：不显示已隐藏的终端
-  return all.filter((record) => !state.hiddenTerminalIds.has(record.id));
+  // default：不显示已隐藏和已关闭的终端
+  return all.filter((record) => record.status !== "closed" && !state.hiddenTerminalIds.has(record.id));
 }
 
 function shouldPaginateCurrentFilter() {
@@ -1038,39 +1074,35 @@ function syncFilterTabs() {
   document.querySelectorAll("#topbar-filters .filter-tab").forEach((tab) => {
     tab.classList.toggle("is-active", tab.dataset.filter === state.filter);
   });
-  // 与 getFilteredTerminals() 保持同一来源，避免计数与实际结果不一致
-  const ordered = state.orderedTerminalIds
-    .map((id) => state.terminals.get(id))
-    .filter(Boolean);
-  // 待处理 badge：非隐藏的 error/waiting 终端数量
-  const attentionCount = ordered.filter(
-    (r) => ["error", "waiting"].includes(r.status) && !state.hiddenTerminalIds.has(r.id)
-  ).length;
+  // 单次遍历计算所有 badge 数量
+  let attentionCount = 0;
+  let hiddenCount = 0;
+  let doneCount = 0;
+  let runningCount = 0;
+  for (const id of state.orderedTerminalIds) {
+    const r = state.terminals.get(id);
+    if (!r) continue;
+    const isHidden = state.hiddenTerminalIds.has(r.id);
+    if (isHidden) { hiddenCount++; continue; }
+    if (r.status === "error" || r.status === "waiting") attentionCount++;
+    else if (r.status === "done") doneCount++;
+    else if (r.status === "running") runningCount++;
+  }
   const attentionBadge = document.getElementById("filter-attention-badge");
   if (attentionBadge) {
     attentionBadge.textContent = attentionCount > 0 ? String(attentionCount) : "";
     attentionBadge.hidden = attentionCount === 0;
   }
-  // 已隐藏 badge：隐藏终端数量
-  const hiddenCount = ordered.filter((r) => state.hiddenTerminalIds.has(r.id)).length;
   const hiddenBadge = document.getElementById("filter-hidden-badge");
   if (hiddenBadge) {
     hiddenBadge.textContent = hiddenCount > 0 ? String(hiddenCount) : "";
     hiddenBadge.hidden = hiddenCount === 0;
   }
-  // 已完成 badge：非隐藏的 done 终端数量
-  const doneCount = ordered.filter(
-    (r) => r.status === "done" && !state.hiddenTerminalIds.has(r.id)
-  ).length;
   const doneBadge = document.getElementById("filter-done-badge");
   if (doneBadge) {
     doneBadge.textContent = doneCount > 0 ? String(doneCount) : "";
     doneBadge.hidden = doneCount === 0;
   }
-  // 工作中 badge：非隐藏的 running 终端数量
-  const runningCount = ordered.filter(
-    (r) => r.status === "running" && !state.hiddenTerminalIds.has(r.id)
-  ).length;
   const runningBadge = document.getElementById("filter-running-badge");
   if (runningBadge) {
     runningBadge.textContent = runningCount > 0 ? String(runningCount) : "";
@@ -1197,6 +1229,7 @@ function renderLayoutNode(node, visibleSet = null) {
 function renderStats() {
   const counts = { running: 0, done: 0, waiting: 0, error: 0, closed: 0, idle: 0 };
   for (const record of state.terminals.values()) {
+    if (state.hiddenTerminalIds.has(record.id)) continue;
     counts[record.status] = (counts[record.status] || 0) + 1;
   }
   const page = getPagedTerminals();
@@ -1207,7 +1240,7 @@ function renderStats() {
     `<span class="stat-chip status-running">筛选 ${filterLabel(state.filter)}</span>`,
     `<span class="stat-chip status-running">页码 ${state.page}/${page.totalPages}</span>`,
     `<span class="stat-chip status-running">运行中 ${counts.running}</span>`,
-    `<span class="stat-chip status-done">已完成 ${counts.done}</span>`,
+    `<span class="stat-chip status-done">空闲 ${counts.done}</span>`,
     `<span class="stat-chip status-waiting">等待中 ${counts.waiting}</span>`,
     `<span class="stat-chip status-error">异常 ${counts.error}</span>`,
   ].join("");
@@ -1392,7 +1425,6 @@ function bindCardActions(card, record) {
   if (detachBtn) {
     detachBtn.onclick = async (event) => {
       event.stopPropagation();
-      if (!confirm("确定要解绑此终端吗？解绑后终端将从监控墙消失，在 iTerm2 中显现。")) return;
       try {
         await request(`/api/terminals/${record.id}/detach`, { method: "POST" });
         setMessage("终端已解绑");
@@ -1492,6 +1524,7 @@ function renderTerminal(record) {
         <button type="button" class="ghost wall-card-drag-handle" title="拖拽排序" aria-label="拖拽排序">::</button>
         <h2 class="wall-card-title" ${state.editingTitleTerminalId === record.id ? 'hidden' : ''}>${escapeHtml(record.name)}</h2>
         <input class="wall-card-title-input" type="text" value="${escapeHtml(record.name)}" ${state.editingTitleTerminalId === record.id ? '' : 'hidden'} />
+        <button data-action="toggle-hide" class="ghost wall-card-hide-button" title="${state.hiddenTerminalIds.has(record.id) ? "取消隐藏" : "隐藏"}">${state.hiddenTerminalIds.has(record.id) ? "取消隐藏" : "隐藏"}</button>
         <button type="button" class="ghost wall-card-more-button" title="更多信息">⋯</button>
       </div>
       <div class="wall-card-details-panel" hidden>
@@ -1502,7 +1535,6 @@ function renderTerminal(record) {
         <div class="wall-card-tools">
           <button data-action="refresh" class="secondary">刷新</button>
           <button data-action="monitor-mode" class="secondary">回监控模式</button>
-          <button data-action="toggle-hide" class="secondary">${state.hiddenTerminalIds.has(record.id) ? "取消隐藏" : "隐藏"}</button>
           ${record.status !== "closed" ? '<button data-action="detach" class="secondary">解绑</button>' : ''}
           <button type="button" class="secondary wall-card-input-toggle">命令</button>
         </div>
@@ -1739,6 +1771,12 @@ function applySnapshot(terminals, layout = null) {
   for (const record of terminals) {
     state.terminals.set(record.id, record);
   }
+  // 清理 hiddenTerminalIds 中不再存在的旧 ID
+  for (const id of state.hiddenTerminalIds) {
+    if (!state.terminals.has(id)) {
+      state.hiddenTerminalIds.delete(id);
+    }
+  }
   syncTerminalOrder(terminals);
   syncLayoutTree();
   refreshWall(layout);
@@ -1788,8 +1826,15 @@ function connectWebSocket() {
         state.orderedTerminalIds.push(payload.terminal.id);
       }
       syncLayoutTree();
-      // 增量更新：只标记变化的终端 ID，由 rAF 统一渲染
-      state._incrementalIds.add(payload.terminal.id);
+      // 终端关闭时从列表中移除并全量刷新
+      if (payload.terminal.status === "closed") {
+        state.terminals.delete(payload.terminal.id);
+        state.orderedTerminalIds = state.orderedTerminalIds.filter((id) => id !== payload.terminal.id);
+        state._needFullRefresh = true;
+      } else {
+        // 增量更新：只标记变化的终端 ID，由 rAF 统一渲染
+        state._incrementalIds.add(payload.terminal.id);
+      }
       scheduleRender(payload.layout || null);
       return;
     }
@@ -2055,7 +2100,9 @@ function injectScreenSelector() {
     </label>
     <div class="topbar-menu-actions">
       <button type="submit" class="secondary">保存屏幕设置</button>
+      <button type="button" id="set-default-screen-btn" class="secondary" title="将当前选中的屏幕设为每次打开页面的默认值">设为默认</button>
     </div>
+    <div id="default-screen-hint" style="font-size:0.82rem;color:var(--fg-muted);margin-top:2px;"></div>
   `;
 
   tuningPanel.appendChild(divider);
@@ -2077,6 +2124,38 @@ function injectScreenSelector() {
       setMessage(error.message, true);
     }
   });
+
+  // 设为默认按钮
+  const setDefaultBtn = document.getElementById("set-default-screen-btn");
+  setDefaultBtn.addEventListener("click", () => {
+    const select = document.getElementById("target-screen-select");
+    const selectedOption = select.options[select.selectedIndex];
+    if (select.value === "-1") {
+      // 选的是"不指定"，清除默认
+      localStorage.removeItem("defaultScreenName");
+      setMessage("已清除默认屏幕");
+    } else {
+      // 保存屏幕名称（不保存索引，因为索引可能变化）
+      const screenName = selectedOption.textContent;
+      localStorage.setItem("defaultScreenName", screenName);
+      setMessage(`已将「${screenName}」设为默认屏幕`);
+    }
+    updateDefaultScreenHint();
+  });
+}
+
+/**
+ * 更新默认屏幕提示文字
+ */
+function updateDefaultScreenHint() {
+  const hint = document.getElementById("default-screen-hint");
+  if (!hint) return;
+  const defaultName = localStorage.getItem("defaultScreenName");
+  if (defaultName) {
+    hint.textContent = `默认: ${defaultName}`;
+  } else {
+    hint.textContent = "";
+  }
 }
 
 /**
@@ -2102,8 +2181,32 @@ async function loadScreenSelector() {
       select.appendChild(option);
     }
 
-    // 选中当前配置值
-    select.value = String(currentTarget);
+    // 如果有默认屏幕设置，尝试按名称匹配
+    const defaultName = localStorage.getItem("defaultScreenName");
+    let matched = false;
+    if (defaultName) {
+      for (const option of select.options) {
+        if (option.textContent === defaultName) {
+          select.value = option.value;
+          matched = true;
+          // 自动应用到后端（确保每次刷新都同步）
+          if (currentTarget !== Number(option.value)) {
+            await request("/api/screens/target", {
+              method: "PUT",
+              body: JSON.stringify({ target_screen: Number(option.value) }),
+            });
+          }
+          break;
+        }
+      }
+    }
+    if (!matched) {
+      // 没有默认设置或匹配不到，使用后端当前值
+      select.value = String(currentTarget);
+    }
+
+    // 更新默认屏幕提示
+    updateDefaultScreenHint();
   } catch (error) {
     // 屏幕列表加载失败时静默处理，不影响主功能
     console.warn("加载屏幕列表失败:", error.message);
