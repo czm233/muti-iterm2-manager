@@ -36,6 +36,61 @@ def get_primary_display_bounds() -> DisplayBounds:
     )
 
 
+def get_all_screens() -> list[dict]:
+    """获取所有可用屏幕信息，返回包含 index/name/width/height/x/y 的列表"""
+    if AppKit is None:
+        return [{"index": 0, "name": "主屏幕", "width": 1728, "height": 1117, "x": 0, "y": 0}]
+
+    screens = AppKit.NSScreen.screens()
+    if not screens:
+        return [{"index": 0, "name": "主屏幕", "width": 1728, "height": 1117, "x": 0, "y": 0}]
+
+    result = []
+    for i, screen in enumerate(screens):
+        frame = screen.frame()
+        visible = screen.visibleFrame()
+        name = "主屏幕" if i == 0 else f"屏幕 {i + 1}"
+        # 尝试获取屏幕的 localizedName（macOS 10.15+）
+        try:
+            localized = screen.localizedName()
+            if localized:
+                name = localized
+        except Exception:
+            pass
+        result.append({
+            "index": i,
+            "name": name,
+            "width": int(frame.size.width),
+            "height": int(frame.size.height),
+            "x": int(frame.origin.x),
+            "y": int(frame.origin.y),
+            # 可用区域（排除 Dock 和菜单栏）
+            "visibleX": int(visible.origin.x),
+            "visibleY": int(visible.origin.y),
+            "visibleWidth": int(visible.size.width),
+            "visibleHeight": int(visible.size.height),
+        })
+    return result
+
+
+def get_screen_bounds(screen_index: int) -> DisplayBounds | None:
+    """获取指定屏幕的可用区域，返回 None 表示屏幕不存在"""
+    if AppKit is None:
+        return None
+
+    screens = AppKit.NSScreen.screens()
+    if not screens or screen_index < 0 or screen_index >= len(screens):
+        return None
+
+    visible = screens[screen_index].visibleFrame()
+    return DisplayBounds(
+        x=float(visible.origin.x),
+        y=float(visible.origin.y),
+        width=float(visible.size.width),
+        height=float(visible.size.height),
+    )
+
+
 def build_maximized_frame(padding: float = 18.0) -> TerminalFrame:
     bounds = get_primary_display_bounds()
     return TerminalFrame(

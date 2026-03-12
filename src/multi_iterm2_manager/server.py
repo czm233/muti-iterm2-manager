@@ -102,6 +102,27 @@ async def health() -> dict:
     return status
 
 
+@app.get("/api/screens")
+async def get_screens() -> dict:
+    """获取所有可用屏幕列表"""
+    screens = service.get_screens()
+    return {"items": screens, "targetScreen": service.get_target_screen()}
+
+
+class TargetScreenPayload(BaseModel):
+    target_screen: int = Field(default=-1, ge=-1)
+
+
+@app.put("/api/screens/target")
+async def set_target_screen(payload: TargetScreenPayload) -> dict:
+    """设置目标屏幕"""
+    screens = service.get_screens()
+    if payload.target_screen >= len(screens):
+        raise HTTPException(status_code=400, detail=f"屏幕索引超出范围，当前共 {len(screens)} 个屏幕")
+    service.set_target_screen(payload.target_screen)
+    return {"targetScreen": service.get_target_screen()}
+
+
 @app.get("/api/ui-settings")
 async def get_ui_settings() -> dict:
     payload = service.ui_settings_payload()

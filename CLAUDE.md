@@ -40,3 +40,9 @@
   - `pyproject.toml` → `version = "x.x.x"`
   - `src/multi_iterm2_manager/__init__.py` → `__version__ = "x.x.x"`
 - 采用 patch 递增（如 0.1.1 → 0.1.2 → 0.1.3）
+
+## 验收提示规则（强制执行）
+
+- **每次修改完代码，等待用户验收时，必须告知：**
+  1. 需不需要重启后端（改了 Python 后端代码才需要）
+  2. 需不需要强制刷新前端（改了 JS/CSS/HTML 静态文件需要刷新浏览器）

@@ -18,6 +18,15 @@
             <span id="ws-status" class="status-pill status-connecting">连接中</span>
           </div>
 
+          <nav id="topbar-filters" class="topbar-filters">
+            <button class="filter-tab is-active" data-filter="default">默认</button>
+            <button class="filter-tab filter-tab--attention" data-filter="attention">待处理<span id="filter-attention-badge" class="filter-badge" hidden></span></button>
+            <button class="filter-tab filter-tab--running" data-filter="running">工作中<span id="filter-running-badge" class="filter-badge" hidden></span></button>
+            <button class="filter-tab filter-tab--done" data-filter="done">已完成<span id="filter-done-badge" class="filter-badge" hidden></span></button>
+            <button class="filter-tab" data-filter="all">全部</button>
+            <button class="filter-tab filter-tab--hidden" data-filter="hidden">已隐藏<span id="filter-hidden-badge" class="filter-badge" hidden></span></button>
+          </nav>
+
           <div class="topbar-menus">
             <details class="topbar-menu">
               <summary>任务</summary>
@@ -31,7 +40,10 @@
                   <button id="create-demo">创建示例任务</button>
                 </div>
                 <div class="panel-divider"></div>
-                <div class="panel-title">接管已有终端</div>
+                <div class="panel-title-row">
+                  <div class="panel-title">接管已有终端</div>
+                  <button id="adopt-all-sessions" class="secondary" style="font-size:0.8rem;padding:2px 8px;">一键接管</button>
+                </div>
                 <div id="adopt-session-list" class="adopt-session-list">
                   <button id="scan-sessions" class="secondary">扫描可用终端</button>
                 </div>

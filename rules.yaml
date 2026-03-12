@@ -32,6 +32,17 @@ rules:
       - "AskUserQuestion"
       - "waiting for your"
 
+  - name: claude-code-interactive-ui
+    status: waiting
+    type: content
+    priority: 98
+    last_n_lines: 5
+    patterns:
+      - "Enter.*select.*Esc.*cancel"
+      - "Enter.?to.?select"
+      - "Esc.?to.?cancel"
+      - "Arrow.?keys.?to.?navigate"
+
   # --- 内容规则：等待人类（通用） ---
   - name: generic-waiting
     status: waiting
@@ -73,7 +84,7 @@ rules:
     status: waiting
     type: timeout
     priority: 50
-    seconds: 30
+    seconds: 5
     last_n_lines: 3
     require_patterns:
       - "\\$\\s*$"
@@ -84,10 +95,12 @@ rules:
   - name: timeout-idle
     status: done
     type: timeout
-    priority: 10
-    seconds: 120
+    priority: 55
+    seconds: 10
     exclude_patterns:
       - "Allow"
       - "waiting"
       - "approve"
       - "\\(yes/no\\)"
+      - "Enter.*select"
+      - "Esc.*cancel"

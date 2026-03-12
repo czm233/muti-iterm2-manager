@@ -172,6 +172,75 @@ input {
   justify-content: flex-end;
 }
 
+.topbar-filters {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 1;
+  justify-content: center;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.filter-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 14px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  background: none;
+  cursor: pointer;
+  font-size: 0.84rem;
+  color: var(--muted);
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+  white-space: nowrap;
+}
+
+.filter-tab:hover {
+  background: rgba(148, 163, 184, 0.1);
+  color: var(--fg);
+}
+
+.filter-tab.is-active {
+  background: rgba(104, 210, 255, 0.14);
+  border-color: rgba(104, 210, 255, 0.24);
+  color: var(--fg);
+}
+
+.filter-tab--attention.is-active {
+  background: rgba(247, 201, 72, 0.16);
+  border-color: rgba(247, 201, 72, 0.24);
+}
+
+.filter-tab--hidden.is-active {
+  background: rgba(148, 163, 184, 0.12);
+  border-color: rgba(148, 163, 184, 0.22);
+}
+
+.filter-tab--done.is-active {
+  background: rgba(74, 222, 128, 0.12);
+  border-color: rgba(74, 222, 128, 0.24);
+}
+
+.filter-tab--running.is-active {
+  background: rgba(96, 165, 250, 0.12);
+  border-color: rgba(96, 165, 250, 0.24);
+}
+
+.filter-badge {
+  display: inline-block;
+  min-width: 16px;
+  height: 16px;
+  line-height: 16px;
+  text-align: center;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  padding: 0 4px;
+  background: rgba(247, 201, 72, 0.3);
+  color: var(--fg);
+}
+
 .topbar-menu {
   position: relative;
 }
@@ -331,6 +400,13 @@ input {
   min-width: 100px;
   color: var(--muted);
   font-weight: 700;
+}
+
+.panel-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
 }
 
 .create-form {
@@ -520,11 +596,13 @@ input {
 
 .wall-card-details-panel {
   position: absolute;
-  top: 40px;
+  bottom: var(--wall-card-padding-px);
   left: 40px;
   z-index: 10;
   min-width: 240px;
   max-width: min(360px, calc(100% - 50px));
+  max-height: calc(100% - 20px);
+  overflow-y: auto;
   padding: 8px 10px;
   border-radius: 12px;
   border: 1px solid var(--border);

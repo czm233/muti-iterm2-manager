@@ -4,24 +4,31 @@ set -euo pipefail
 ROOT_DIR="$(cd -- "$(dirname "$0")" && pwd)"
 PID_FILE="$ROOT_DIR/.run/multi-iterm2-manager.pid"
 LOG_FILE="$ROOT_DIR/.run/multi-iterm2-manager.log"
+SAFE_FLAG="$ROOT_DIR/.run/safe-restart"
+FULL_CLEANUP_FLAG="$ROOT_DIR/.run/full-cleanup"
 
 cd "$ROOT_DIR"
+
+# 完整停止：删除安全标志 + 创建 full-cleanup 标志，让 shutdown 执行完整清理
+rm -f "$SAFE_FLAG"
+mkdir -p "$ROOT_DIR/.run"
+touch "$FULL_CLEANUP_FLAG"
 
 if [[ -f "$PID_FILE" ]]; then
   pid="$(cat "$PID_FILE" 2>/dev/null || true)"
   if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-    echo "停止服务进程 $pid"
+    echo "停止服务进程 $pid（将执行完整清理，关闭受管终端）。"
     kill "$pid" 2>/dev/null || true
     sleep 2
     if kill -0 "$pid" 2>/dev/null; then
-      echo "服务仍未退出，强制停止 $pid"
+      echo "进程未响应，强制终止。"
       kill -9 "$pid" 2>/dev/null || true
     fi
   fi
   rm -f "$PID_FILE"
 fi
 
-lsof -ti :8765 | xargs -r kill 2>/dev/null || true
+lsof -ti :8765 | xargs kill 2>/dev/null || true
 sleep 1
 
 if [[ -d .venv ]]; then

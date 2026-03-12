@@ -5,6 +5,7 @@ import html
 import os
 import signal
 import subprocess
+import time
 from typing import Any
 
 from multi_iterm2_manager.display import build_maximized_frame
@@ -87,6 +88,7 @@ class ITerm2Backend:
         self._connection: Any = None
         self._app: Any = None
         self._lock = asyncio.Lock()
+        self._last_refresh: float = 0
 
     async def start(self) -> None:
         await self._ensure_connection()
@@ -142,6 +144,26 @@ class ITerm2Backend:
         await self.maybe_quit_app()
         return len(handles)
 
+    async def unmark_all_managed(self) -> int:
+        """取消所有 session 的管理标记，但不关闭窗口。"""
+        async def _inner():
+            _, app = await self._get_runtime()
+            await app.async_refresh()
+            count = 0
+            for window in list(app.terminal_windows):
+                for tab in list(window.tabs):
+                    for session in list(tab.sessions):
+                        try:
+                            is_managed = await self._is_managed_session(session)
+                            if is_managed:
+                                await session.async_set_variable(MANAGED_FLAG_VAR, "")
+                                await session.async_set_variable(MANAGED_OWNER_VAR, "")
+                                count += 1
+                        except Exception:
+                            pass
+            return count
+        return await self._run_with_reconnect(_inner)
+
     async def create_terminal(self, params: CreateTerminalParams) -> TerminalHandle:
         async def _inner():
             connection, app = await self._get_runtime()
@@ -172,8 +194,8 @@ class ITerm2Backend:
             return handle
         return await self._run_with_reconnect(_inner)
 
-    # 最大捕获行数（包括滚动回看历史）
-    SCREEN_MAX_LINES = 500
+    # 最大捕获行数（监控场景只需看近期输出）
+    SCREEN_MAX_LINES = 80
 
     async def get_screen_render(self, handle: TerminalHandle) -> tuple[str, str]:
         async def _inner():
@@ -257,15 +279,24 @@ class ITerm2Backend:
 
     async def focus(self, handle: TerminalHandle) -> None:
         async def _inner():
-            _, app = await self._get_runtime()
+            await self._get_runtime()
             session = await self._get_session(handle.session_id)
-            await app.async_activate()
             await session.async_activate(select_tab=True, order_window_front=True)
+            # 将 iTerm2 app 激活到前台（高于浏览器等其他窗口）
+            # 使用 NSApplicationActivateIgnoringOtherApps 而非 app.async_activate()
+            # 避免恢复所有最小化窗口
+            if AppKit is not None:
+                try:
+                    apps = AppKit.NSRunningApplication.runningApplicationsWithBundleIdentifier_("com.googlecode.iterm2")
+                    if apps:
+                        apps[0].activateWithOptions_(AppKit.NSApplicationActivateIgnoringOtherApps)
+                except Exception:
+                    pass
         await self._run_with_reconnect(_inner)
 
     async def detach(self, handle: TerminalHandle) -> None:
         async def _inner():
-            _, app = await self._get_runtime()
+            await self._get_runtime()  # 确保连接有效
             session = await self._get_session(handle.session_id)
             # 先清除管理标记
             await session.async_set_variable(MANAGED_FLAG_VAR, "")
@@ -276,22 +307,27 @@ class ITerm2Backend:
             await session.async_activate(select_tab=True, order_window_front=True)
         await self._run_with_reconnect(_inner)
 
-    async def scan_unmanaged_sessions(self) -> list[dict]:
+    async def scan_unmanaged_sessions(self, known_session_ids: set[str] | None = None) -> list[dict]:
         async def _inner():
-            _, app = await self._get_runtime()
-            await app.async_refresh()
+            _, app = await self._get_runtime(force_refresh=True)
             results: list[dict] = []
             for window in list(app.terminal_windows):
                 for tab in list(window.tabs):
                     for session in list(tab.sessions):
-                        if await self._is_managed_session(session):
-                            continue
                         try:
                             role = await session.async_get_variable(ANCHOR_ROLE_VAR)
                         except Exception:
                             role = None
                         if role == ANCHOR_ROLE_VALUE:
                             continue
+                        is_managed = await self._is_managed_session(session)
+                        if is_managed:
+                            # 若服务传入了已知 session 集合，则"有标记但不在集合里"的
+                            # 属于孤儿托管（服务重启后遗留），应包含进扫描结果
+                            if known_session_ids is not None and session.session_id not in known_session_ids:
+                                pass  # 孤儿，继续加入结果
+                            else:
+                                continue  # 当前服务已知的管理终端，跳过
                         try:
                             name = await session.async_get_variable("name") or session.session_id
                         except Exception:
@@ -312,8 +348,7 @@ class ITerm2Backend:
 
     async def adopt(self, session_id: str, name: str | None = None) -> TerminalHandle:
         async def _inner():
-            _, app = await self._get_runtime()
-            await app.async_refresh()
+            _, app = await self._get_runtime(force_refresh=True)
             target_session = None
             target_window_id = None
             target_tab_id = None
@@ -331,6 +366,7 @@ class ITerm2Backend:
                     break
             if target_session is None:
                 raise ValueError(f"找不到 session: {session_id}")
+            assert target_window_id is not None  # target_session 不为 None 时一定已赋值
             await target_session.async_set_variable(MANAGED_FLAG_VAR, True)
             await target_session.async_set_variable(MANAGED_OWNER_VAR, MANAGED_OWNER_VALUE)
             await target_session.async_set_variable(ANCHOR_ROLE_VAR, "managed")
@@ -461,11 +497,15 @@ class ITerm2Backend:
         except Exception:
             return False
 
-    async def _get_runtime(self):
+    async def _get_runtime(self, *, force_refresh: bool = False):
         connection = await self._ensure_connection()
         if self._app is None:
             self._app = await iterm2.async_get_app(connection)
-        await self._app.async_refresh()
+        # 1秒内不重复 refresh，减少 RPC 调用；force_refresh 跳过节流
+        now = time.monotonic()
+        if force_refresh or (now - self._last_refresh >= 1.0):
+            await self._app.async_refresh()
+            self._last_refresh = now
         return connection, self._app
 
     async def _run_with_reconnect(self, callback):
@@ -573,6 +613,10 @@ class ITerm2Backend:
         _, app = await self._get_runtime()
         session = app.get_session_by_id(session_id)
         if session is None:
+            # app 缓存可能过期（如服务重启后重新接管），强制刷新重试一次
+            _, app = await self._get_runtime(force_refresh=True)
+            session = app.get_session_by_id(session_id)
+        if session is None:
             raise RuntimeError(f"找不到 session: {session_id}")
         return session
 
@@ -610,6 +654,36 @@ class ITerm2Backend:
             lines.append(line)
         return "\n".join(lines).rstrip()
 
+    def _build_css_tuple(self, style) -> tuple[str, ...] | None:
+        """将 CellStyle 转为可比较的 CSS 属性元组，无样式返回 None"""
+        if style is None:
+            return None
+        css: list[str] = []
+        fg_css = _color_to_css(style.fg_color, "color")
+        if fg_css:
+            css.append(fg_css)
+        bg_css = _color_to_css(style.bg_color, "background-color")
+        if bg_css:
+            css.append(bg_css)
+        if getattr(style, 'bold', False):
+            css.append('font-weight: 700')
+        if getattr(style, 'italic', False):
+            css.append('font-style: italic')
+        if getattr(style, 'underline', False):
+            css.append('text-decoration: underline')
+        return tuple(css) if css else None
+
+    def _flush_span(self, css_tuple: tuple[str, ...] | None, buf: list[str], segments: list[str]) -> None:
+        """将缓冲区中的字符刷出为一个 span（或纯文本）"""
+        if not buf:
+            return
+        text = ''.join(buf)
+        if css_tuple:
+            segments.append(f'<span style="{"; ".join(css_tuple)}">{text}</span>')
+        else:
+            segments.append(text)
+        buf.clear()
+
     def _screen_to_html(self, contents) -> str:
         visible_count = self._visible_line_count(contents)
         if contents is None or visible_count == 0:
@@ -617,31 +691,20 @@ class ITerm2Backend:
         html_lines = []
         for index in range(visible_count):
             line = contents.line(index)
-            segments = []
+            segments: list[str] = []
             text = line.string or ""
             max_len = len(text)
+            # 合并相邻相同样式的字符到一个 span
+            cur_css: tuple[str, ...] | None = None
+            buf: list[str] = []
             for pos in range(max_len):
                 ch = html.escape(line.string_at(pos) or " ")
                 style = line.style_at(pos)
-                if style is None:
-                    segments.append(ch)
-                    continue
-                css = []
-                fg_css = _color_to_css(style.fg_color, "color")
-                if fg_css:
-                    css.append(fg_css)
-                bg_css = _color_to_css(style.bg_color, "background-color")
-                if bg_css:
-                    css.append(bg_css)
-                if getattr(style, 'bold', False):
-                    css.append('font-weight: 700')
-                if getattr(style, 'italic', False):
-                    css.append('font-style: italic')
-                if getattr(style, 'underline', False):
-                    css.append('text-decoration: underline')
-                if css:
-                    segments.append(f'<span style="{"; ".join(css)}">{ch}</span>')
-                else:
-                    segments.append(ch)
+                css_tuple = self._build_css_tuple(style)
+                if css_tuple != cur_css:
+                    self._flush_span(cur_css, buf, segments)
+                    cur_css = css_tuple
+                buf.append(ch)
+            self._flush_span(cur_css, buf, segments)
             html_lines.append(''.join(segments) if segments else '&nbsp;')
         return '<pre class="terminal-mirror terminal-mirror-rich">' + '\n'.join(html_lines) + '</pre>'

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
 import time
 from contextlib import suppress
 from datetime import datetime
@@ -12,7 +13,7 @@ from typing import Any
 from multi_iterm2_manager.analyzer import analyze_screen_text, load_rules, RuleEngineConfig
 from multi_iterm2_manager.backend.mock import MockTerminalBackend
 from multi_iterm2_manager.config import Settings, save_ui_settings
-from multi_iterm2_manager.display import suggest_monitor_grid
+from multi_iterm2_manager.display import get_all_screens, get_screen_bounds, suggest_monitor_grid
 from multi_iterm2_manager.models import CreateTerminalParams, GridLayoutParams, TerminalFrame, TerminalRecord, TerminalStatus, new_terminal_id
 
 
@@ -31,14 +32,20 @@ class DashboardService:
 
     async def start(self) -> None:
         await self.backend.start()
-        try:
-            await asyncio.wait_for(self.backend.cleanup_managed_terminals(), timeout=6)
-        except Exception:
-            pass
-        try:
-            await asyncio.wait_for(self.backend.maybe_quit_app(), timeout=3)
-        except Exception:
-            pass
+        # 环境变量由 start.sh 设置，告诉新进程跳过启动清理
+        if os.environ.get("MITERM_SAFE_RESTART") == "1":
+            print("[service] 安全重启模式：跳过 iTerm2 终端清理", flush=True)
+            # 启动完成后清理标志文件（旧进程 stop 已用完或不存在）
+            self._remove_safe_restart_flag()
+        else:
+            try:
+                await asyncio.wait_for(self.backend.cleanup_managed_terminals(), timeout=6)
+            except Exception:
+                pass
+            try:
+                await asyncio.wait_for(self.backend.maybe_quit_app(), timeout=3)
+            except Exception:
+                pass
         self._watchdog_task = asyncio.create_task(self._watchdog_loop())
         self._timeout_check_task = asyncio.create_task(self._timeout_check_loop())
 
@@ -53,15 +60,30 @@ class DashboardService:
             with suppress(asyncio.CancelledError):
                 await self._timeout_check_task
             self._timeout_check_task = None
-        try:
-            await self.close_all_terminals()
-        except Exception:
-            pass
-        try:
-            await self.backend.cleanup_managed_terminals()
-            await self.backend.maybe_quit_app()
-        except Exception:
-            pass
+
+        # 反转默认行为：
+        # - 只有 stop.sh 明确要求完整清理时（创建 full-cleanup 标志），才执行完整清理
+        # - 其他所有退出场景（Dock 强制退出、SIGTERM 等），默认只取消管理标记，不关闭窗口
+        full_cleanup = DashboardService._has_full_cleanup_flag()
+
+        if full_cleanup:
+            print("[service] 完整清理模式：关闭终端并退出 iTerm2", flush=True)
+            try:
+                await self.close_all_terminals()
+            except Exception:
+                pass
+            try:
+                await self.backend.cleanup_managed_terminals()
+                await self.backend.maybe_quit_app()
+            except Exception:
+                pass
+        else:
+            print("[service] 安全退出模式：仅取消管理标记，保留窗口", flush=True)
+            try:
+                await self.backend.unmark_all_managed()
+            except Exception:
+                pass
+
         for task in self.monitor_tasks.values():
             task.cancel()
         for task in self.monitor_tasks.values():
@@ -70,11 +92,41 @@ class DashboardService:
         self.monitor_tasks.clear()
         await self.backend.stop()
 
+    @staticmethod
+    def _safe_restart_flag_path() -> Path:
+        return Path(__file__).resolve().parent.parent.parent / ".run" / "safe-restart"
+
+    @staticmethod
+    def _has_safe_restart_flag() -> bool:
+        """只读检查标志文件是否存在（不删除）"""
+        return DashboardService._safe_restart_flag_path().is_file()
+
+    @staticmethod
+    def _remove_safe_restart_flag() -> None:
+        """清理标志文件"""
+        try:
+            DashboardService._safe_restart_flag_path().unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _full_cleanup_flag_path() -> Path:
+        return Path(__file__).resolve().parent.parent.parent / ".run" / "full-cleanup"
+
+    @staticmethod
+    def _has_full_cleanup_flag() -> bool:
+        """检查是否需要完整清理（由 stop.sh 创建）"""
+        path = DashboardService._full_cleanup_flag_path()
+        if path.is_file():
+            path.unlink(missing_ok=True)  # 一次性标志，用后即删
+            return True
+        return False
+
     def static_dir(self) -> Path:
         return Path(__file__).with_name("static")
 
     async def subscribe(self) -> asyncio.Queue[dict]:
-        queue: asyncio.Queue[dict] = asyncio.Queue()
+        queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=20)
         self._subscribers.add(queue)
         await queue.put(self.snapshot_event())
         return queue
@@ -128,6 +180,18 @@ class DashboardService:
             "itermReady": await self.backend.ping(),
         }
 
+    def get_screens(self) -> list[dict]:
+        """获取所有可用屏幕信息"""
+        return get_all_screens()
+
+    def get_target_screen(self) -> int:
+        """获取当前配置的目标屏幕索引"""
+        return self.settings.target_screen
+
+    def set_target_screen(self, screen_index: int) -> None:
+        """设置目标屏幕索引，-1 表示不指定"""
+        self.settings.target_screen = screen_index
+
     async def create_terminal(self, params: CreateTerminalParams) -> dict:
         final_name = (params.name or '').strip() or self._next_default_name()
         handle = await self.backend.create_terminal(CreateTerminalParams(name=final_name, command=params.command, profile=params.profile, frame=params.frame))
@@ -166,6 +230,33 @@ class DashboardService:
         record = self._get_record(terminal_id)
         try:
             await self.backend.focus(record.handle)
+            # 如果设置了目标屏幕，将窗口移动到该屏幕
+            target = self.settings.target_screen
+            if target >= 0:
+                bounds = get_screen_bounds(target)
+                if bounds is not None:
+                    # 将窗口移动到目标屏幕的中心位置
+                    # 使用当前窗口大小，移到目标屏幕可用区域的左上角偏移一点
+                    current_frame = await self.backend.get_frame(record.handle)
+                    if current_frame is not None:
+                        # 计算窗口在目标屏幕上的居中位置
+                        win_w = current_frame.width
+                        win_h = current_frame.height
+                        # 如果窗口比目标屏幕大，缩小到屏幕大小的 90%
+                        if win_w > bounds.width:
+                            win_w = bounds.width * 0.9
+                        if win_h > bounds.height:
+                            win_h = bounds.height * 0.9
+                        new_x = bounds.x + (bounds.width - win_w) / 2
+                        new_y = bounds.y + (bounds.height - win_h) / 2
+                        new_frame = TerminalFrame(
+                            x=round(new_x, 2),
+                            y=round(new_y, 2),
+                            width=round(win_w, 2),
+                            height=round(win_h, 2),
+                        )
+                        await self.backend.set_frame(record.handle, new_frame)
+                        record.frame = new_frame
         except Exception as exc:
             if self._is_missing_terminal_error(exc):
                 return await self._mark_terminal_closed(record, reason="真实窗口已被手动关闭")
@@ -224,7 +315,10 @@ class DashboardService:
         return {"detached": True, "terminalId": terminal_id}
 
     async def scan_sessions(self) -> list[dict]:
-        return await self.backend.scan_unmanaged_sessions()
+        # 将当前已知的 session IDs 传给后端，使其能识别"孤儿托管"终端
+        # 孤儿托管 = 有 mitm_managed 标记，但服务重启后 records 已清空的旧终端
+        known_ids = {r.handle.session_id for r in self.records.values()}
+        return await self.backend.scan_unmanaged_sessions(known_session_ids=known_ids)
 
     async def adopt_terminal(self, session_id: str, name: str | None = None) -> dict:
         final_name = (name or '').strip() or self._next_default_name()
@@ -330,9 +424,22 @@ class DashboardService:
             try:
                 queue.put_nowait(payload)
             except asyncio.QueueFull:
-                dead.append(queue)
+                # 清空旧消息，补发最新快照
+                self._drain_queue(queue)
+                try:
+                    queue.put_nowait(self.snapshot_event())
+                except asyncio.QueueFull:
+                    dead.append(queue)
         for queue in dead:
             self._subscribers.discard(queue)
+
+    def _drain_queue(self, queue: asyncio.Queue[dict]) -> None:
+        """清空队列中的所有旧消息"""
+        while not queue.empty():
+            try:
+                queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
 
     def _start_monitor(self, terminal_id: str) -> None:
         task = asyncio.create_task(self._monitor_terminal(terminal_id))
@@ -340,13 +447,52 @@ class DashboardService:
 
     async def _monitor_terminal(self, terminal_id: str) -> None:
         record = self._get_record(terminal_id)
+        last_broadcast_time: float = 0.0
+        min_interval: float = 0.3  # 最小广播间隔 300ms
+        pending_broadcast: asyncio.Task[None] | None = None
         try:
             async for text, screen_html in self.backend.stream_screen(record.handle):
                 self._apply_screen_text(record, text, screen_html, is_live=True)
-                await self._broadcast(self.record_event(terminal_id))
+
+                # 内容哈希没变，跳过广播
+                new_hash = hashlib.md5(screen_html.encode()).hexdigest()
+                if new_hash == record._last_broadcast_hash:
+                    continue
+
+                now = time.time()
+                elapsed = now - last_broadcast_time
+
+                if elapsed >= min_interval:
+                    # 已超过最小间隔，立即广播
+                    if pending_broadcast is not None and not pending_broadcast.done():
+                        pending_broadcast.cancel()
+                        pending_broadcast = None
+                    record._last_broadcast_hash = new_hash
+                    last_broadcast_time = now
+                    await self._broadcast(self.record_event(terminal_id))
+                else:
+                    # 未到间隔，设置兜底定时广播（始终用最新内容）
+                    if pending_broadcast is not None and not pending_broadcast.done():
+                        pending_broadcast.cancel()
+                    delay = min_interval - elapsed
+
+                    async def _deferred_broadcast(tid: str, rec: TerminalRecord, h: str, d: float) -> None:
+                        await asyncio.sleep(d)
+                        rec._last_broadcast_hash = h
+                        nonlocal last_broadcast_time
+                        last_broadcast_time = time.time()
+                        await self._broadcast(self.record_event(tid))
+
+                    pending_broadcast = asyncio.ensure_future(
+                        _deferred_broadcast(terminal_id, record, new_hash, delay)
+                    )
         except asyncio.CancelledError:
+            if pending_broadcast is not None and not pending_broadcast.done():
+                pending_broadcast.cancel()
             raise
         except Exception as exc:
+            if pending_broadcast is not None and not pending_broadcast.done():
+                pending_broadcast.cancel()
             if self._is_missing_terminal_error(exc):
                 await self._mark_terminal_closed(record, reason="真实窗口已被手动关闭")
                 return

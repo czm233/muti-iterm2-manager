@@ -36,6 +36,7 @@ class Settings:
     rules_file: str = "rules.yaml"
     ui_settings_file: str = "ui-settings.yaml"
     ui_settings: UiSettings = field(default_factory=UiSettings)
+    target_screen: int = -1  # -1 表示"跟随当前/不指定"，0 表示屏幕1，1 表示屏幕2...
 
 
 def _resolve_project_file(path_value: str) -> Path:
@@ -55,7 +56,8 @@ def _read_yaml_file(path: Path) -> dict[str, Any]:
 def load_ui_settings(path_value: str) -> UiSettings:
     path = _resolve_project_file(path_value)
     payload = _read_yaml_file(path)
-    ui_payload = payload.get("ui") if isinstance(payload.get("ui"), dict) else payload
+    raw_ui = payload.get("ui")
+    ui_payload: dict[str, Any] = raw_ui if isinstance(raw_ui, dict) else payload
 
     defaults = UiSettings()
     values: dict[str, Any] = {}
@@ -101,4 +103,5 @@ def load_settings() -> Settings:
         rules_file=os.getenv("MITERM_RULES_FILE", "rules.yaml"),
         ui_settings_file=ui_settings_file,
         ui_settings=load_ui_settings(ui_settings_file),
+        target_screen=int(os.getenv("MITERM_TARGET_SCREEN", "-1")),
     )

@@ -57,6 +57,7 @@ class TerminalRecord:
     last_error: str | None = None
     content_hash: str = ""
     content_stable_since: float = 0.0
+    _last_broadcast_hash: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {

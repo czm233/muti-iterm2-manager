@@ -13,14 +13,19 @@ const state = {
   activeGridResize: null,
   activeSplitResize: null,
   activeCardDrag: null,
-  suppressClickUntil: 0,
   editingTitleTerminalId: null,
-  filter: "active",
+  filter: "default",
   page: 1,
   pageSize: 6,
   focusedInputTerminalId: null,
   uiSettings: null,
   defaultUiSettings: null,
+  hiddenTerminalIds: new Set(),   // 用户手动隐藏的终端 ID 集合，持久化到 localStorage
+  attentionSnapshot: null,        // 进入"待处理"筛选时快照的 ID 集合，避免处理后立即消失
+  _rafPending: false,             // rAF 是否已调度
+  _needFullRefresh: false,        // 是否需要全量刷新
+  _pendingLayout: null,           // 待应用的 layout
+  _incrementalIds: new Set(),     // 需要增量更新的终端 ID 集合
 };
 
 const VIEW_STATE_STORAGE_KEY = "mitm-monitor-view-state";
@@ -31,6 +36,7 @@ function saveViewState() {
       orderedTerminalIds: state.orderedTerminalIds,
       gridTrackRatios: state.gridTrackRatios,
       layoutTree: state.layoutTree,
+      hiddenTerminalIds: [...state.hiddenTerminalIds],
     };
     window.localStorage.setItem(VIEW_STATE_STORAGE_KEY, JSON.stringify(payload));
   } catch {
@@ -50,6 +56,9 @@ function loadViewState() {
     }
     if (payload.layoutTree && typeof payload.layoutTree === "object") {
       state.layoutTree = normalizeLayoutTree(payload.layoutTree);
+    }
+    if (Array.isArray(payload.hiddenTerminalIds)) {
+      state.hiddenTerminalIds = new Set(payload.hiddenTerminalIds);
     }
   } catch {
   }
@@ -231,9 +240,11 @@ function statusLabel(status) {
 function filterLabel(filter) {
   return {
     all: "全部",
+    default: "默认",
     active: "活跃",
     attention: "待处理",
     done: "已完成",
+    hidden: "已隐藏",
   }[filter] || filter;
 }
 
@@ -821,8 +832,11 @@ function stopCardPointerDrag() {
   if (!session) {
     return;
   }
+  window.removeEventListener('pointermove', handleCardPointerMove);
+  window.removeEventListener('pointerup', handleCardPointerUp);
+  window.removeEventListener('pointercancel', handleCardPointerUp);
   try {
-    session.card.releasePointerCapture?.(session.pointerId);
+    session.handle.releasePointerCapture?.(session.pointerId);
   } catch {
   }
   session.card.classList.remove('is-dragging');
@@ -874,7 +888,6 @@ function handleCardPointerUp(event) {
   const shouldCommit = session.started;
   if (shouldCommit) {
     event.preventDefault();
-    state.suppressClickUntil = Date.now() + 220;
     commitCardPointerDrag(event.clientX, event.clientY);
   }
   stopCardPointerDrag();
@@ -884,6 +897,7 @@ function beginCardPointerDrag(card, record, event) {
   if (event.button !== 0 || shouldIgnoreDragStart(event.target) || record.status === 'closed' || state.activeGridResize || state.activeSplitResize) {
     return;
   }
+  const handle = event.currentTarget;
   state.activeCardDrag = {
     pointerId: event.pointerId,
     startX: event.clientX,
@@ -891,15 +905,30 @@ function beginCardPointerDrag(card, record, event) {
     started: false,
     terminalId: record.id,
     card,
+    handle,
   };
-  card.setPointerCapture?.(event.pointerId);
+  handle.setPointerCapture?.(event.pointerId);
+  window.addEventListener('pointermove', handleCardPointerMove);
+  window.addEventListener('pointerup', handleCardPointerUp);
+  window.addEventListener('pointercancel', handleCardPointerUp);
 }
 
 function clearSplitDropPreview() {
+  const prevId = state.hoverTargetPaneId;
   state.hoverTargetPaneId = null;
   state.hoverDropZone = null;
+  const previewClasses = ['split-preview-left', 'split-preview-right', 'split-preview-top', 'split-preview-bottom'];
+  // 尝试精确定位上一个 preview card
+  if (prevId) {
+    const prevCard = document.querySelector(`.wall-card[data-terminal-id="${prevId}"]`);
+    if (prevCard) {
+      prevCard.classList.remove(...previewClasses);
+      return;
+    }
+  }
+  // fallback: 全局遍历
   document.querySelectorAll('.wall-card').forEach((card) => {
-    card.classList.remove('split-preview-left', 'split-preview-right', 'split-preview-top', 'split-preview-bottom');
+    card.classList.remove(...previewClasses);
   });
 }
 
@@ -909,6 +938,26 @@ function applySplitDropPreview(card, terminalId, zone) {
   state.hoverTargetPaneId = terminalId;
   state.hoverDropZone = zone;
   card.classList.add(`split-preview-${zone}`);
+}
+
+// 等待状态音效通知 - 当终端需要人类参与时发出提示音（单例 AudioContext 避免资源泄漏）
+let _audioCtx = null;
+function playWaitingAlert() {
+  try {
+    if (!_audioCtx) _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const osc = _audioCtx.createOscillator();
+    const gain = _audioCtx.createGain();
+    osc.connect(gain);
+    gain.connect(_audioCtx.destination);
+    osc.frequency.value = 880;
+    osc.type = "sine";
+    gain.gain.value = 0.3;
+    osc.start();
+    gain.gain.exponentialRampToValueAtTime(0.01, _audioCtx.currentTime + 0.3);
+    osc.stop(_audioCtx.currentTime + 0.3);
+  } catch (e) {
+    // 静默失败，不影响正常功能
+  }
 }
 
 function escapeHtml(text) {
@@ -966,14 +1015,67 @@ function getFilteredTerminals() {
     .map((id) => state.terminals.get(id))
     .filter(Boolean);
   if (state.filter === "all") return all;
-  if (state.filter === "active") return all.filter((record) => record.status !== "closed");
-  if (state.filter === "attention") return all.filter((record) => ["error", "waiting"].includes(record.status));
-  if (state.filter === "done") return all.filter((record) => record.status === "done");
-  return all;
+  if (state.filter === "hidden") return all.filter((record) => state.hiddenTerminalIds.has(record.id));
+  if (state.filter === "done") return all.filter((record) => record.status === "done" && !state.hiddenTerminalIds.has(record.id));
+  if (state.filter === "running") return all.filter((record) => record.status === "running" && !state.hiddenTerminalIds.has(record.id));
+  if (state.filter === "attention") {
+    // 进入"待处理"时会生成快照，快照期间不随状态变化自动删除终端
+    if (state.attentionSnapshot) {
+      return all.filter((record) => state.attentionSnapshot.has(record.id));
+    }
+    return all.filter((record) => ["error", "waiting"].includes(record.status) && !state.hiddenTerminalIds.has(record.id));
+  }
+  // default：不显示已隐藏的终端
+  return all.filter((record) => !state.hiddenTerminalIds.has(record.id));
 }
 
 function shouldPaginateCurrentFilter() {
-  return state.filter === "all" || state.filter === "done";
+  return state.filter === "all" || state.filter === "hidden" || state.filter === "done" || state.filter === "running";
+}
+
+function syncFilterTabs() {
+  // 更新 tab 激活状态
+  document.querySelectorAll("#topbar-filters .filter-tab").forEach((tab) => {
+    tab.classList.toggle("is-active", tab.dataset.filter === state.filter);
+  });
+  // 与 getFilteredTerminals() 保持同一来源，避免计数与实际结果不一致
+  const ordered = state.orderedTerminalIds
+    .map((id) => state.terminals.get(id))
+    .filter(Boolean);
+  // 待处理 badge：非隐藏的 error/waiting 终端数量
+  const attentionCount = ordered.filter(
+    (r) => ["error", "waiting"].includes(r.status) && !state.hiddenTerminalIds.has(r.id)
+  ).length;
+  const attentionBadge = document.getElementById("filter-attention-badge");
+  if (attentionBadge) {
+    attentionBadge.textContent = attentionCount > 0 ? String(attentionCount) : "";
+    attentionBadge.hidden = attentionCount === 0;
+  }
+  // 已隐藏 badge：隐藏终端数量
+  const hiddenCount = ordered.filter((r) => state.hiddenTerminalIds.has(r.id)).length;
+  const hiddenBadge = document.getElementById("filter-hidden-badge");
+  if (hiddenBadge) {
+    hiddenBadge.textContent = hiddenCount > 0 ? String(hiddenCount) : "";
+    hiddenBadge.hidden = hiddenCount === 0;
+  }
+  // 已完成 badge：非隐藏的 done 终端数量
+  const doneCount = ordered.filter(
+    (r) => r.status === "done" && !state.hiddenTerminalIds.has(r.id)
+  ).length;
+  const doneBadge = document.getElementById("filter-done-badge");
+  if (doneBadge) {
+    doneBadge.textContent = doneCount > 0 ? String(doneCount) : "";
+    doneBadge.hidden = doneCount === 0;
+  }
+  // 工作中 badge：非隐藏的 running 终端数量
+  const runningCount = ordered.filter(
+    (r) => r.status === "running" && !state.hiddenTerminalIds.has(r.id)
+  ).length;
+  const runningBadge = document.getElementById("filter-running-badge");
+  if (runningBadge) {
+    runningBadge.textContent = runningCount > 0 ? String(runningCount) : "";
+    runningBadge.hidden = runningCount === 0;
+  }
 }
 
 function getPagedTerminals() {
@@ -1146,9 +1248,6 @@ function restoreInputFocus(card, record) {
 
 function bindCardActions(card, record) {
   card.draggable = false;
-  card.onpointermove = handleCardPointerMove;
-  card.onpointerup = handleCardPointerUp;
-  card.onpointercancel = handleCardPointerUp;
   const startRename = () => {
     if (!title || !titleInput) return;
     state.editingTitleTerminalId = record.id;
@@ -1163,16 +1262,18 @@ function bindCardActions(card, record) {
 
   const finishRename = async (commit) => {
     if (!title || !titleInput) return;
+    if (state.editingTitleTerminalId !== record.id) return;
     const nextName = titleInput.value.trim();
     titleInput.hidden = true;
     title.hidden = false;
-    state.editingTitleTerminalId = null;
     if (!commit || !nextName || nextName === record.name) {
+      state.editingTitleTerminalId = null;
       refreshWall();
       return;
     }
     try {
       await renameTerminal(record.id, nextName);
+      state.editingTitleTerminalId = null;
       setMessage(`已将终端重命名为 ${nextName}`);
     } catch (error) {
       state.editingTitleTerminalId = record.id;
@@ -1196,6 +1297,7 @@ function bindCardActions(card, record) {
   if (title) {
     title.ondblclick = (event) => {
       event.stopPropagation();
+      event.preventDefault(); // 阻止浏览器默认双击选中文字，避免焦点被意外转移
       startRename();
     };
   }
@@ -1238,8 +1340,10 @@ function bindCardActions(card, record) {
   }
 
   terminalArea.onclick = async (event) => {
+    // 点击终端区域时主动关闭所有已展开的顶部菜单（因 stopPropagation 会阻止冒泡）
+    document.querySelectorAll(".topbar-menu[open]").forEach((d) => d.removeAttribute("open"));
     event.stopPropagation();
-    if (Date.now() < state.suppressClickUntil) return;
+    if (state.activeCardDrag || state.draggedTerminalId) return;
     if (record.status === "closed") return;
     try {
       await focusTerminal(record.id, record.name);
@@ -1258,7 +1362,7 @@ function bindCardActions(card, record) {
     }
   };
 
-  card.querySelector("[data-action='hide']").onclick = async (event) => {
+  card.querySelector("[data-action='monitor-mode']").onclick = async (event) => {
     event.stopPropagation();
     try {
       await request("/api/workspace/monitor-mode", { method: "POST" });
@@ -1267,6 +1371,22 @@ function bindCardActions(card, record) {
       setMessage(error.message, true);
     }
   };
+
+  const toggleHideBtn = card.querySelector("[data-action='toggle-hide']");
+  if (toggleHideBtn) {
+    toggleHideBtn.onclick = (event) => {
+      event.stopPropagation();
+      if (state.hiddenTerminalIds.has(record.id)) {
+        state.hiddenTerminalIds.delete(record.id);
+        setMessage(`已取消隐藏 ${record.name}`);
+      } else {
+        state.hiddenTerminalIds.add(record.id);
+        setMessage(`已隐藏 ${record.name}，可在"已隐藏"筛选中找到`);
+      }
+      saveViewState();
+      refreshWall();
+    };
+  }
 
   const detachBtn = card.querySelector("[data-action='detach']");
   if (detachBtn) {
@@ -1355,6 +1475,16 @@ function renderTerminal(record) {
     card.className = "wall-card";
   }
 
+  // 正在编辑此卡片标题时，跳过全卡 innerHTML 替换
+  // 否则 DOM 重建会销毁聚焦中的 input，触发 blur → finishRename，打断用户输入
+  if (state.editingTitleTerminalId === record.id) {
+    updateTerminalSnapshot(record, card.querySelector(".wall-card-terminal"));
+    return card;
+  }
+
+  // 保存面板展开状态，避免 innerHTML 替换后面板消失
+  const wasDetailsOpen = card.querySelector(".wall-card-details-panel:not([hidden])") !== null;
+
   card.className = `wall-card status-${record.status}`;
   card.innerHTML = `
     <div class="wall-card-header">
@@ -1371,7 +1501,8 @@ function renderTerminal(record) {
         </div>
         <div class="wall-card-tools">
           <button data-action="refresh" class="secondary">刷新</button>
-          <button data-action="hide" class="secondary">回监控模式</button>
+          <button data-action="monitor-mode" class="secondary">回监控模式</button>
+          <button data-action="toggle-hide" class="secondary">${state.hiddenTerminalIds.has(record.id) ? "取消隐藏" : "隐藏"}</button>
           ${record.status !== "closed" ? '<button data-action="detach" class="secondary">解绑</button>' : ''}
           <button type="button" class="secondary wall-card-input-toggle">命令</button>
         </div>
@@ -1394,6 +1525,15 @@ function renderTerminal(record) {
   updateTerminalSnapshot(record, card.querySelector(".wall-card-terminal"));
   bindCardActions(card, record);
   restoreInputFocus(card, record);
+
+  // 恢复面板展开状态
+  if (wasDetailsOpen) {
+    const detailsPanel = card.querySelector(".wall-card-details-panel");
+    const detailsToggle = card.querySelector(".wall-card-more-button");
+    if (detailsPanel) detailsPanel.hidden = false;
+    if (detailsToggle) detailsToggle.classList.add("is-active");
+  }
+
   return card;
 }
 
@@ -1421,10 +1561,6 @@ function renderToolbarExtras(pageInfo) {
       <button id="toggle-fit-mode" class="secondary">四终端铺满</button>
     </div>
     <div class="wall-control-actions">
-      <button data-filter="active" class="secondary ${state.filter === "active" ? "is-active" : ""}">活跃</button>
-      <button data-filter="attention" class="secondary ${state.filter === "attention" ? "is-active" : ""}">待处理</button>
-      <button data-filter="done" class="secondary ${state.filter === "done" ? "is-active" : ""}">已完成</button>
-      <button data-filter="all" class="secondary ${state.filter === "all" ? "is-active" : ""}">全部</button>
       <button id="prev-page" class="ghost" ${shouldPaginateCurrentFilter() ? "" : "disabled"}>上一页</button>
       <button id="next-page" class="ghost" ${shouldPaginateCurrentFilter() ? "" : "disabled"}>下一页</button>
       <button id="focus-attention" class="secondary">接管下一个待处理</button>
@@ -1457,15 +1593,6 @@ function renderToolbarExtras(pageInfo) {
     refreshWall();
   };
 
-  wallControls.querySelectorAll("[data-filter]").forEach((button) => {
-    button.onclick = () => {
-      state.filter = button.dataset.filter;
-      state.page = 1;
-      saveViewState();
-      refreshWall();
-    };
-  });
-
   wallControls.querySelector("#prev-page").onclick = () => {
     state.page = Math.max(1, state.page - 1);
     saveViewState();
@@ -1492,13 +1619,103 @@ function renderToolbarExtras(pageInfo) {
   };
 }
 
+// rAF 批处理渲染调度：合并高频 WebSocket 消息，统一在下一帧渲染
+function scheduleRender(layout = null) {
+  if (layout !== null) {
+    state._pendingLayout = layout;
+  }
+  if (state._rafPending) return;
+  state._rafPending = true;
+  window.requestAnimationFrame(() => {
+    state._rafPending = false;
+    const layout = state._pendingLayout;
+    state._pendingLayout = null;
+    if (state._needFullRefresh) {
+      state._needFullRefresh = false;
+      state._incrementalIds.clear();
+      refreshWall(layout);
+    } else if (state._incrementalIds.size > 0) {
+      const ids = new Set(state._incrementalIds);
+      state._incrementalIds.clear();
+      incrementalUpdate(layout, ids);
+    } else {
+      refreshWall(layout);
+    }
+  });
+}
+
+// 增量 DOM 更新：只更新变化的卡片，避免全量重建
+function incrementalUpdate(layout = null, changedIds) {
+  applyLayout(layout);
+  // 检查是否有新终端（无对应卡片），回退到全量刷新
+  for (const id of changedIds) {
+    const existing = document.getElementById(`card-${id}`);
+    if (!existing) {
+      refreshWall(layout);
+      return;
+    }
+  }
+  // 增量更新每张变化的卡片
+  for (const id of changedIds) {
+    const record = state.terminals.get(id);
+    if (!record) continue;
+    const card = document.getElementById(`card-${id}`);
+    if (!card) continue;
+    // 更新卡片状态样式（保留拖拽和 preview 相关 class）
+    const preserveClasses = [];
+    if (card.classList.contains('is-dragging')) preserveClasses.push('is-dragging');
+    for (const cls of card.classList) {
+      if (cls.startsWith('split-preview-')) preserveClasses.push(cls);
+    }
+    card.className = `wall-card status-${record.status}${preserveClasses.length ? ' ' + preserveClasses.join(' ') : ''}`;
+    // 更新终端输出区域
+    updateTerminalSnapshot(record, card.querySelector(".wall-card-terminal"));
+    // 更新卡片元信息（标题、状态 badge 等）
+    updateCardMeta(card, record);
+  }
+  // 更新统计和筛选
+  syncFilterTabs();
+  renderStats();
+}
+
+// 轻量更新卡片元信息：标题、状态 badge、摘要等（不重建 DOM）
+function updateCardMeta(card, record) {
+  // 正在编辑标题时跳过
+  if (state.editingTitleTerminalId === record.id) return;
+  // 更新标题
+  const title = card.querySelector(".wall-card-title");
+  if (title) title.textContent = record.name;
+  // 更新状态 badge
+  const badge = card.querySelector(".badge");
+  if (badge) {
+    badge.className = `badge status-${record.status}`;
+    badge.textContent = statusLabel(record.status);
+  }
+  // 更新时间戳
+  const marker = card.querySelector(".wall-card-topline .marker");
+  if (marker) marker.textContent = record.updatedAt || "-";
+  // 更新摘要
+  const summary = card.querySelector(".wall-card-summary");
+  if (summary) summary.textContent = record.summary || "暂无摘要";
+  // 更新错误信息
+  const errorEl = card.querySelector(".wall-card-error");
+  if (record.lastError) {
+    if (errorEl) {
+      errorEl.textContent = `错误：${record.lastError}`;
+      errorEl.hidden = false;
+    }
+  } else if (errorEl) {
+    errorEl.hidden = true;
+  }
+}
+
 function refreshWall(layout = null) {
   applyLayout(layout);
   const pageInfo = getPagedTerminals();
   grid.innerHTML = "";
   if (pageInfo.items.length === 0) {
     renderEmptyState();
-  } else if (state.layoutTree && state.filter === "active") {
+  } else if (state.layoutTree && state.filter === "default") {
     syncLayoutTree();
     const treeElement = renderLayoutNode(state.layoutTree, new Set(pageInfo.items.map((record) => record.id)));
     if (treeElement) {
@@ -1513,6 +1730,7 @@ function refreshWall(layout = null) {
     renderGridResizers();
   }
   renderToolbarExtras(pageInfo);
+  syncFilterTabs();
   renderStats();
 }
 
@@ -1543,6 +1761,8 @@ async function loadInitialState() {
     buildVersion.textContent = `v${healthData.version}`;
   }
   saveViewState();
+  // 加载屏幕选择器数据（不阻塞主流程）
+  loadScreenSelector();
 }
 
 function connectWebSocket() {
@@ -1557,16 +1777,25 @@ function connectWebSocket() {
       return;
     }
     if (payload.type === "terminal-updated") {
+      // 检测状态是否变为 waiting，播放提示音
+      const oldRecord = state.terminals.get(payload.terminal.id);
+      const oldStatus = oldRecord ? oldRecord.status : null;
+      if (payload.terminal.status === "waiting" && oldStatus !== "waiting") {
+        playWaitingAlert();
+      }
       state.terminals.set(payload.terminal.id, payload.terminal);
       if (!state.orderedTerminalIds.includes(payload.terminal.id)) {
         state.orderedTerminalIds.push(payload.terminal.id);
       }
       syncLayoutTree();
-      refreshWall(payload.layout || null);
+      // 增量更新：只标记变化的终端 ID，由 rAF 统一渲染
+      state._incrementalIds.add(payload.terminal.id);
+      scheduleRender(payload.layout || null);
       return;
     }
     if (payload.type === "monitor-layout" || payload.type === "workspace-mode") {
-      refreshWall(payload.layout || null);
+      state._needFullRefresh = true;
+      scheduleRender(payload.layout || null);
       return;
     }
     if (payload.type === "ui-settings-updated") {
@@ -1574,7 +1803,8 @@ function connectWebSocket() {
       if (uiSettingsPath && payload.file) {
         uiSettingsPath.textContent = `配置文件：${payload.file}`;
       }
-      refreshWall();
+      state._needFullRefresh = true;
+      scheduleRender();
     }
   };
   socket.onerror = () => {
@@ -1690,6 +1920,42 @@ async function doScanSessions() {
 
 document.getElementById("scan-sessions").onclick = () => doScanSessions();
 
+document.getElementById("adopt-all-sessions").onclick = async () => {
+  const btn = document.getElementById("adopt-all-sessions");
+  btn.disabled = true;
+  btn.textContent = "扫描中...";
+  try {
+    const data = await request("/api/iterm2/sessions");
+    const sessions = data.items || [];
+    if (sessions.length === 0) {
+      setMessage("没有发现可接管的终端");
+      return;
+    }
+    btn.textContent = `接管中 0/${sessions.length}`;
+    let count = 0;
+    for (const s of sessions) {
+      try {
+        await request("/api/terminals/adopt", {
+          method: "POST",
+          body: JSON.stringify({ session_id: s.session_id }),
+        });
+        count++;
+        btn.textContent = `接管中 ${count}/${sessions.length}`;
+      } catch (_e) {
+        // 单个失败不阻断其余
+      }
+    }
+    setMessage(`已接管 ${count} 个终端`);
+    // 刷新扫描列表
+    doScanSessions();
+  } catch (error) {
+    setMessage(error.message, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "一键接管";
+  }
+};
+
 closeAllButton.onclick = async () => {
   try {
     await request("/api/terminals/close-all", { method: "POST" });
@@ -1748,6 +2014,124 @@ if (uiSettingsResetButton) {
     }
   };
 }
+
+// --- 屏幕选择设置 ---
+
+/**
+ * 在调优面板中动态注入屏幕选择 UI
+ */
+function injectScreenSelector() {
+  const tuningPanel = document.querySelector(".topbar-menu--wide > .topbar-menu-panel");
+  if (!tuningPanel) return;
+
+  // 创建分隔线
+  const divider = document.createElement("div");
+  divider.className = "panel-divider";
+
+  // 创建标题
+  const title = document.createElement("div");
+  title.className = "panel-title";
+  title.textContent = "终端弹出设置";
+
+  // 创建表单
+  const form = document.createElement("form");
+  form.id = "screen-selector-form";
+  form.className = "topbar-form ui-settings-form";
+  form.style.gridTemplateColumns = "1fr"; // 单列布局
+  form.innerHTML = `
+    <label>
+      <span>激活窗口目标屏幕</span>
+      <select id="target-screen-select" style="
+        background: var(--surface);
+        color: var(--fg);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 6px 8px;
+        font-size: 0.92rem;
+        width: 100%;
+      ">
+        <option value="-1">不指定（当前屏幕）</option>
+      </select>
+    </label>
+    <div class="topbar-menu-actions">
+      <button type="submit" class="secondary">保存屏幕设置</button>
+    </div>
+  `;
+
+  tuningPanel.appendChild(divider);
+  tuningPanel.appendChild(title);
+  tuningPanel.appendChild(form);
+
+  // 绑定保存事件
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const select = document.getElementById("target-screen-select");
+    const screenIndex = Number(select.value);
+    try {
+      await request("/api/screens/target", {
+        method: "PUT",
+        body: JSON.stringify({ target_screen: screenIndex }),
+      });
+      setMessage("屏幕设置已保存");
+    } catch (error) {
+      setMessage(error.message, true);
+    }
+  });
+}
+
+/**
+ * 加载屏幕列表并填充下拉框，同时选中当前配置值
+ */
+async function loadScreenSelector() {
+  const select = document.getElementById("target-screen-select");
+  if (!select) return;
+
+  try {
+    // 从屏幕列表 API 获取屏幕信息和当前配置
+    const screensData = await request("/api/screens");
+
+    const screens = screensData.items || [];
+    const currentTarget = screensData.targetScreen ?? -1;
+
+    // 清空并重建选项
+    select.innerHTML = '<option value="-1">不指定（当前屏幕）</option>';
+    for (const screen of screens) {
+      const option = document.createElement("option");
+      option.value = String(screen.index);
+      option.textContent = `${screen.name} (${screen.width}x${screen.height})`;
+      select.appendChild(option);
+    }
+
+    // 选中当前配置值
+    select.value = String(currentTarget);
+  } catch (error) {
+    // 屏幕列表加载失败时静默处理，不影响主功能
+    console.warn("加载屏幕列表失败:", error.message);
+  }
+}
+
+// 初始化屏幕选择 UI
+injectScreenSelector();
+
+// 初始化顶部筛选 tab 点击事件
+document.querySelectorAll("#topbar-filters .filter-tab").forEach((tab) => {
+  tab.onclick = () => {
+    const filter = tab.dataset.filter;
+    if (filter === "attention" && state.filter !== "attention") {
+      // 进入"待处理"时对当前待处理终端做快照，避免处理后立即消失
+      state.attentionSnapshot = new Set(
+        [...state.terminals.values()]
+          .filter((r) => ["error", "waiting"].includes(r.status) && !state.hiddenTerminalIds.has(r.id))
+          .map((r) => r.id)
+      );
+    } else if (filter !== "attention") {
+      state.attentionSnapshot = null;
+    }
+    state.filter = filter;
+    state.page = 1;
+    refreshWall();
+  };
+});
 
 window.addEventListener("resize", () => {
   if (state.layout.count > 0) {
