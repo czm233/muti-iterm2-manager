@@ -278,6 +278,22 @@ class ITerm2Backend:
         await self._run_with_reconnect(_inner)
 
     async def focus(self, handle: TerminalHandle) -> None:
+        # 保存剪贴板状态：macOS 应用切换时可能清空系统剪贴板
+        saved_clipboard = None
+        saved_change_count = None
+        if AppKit is not None:
+            try:
+                pb = AppKit.NSPasteboard.generalPasteboard()
+                saved_change_count = pb.changeCount()
+                saved_clipboard = []
+                for pb_type in pb.types() or []:
+                    data = pb.dataForType_(pb_type)
+                    if data is not None:
+                        saved_clipboard.append((pb_type, bytes(data)))
+            except Exception:
+                saved_clipboard = None
+                saved_change_count = None
+
         async def _inner():
             await self._get_runtime()
             session = await self._get_session(handle.session_id)
@@ -293,6 +309,18 @@ class ITerm2Backend:
                 except Exception:
                     pass
         await self._run_with_reconnect(_inner)
+
+        # 恢复剪贴板：如果 changeCount 变化说明剪贴板被清空/修改了
+        if AppKit is not None and saved_clipboard is not None and saved_change_count is not None:
+            try:
+                pb = AppKit.NSPasteboard.generalPasteboard()
+                if pb.changeCount() != saved_change_count:
+                    pb.clearContents()
+                    for pb_type, data_bytes in saved_clipboard:
+                        ns_data = AppKit.NSData.dataWithBytes_length_(data_bytes, len(data_bytes))
+                        pb.setData_forType_(ns_data, pb_type)
+            except Exception:
+                pass
 
     async def detach(self, handle: TerminalHandle) -> None:
         async def _inner():
