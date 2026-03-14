@@ -1019,7 +1019,20 @@ function updateTerminalSnapshot(record, mount) {
     return;
   }
   const text = record.screenText && record.screenText.trim() ? record.screenText : "暂无输出";
-  mount.innerHTML = record.screenHtml || `<pre class="terminal-mirror">${escapeHtml(text)}</pre>`;
+  const newHtml = record.screenHtml || `<pre class="terminal-mirror">${escapeHtml(text)}</pre>`;
+  // 检测内容是否实际发生变化，用于触发光带动效
+  const contentChanged = mount.innerHTML !== newHtml;
+  mount.innerHTML = newHtml;
+  // 内容变化时触发卡片底部光带扫过动效（首次渲染不触发）
+  if (contentChanged && initialRenderDone) {
+    const card = mount.closest(".wall-card");
+    if (card) {
+      card.classList.remove("content-flash");
+      void card.offsetWidth;
+      card.classList.add("content-flash");
+      card.addEventListener("animationend", () => card.classList.remove("content-flash"), { once: true });
+    }
+  }
   window.requestAnimationFrame(() => {
     mount.scrollTop = mount.scrollHeight;
     const mirror = mount.querySelector(".terminal-mirror");
@@ -1759,6 +1772,7 @@ function incrementalUpdate(layout = null, changedIds) {
     const preserveClasses = [];
     if (card.classList.contains('is-dragging')) preserveClasses.push('is-dragging');
     if (card.classList.contains('drag-drop')) preserveClasses.push('drag-drop');
+    if (card.classList.contains('content-flash')) preserveClasses.push('content-flash');
     for (const cls of card.classList) {
       if (cls.startsWith('split-preview-')) preserveClasses.push(cls);
     }
