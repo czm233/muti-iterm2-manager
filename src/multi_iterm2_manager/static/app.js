@@ -1796,16 +1796,35 @@ function updateCardMeta(card, record) {
   }
 }
 
-// 卡片入场过渡动效：先设置透明+缩小，再在下一帧恢复触发 CSS transition
+// 首次渲染标志，stagger 动画只在首次渲染时播放
+let initialRenderDone = false;
+
+// 卡片入场过渡动效：首次渲染时使用 stagger 错开动画，后续使用简单过渡
 function animateCardsEntrance() {
   const cards = grid.querySelectorAll('.wall-card');
   if (cards.length === 0) return;
-  cards.forEach((card) => card.classList.add('card-enter'));
-  requestAnimationFrame(() => {
-    requestAnimationFrame(() => {
-      cards.forEach((card) => card.classList.remove('card-enter'));
+
+  if (!initialRenderDone) {
+    // 首次渲染：stagger 错开入场动画
+    initialRenderDone = true;
+    cards.forEach((card, index) => {
+      card.classList.add('card-stagger');
+      card.style.animationDelay = `${index * 70}ms`;
+      // 动画结束后清理 class 和 inline style
+      card.addEventListener('animationend', () => {
+        card.classList.remove('card-stagger');
+        card.style.animationDelay = '';
+      }, { once: true });
     });
-  });
+  } else {
+    // 后续渲染：简单 opacity/scale 过渡
+    cards.forEach((card) => card.classList.add('card-enter'));
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        cards.forEach((card) => card.classList.remove('card-enter'));
+      });
+    });
+  }
 }
 
 function refreshWall(layout = null) {
