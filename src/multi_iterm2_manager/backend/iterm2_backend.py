@@ -254,7 +254,7 @@ class ITerm2Backend:
                         sent_initial = True
                     while True:
                         try:
-                            await asyncio.wait_for(streamer.async_get(), timeout=10)
+                            await asyncio.wait_for(streamer.async_get(), timeout=5)
                         except asyncio.TimeoutError:
                             if not self._is_iterm2_running():
                                 raise RuntimeError("无法连接 iTerm2 — 应用未在运行")

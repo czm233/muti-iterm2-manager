@@ -3,6 +3,7 @@ const state = {
   orderedTerminalIds: [],
   views: new Map(),
   layout: { count: 0, columns: 1, rows: 1 },
+  layoutMode: 2,                    // 持久化的布局列数（1=纵向, 2=两列, Infinity=横向）
   nextLayoutMode: null,
   nextFitMode: false,
   gridTrackRatios: {},
@@ -37,6 +38,7 @@ function saveViewState() {
       gridTrackRatios: state.gridTrackRatios,
       layoutTree: state.layoutTree,
       hiddenTerminalIds: [...state.hiddenTerminalIds],
+      layoutMode: state.layoutMode === Infinity ? "horizontal" : state.layoutMode,
     };
     window.localStorage.setItem(VIEW_STATE_STORAGE_KEY, JSON.stringify(payload));
   } catch {
@@ -60,6 +62,9 @@ function loadViewState() {
     if (Array.isArray(payload.hiddenTerminalIds)) {
       state.hiddenTerminalIds = new Set(payload.hiddenTerminalIds);
     }
+    if (payload.layoutMode != null) {
+      state.layoutMode = payload.layoutMode === "horizontal" ? Infinity : Number(payload.layoutMode);
+    }
   } catch {
   }
 }
@@ -72,6 +77,9 @@ const createDemoButton = document.getElementById("create-demo");
 const monitorModeButton = document.getElementById("monitor-mode");
 const refreshAllButton = document.getElementById("refresh-all");
 const closeAllButton = document.getElementById("close-all");
+const layoutVerticalBtn = document.getElementById("layout-vertical");
+const layoutHorizontalBtn = document.getElementById("layout-horizontal");
+const layoutTwoColBtn = document.getElementById("layout-two-col");
 const wallControls = document.getElementById("wall-controls");
 const wsStatus = document.getElementById("ws-status");
 const buildVersion = document.getElementById("build-version");
@@ -85,7 +93,6 @@ const DEFAULT_UI_SETTINGS = {
   dashboard_gap_px: 6,
   monitor_grid_gap_px: 6,
   wall_card_padding_px: 10,
-  wall_card_border_radius_px: 22,
   wall_card_border_width_px: 1,
   wall_card_terminal_border_width_px: 1,
   split_resizer_hit_area_px: 14,
@@ -145,7 +152,6 @@ function applyUiSettings(raw, options = {}) {
   rootStyle.setProperty("--dashboard-gap-px", `${getUiSetting("dashboard_gap_px")}px`);
   rootStyle.setProperty("--monitor-grid-gap-px", `${getUiSetting("monitor_grid_gap_px")}px`);
   rootStyle.setProperty("--wall-card-padding-px", `${getUiSetting("wall_card_padding_px")}px`);
-  rootStyle.setProperty("--wall-card-radius-px", `${getUiSetting("wall_card_border_radius_px")}px`);
   rootStyle.setProperty("--wall-card-border-width-px", `${getUiSetting("wall_card_border_width_px")}px`);
   rootStyle.setProperty("--wall-card-terminal-border-width-px", `${getUiSetting("wall_card_terminal_border_width_px")}px`);
   rootStyle.setProperty("--split-resizer-hit-area-px", `${getUiSetting("split_resizer_hit_area_px")}px`);
@@ -1021,7 +1027,9 @@ function updateTerminalSnapshot(record, mount) {
 function inferLayout(terminals) {
   const count = terminals.filter((record) => record.status !== "closed").length;
   if (count <= 0) return { count: 0, columns: 1, rows: 1, fitMode: false };
-  const columns = Math.max(1, Math.min(2, state.nextLayoutMode || 2));
+  const mode = state.nextLayoutMode ?? state.layoutMode ?? 2;
+  // mode === Infinity 表示横向布局，columns = count
+  const columns = mode === Infinity ? count : Math.max(1, Math.min(mode, count));
   const fitMode = Boolean(state.nextFitMode && count === 4 && columns === 2);
   return { count, columns, rows: Math.max(1, Math.ceil(count / columns)), fitMode };
 }
@@ -1030,7 +1038,8 @@ function applyLayout(_layoutFromServer = null) {
   const filtered = getFilteredTerminals();
   const layout = inferLayout(filtered);
   state.layout = layout;
-  grid.dataset.columns = String(Math.min(layout.columns || 1, 4));
+  const cols = layout.columns || 1;
+  grid.dataset.columns = String(cols);
   grid.dataset.rows = String(layout.rows || 1);
   grid.dataset.fitMode = layout.fitMode ? "true" : "false";
   // split 引擎只在默认过滤器下生效；其他过滤器用简单卡片循环渲染，必须保持 grid 布局
@@ -1090,22 +1099,59 @@ function syncFilterTabs() {
   }
   const attentionBadge = document.getElementById("filter-attention-badge");
   if (attentionBadge) {
-    attentionBadge.textContent = attentionCount > 0 ? String(attentionCount) : "";
+    const newText = attentionCount > 0 ? String(attentionCount) : "";
+    if (attentionBadge.textContent !== newText) {
+      attentionBadge.textContent = newText;
+      // 数字变化时触发弹跳动画
+      if (newText) {
+        attentionBadge.classList.remove('badge-bounce');
+        void attentionBadge.offsetWidth;
+        attentionBadge.classList.add('badge-bounce');
+        attentionBadge.addEventListener('animationend', () => attentionBadge.classList.remove('badge-bounce'), { once: true });
+      }
+    }
     attentionBadge.hidden = attentionCount === 0;
   }
   const hiddenBadge = document.getElementById("filter-hidden-badge");
   if (hiddenBadge) {
-    hiddenBadge.textContent = hiddenCount > 0 ? String(hiddenCount) : "";
+    const newText = hiddenCount > 0 ? String(hiddenCount) : "";
+    if (hiddenBadge.textContent !== newText) {
+      hiddenBadge.textContent = newText;
+      if (newText) {
+        hiddenBadge.classList.remove('badge-bounce');
+        void hiddenBadge.offsetWidth;
+        hiddenBadge.classList.add('badge-bounce');
+        hiddenBadge.addEventListener('animationend', () => hiddenBadge.classList.remove('badge-bounce'), { once: true });
+      }
+    }
     hiddenBadge.hidden = hiddenCount === 0;
   }
   const doneBadge = document.getElementById("filter-done-badge");
   if (doneBadge) {
-    doneBadge.textContent = doneCount > 0 ? String(doneCount) : "";
+    const newText = doneCount > 0 ? String(doneCount) : "";
+    if (doneBadge.textContent !== newText) {
+      doneBadge.textContent = newText;
+      if (newText) {
+        doneBadge.classList.remove('badge-bounce');
+        void doneBadge.offsetWidth;
+        doneBadge.classList.add('badge-bounce');
+        doneBadge.addEventListener('animationend', () => doneBadge.classList.remove('badge-bounce'), { once: true });
+      }
+    }
     doneBadge.hidden = doneCount === 0;
   }
   const runningBadge = document.getElementById("filter-running-badge");
   if (runningBadge) {
-    runningBadge.textContent = runningCount > 0 ? String(runningCount) : "";
+    const newText = runningCount > 0 ? String(runningCount) : "";
+    if (runningBadge.textContent !== newText) {
+      runningBadge.textContent = newText;
+      if (newText) {
+        runningBadge.classList.remove('badge-bounce');
+        void runningBadge.offsetWidth;
+        runningBadge.classList.add('badge-bounce');
+        runningBadge.addEventListener('animationend', () => runningBadge.classList.remove('badge-bounce'), { once: true });
+      }
+    }
     runningBadge.hidden = runningCount === 0;
   }
 }
@@ -1518,6 +1564,8 @@ function renderTerminal(record) {
   const wasDetailsOpen = card.querySelector(".wall-card-details-panel:not([hidden])") !== null;
 
   card.className = `wall-card status-${record.status}`;
+  // 设置 data-status 用于 CSS 动效（待处理卡片呼吸光等）
+  card.dataset.status = (record.status === "error" || record.status === "waiting") ? "attention" : record.status;
   card.innerHTML = `
     <div class="wall-card-header">
       <div class="wall-card-title-row">
@@ -1530,7 +1578,6 @@ function renderTerminal(record) {
       <div class="wall-card-details-panel" hidden>
         <div class="wall-card-topline">
           <span class="badge status-${record.status}">${statusLabel(record.status)}</span>
-          <span class="marker">${escapeHtml(record.updatedAt || "-")}</span>
         </div>
         <div class="wall-card-tools">
           <button data-action="refresh" class="secondary">刷新</button>
@@ -1538,10 +1585,7 @@ function renderTerminal(record) {
           ${record.status !== "closed" ? '<button data-action="detach" class="secondary">解绑</button>' : ''}
           <button type="button" class="secondary wall-card-input-toggle">命令</button>
         </div>
-        <div class="wall-card-meta">session ${escapeHtml(record.sessionId || "-")} · window ${escapeHtml(record.windowId || "-")}</div>
-        <div class="wall-card-summary">${escapeHtml(record.summary || "暂无摘要")}</div>
         ${record.lastError ? `<div class="wall-card-error">错误：${escapeHtml(record.lastError)}</div>` : ""}
-        <div class="wall-card-marker-list">${(record.markers || []).map((item) => `<span class="marker">${escapeHtml(item)}</span>`).join("")}</div>
         <div class="wall-card-input-wrap">
           <div class="wall-card-input" hidden>
             <input type="text" placeholder="快速发命令，例如：echo done" />
@@ -1700,6 +1744,8 @@ function incrementalUpdate(layout = null, changedIds) {
       if (cls.startsWith('split-preview-')) preserveClasses.push(cls);
     }
     card.className = `wall-card status-${record.status}${preserveClasses.length ? ' ' + preserveClasses.join(' ') : ''}`;
+    // 设置 data-status 用于 CSS 动效（待处理卡片呼吸光等）
+    card.dataset.status = (record.status === "error" || record.status === "waiting") ? "attention" : record.status;
     // 更新终端输出区域
     updateTerminalSnapshot(record, card.querySelector(".wall-card-terminal"));
     // 更新卡片元信息（标题、状态 badge 等）
@@ -1723,12 +1769,8 @@ function updateCardMeta(card, record) {
     badge.className = `badge status-${record.status}`;
     badge.textContent = statusLabel(record.status);
   }
-  // 更新时间戳
-  const marker = card.querySelector(".wall-card-topline .marker");
-  if (marker) marker.textContent = record.updatedAt || "-";
-  // 更新摘要
-  const summary = card.querySelector(".wall-card-summary");
-  if (summary) summary.textContent = record.summary || "暂无摘要";
+  // 更新时间戳（已移除）
+  // 更新摘要（已移除）
   // 更新错误信息
   const errorEl = card.querySelector(".wall-card-error");
   if (record.lastError) {
@@ -1875,6 +1917,50 @@ createForm.addEventListener("submit", async (event) => {
   }
 });
 
+document.getElementById("quick-create").onclick = async () => {
+  try {
+    const result = await request("/api/terminals", { method: "POST", body: JSON.stringify({ name: null, command: null }) });
+    setMessage(`已创建 ${result.item.name}，已纳入监控墙`);
+  } catch (error) {
+    setMessage(error.message, true);
+  }
+};
+
+// 顶部栏一键接管按钮
+document.getElementById("quick-adopt-all").onclick = async () => {
+  const btn = document.getElementById("quick-adopt-all");
+  btn.disabled = true;
+  btn.textContent = "扫描中...";
+  try {
+    const data = await request("/api/iterm2/sessions");
+    const sessions = data.items || [];
+    if (sessions.length === 0) {
+      setMessage("没有发现可接管的终端");
+      return;
+    }
+    btn.textContent = `接管中 0/${sessions.length}`;
+    let count = 0;
+    for (const s of sessions) {
+      try {
+        await request("/api/terminals/adopt", {
+          method: "POST",
+          body: JSON.stringify({ session_id: s.session_id }),
+        });
+        count++;
+        btn.textContent = `接管中 ${count}/${sessions.length}`;
+      } catch (_e) {
+        // 单个失败不阻断其余
+      }
+    }
+    setMessage(`已接管 ${count} 个终端`);
+  } catch (error) {
+    setMessage(error.message, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "一键接管";
+  }
+};
+
 createDemoButton.onclick = async () => {
   try {
     await request("/api/terminals/demo", { method: "POST", body: JSON.stringify({ count: 4 }) });
@@ -1882,6 +1968,33 @@ createDemoButton.onclick = async () => {
   } catch (error) {
     setMessage(error.message, true);
   }
+};
+
+layoutVerticalBtn.onclick = () => {
+  state.layoutTree = null;
+  state.layoutMode = 1;
+  state.nextLayoutMode = 1;
+  state.nextFitMode = false;
+  refreshWall();
+  saveViewState();
+};
+
+layoutHorizontalBtn.onclick = () => {
+  state.layoutTree = null;
+  state.layoutMode = Infinity;
+  state.nextLayoutMode = Infinity;
+  state.nextFitMode = false;
+  refreshWall();
+  saveViewState();
+};
+
+layoutTwoColBtn.onclick = () => {
+  state.layoutTree = null;
+  state.layoutMode = 2;
+  state.nextLayoutMode = 2;
+  state.nextFitMode = false;
+  refreshWall();
+  saveViewState();
 };
 
 monitorModeButton.onclick = async () => {
@@ -2015,29 +2128,35 @@ closeAllButton.onclick = async () => {
 };
 
 if (uiSettingsForm) {
-  uiSettingsForm.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const payload = Object.fromEntries(
-      Object.keys(DEFAULT_UI_SETTINGS).map((key) => {
-        const field = uiSettingsForm.elements.namedItem(key);
-        return [key, Number(field?.value ?? DEFAULT_UI_SETTINGS[key])];
-      })
-    );
-    try {
-      const result = await request("/api/ui-settings", {
-        method: "PUT",
-        body: JSON.stringify(payload),
-      });
-      applyUiSettings(result.settings || payload);
-      if (uiSettingsPath && result.file) {
-        uiSettingsPath.textContent = `配置文件：${result.file}`;
+  // 自动保存：input 变更后防抖提交
+  let _uiSaveTimer = null;
+  const autoSaveUiSettings = () => {
+    clearTimeout(_uiSaveTimer);
+    _uiSaveTimer = setTimeout(async () => {
+      const payload = Object.fromEntries(
+        Object.keys(DEFAULT_UI_SETTINGS).map((key) => {
+          const field = uiSettingsForm.elements.namedItem(key);
+          return [key, Number(field?.value ?? DEFAULT_UI_SETTINGS[key])];
+        })
+      );
+      try {
+        const result = await request("/api/ui-settings", {
+          method: "PUT",
+          body: JSON.stringify(payload),
+        });
+        applyUiSettings(result.settings || payload);
+        if (uiSettingsPath && result.file) {
+          uiSettingsPath.textContent = `配置文件：${result.file}`;
+        }
+        refreshWall();
+        setMessage("界面调优配置已保存");
+      } catch (error) {
+        setMessage(error.message, true);
       }
-      refreshWall();
-      setMessage("界面调优配置已保存");
-    } catch (error) {
-      setMessage(error.message, true);
-    }
-  });
+    }, 400);
+  };
+  uiSettingsForm.addEventListener("input", autoSaveUiSettings);
+  uiSettingsForm.addEventListener("change", autoSaveUiSettings);
 }
 
 if (uiSettingsResetButton) {
@@ -2098,10 +2217,6 @@ function injectScreenSelector() {
         <option value="-1">不指定（当前屏幕）</option>
       </select>
     </label>
-    <div class="topbar-menu-actions">
-      <button type="submit" class="secondary">保存屏幕设置</button>
-      <button type="button" id="set-default-screen-btn" class="secondary" title="将当前选中的屏幕设为每次打开页面的默认值">设为默认</button>
-    </div>
     <div id="default-screen-hint" style="font-size:0.82rem;color:var(--fg-muted);margin-top:2px;"></div>
   `;
 
@@ -2109,38 +2224,27 @@ function injectScreenSelector() {
   tuningPanel.appendChild(title);
   tuningPanel.appendChild(form);
 
-  // 绑定保存事件
-  form.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const select = document.getElementById("target-screen-select");
+  // 选择即保存：change 事件自动提交到后端并记为默认
+  const select = document.getElementById("target-screen-select");
+  select.addEventListener("change", async () => {
     const screenIndex = Number(select.value);
     try {
       await request("/api/screens/target", {
         method: "PUT",
         body: JSON.stringify({ target_screen: screenIndex }),
       });
+      // 同时保存为默认屏幕
+      if (screenIndex === -1) {
+        localStorage.removeItem("defaultScreenName");
+      } else {
+        const screenName = select.options[select.selectedIndex].textContent;
+        localStorage.setItem("defaultScreenName", screenName);
+      }
+      updateDefaultScreenHint();
       setMessage("屏幕设置已保存");
     } catch (error) {
       setMessage(error.message, true);
     }
-  });
-
-  // 设为默认按钮
-  const setDefaultBtn = document.getElementById("set-default-screen-btn");
-  setDefaultBtn.addEventListener("click", () => {
-    const select = document.getElementById("target-screen-select");
-    const selectedOption = select.options[select.selectedIndex];
-    if (select.value === "-1") {
-      // 选的是"不指定"，清除默认
-      localStorage.removeItem("defaultScreenName");
-      setMessage("已清除默认屏幕");
-    } else {
-      // 保存屏幕名称（不保存索引，因为索引可能变化）
-      const screenName = selectedOption.textContent;
-      localStorage.setItem("defaultScreenName", screenName);
-      setMessage(`已将「${screenName}」设为默认屏幕`);
-    }
-    updateDefaultScreenHint();
   });
 }
 
@@ -2215,6 +2319,16 @@ async function loadScreenSelector() {
 
 // 初始化屏幕选择 UI
 injectScreenSelector();
+
+// 监听调优面板展开事件，实时刷新屏幕列表（支持热插拔外接屏幕）
+const tuningDetails = document.querySelector("details.topbar-menu--wide");
+if (tuningDetails) {
+  tuningDetails.addEventListener("toggle", () => {
+    if (tuningDetails.open) {
+      loadScreenSelector();
+    }
+  });
+}
 
 // 初始化顶部筛选 tab 点击事件
 document.querySelectorAll("#topbar-filters .filter-tab").forEach((tab) => {

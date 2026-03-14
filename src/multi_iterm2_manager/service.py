@@ -457,10 +457,23 @@ class DashboardService:
         try:
             async for text, screen_html in self.backend.stream_screen(record.handle):
                 old_hash = record.content_hash
+                old_status = record.status
                 self._apply_screen_text(record, text, screen_html, is_live=True)
 
-                # text 哈希没变，跳过广播
-                if record.content_hash == old_hash:
+                status_changed = record.status != old_status
+                content_changed = record.content_hash != old_hash
+
+                # 状态变了但内容没变（超时规则触发），立即广播不限速
+                if status_changed and not content_changed:
+                    if pending_broadcast is not None and not pending_broadcast.done():
+                        pending_broadcast.cancel()
+                        pending_broadcast = None
+                    last_broadcast_time = time.time()
+                    await self._broadcast(self.record_event(terminal_id))
+                    continue
+
+                # 内容和状态都没变，跳过广播
+                if not content_changed:
                     continue
 
                 now = time.time()

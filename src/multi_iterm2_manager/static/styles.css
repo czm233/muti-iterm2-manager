@@ -14,7 +14,7 @@
   --dashboard-gap-px: 6px;
   --monitor-grid-gap-px: 6px;
   --wall-card-padding-px: 10px;
-  --wall-card-radius-px: 22px;
+  --wall-card-radius-px: 10px;
   --wall-card-border-width-px: 1px;
   --wall-card-terminal-border-width-px: 1px;
   --split-resizer-hit-area-px: 14px;
@@ -86,10 +86,11 @@ input {
 }
 
 .page {
-  max-width: none;
+  max-width: 100vw;
   margin: 0 auto;
   padding: var(--dashboard-padding-px);
   height: 100%;
+  overflow-x: hidden;
 }
 
 .dashboard-layout {
@@ -135,10 +136,11 @@ input {
   top: 4px;
   z-index: 30;
   flex-direction: row;
+  flex-wrap: nowrap;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  gap: 8px 12px;
   padding: 12px 14px;
+  overflow: visible;
 }
 
 .topbar-brand {
@@ -159,7 +161,7 @@ input {
   letter-spacing: -0.03em;
 }
 
-.topbar .eyebrow {
+.topbar h1.eyebrow {
   font-size: 0.78rem;
   letter-spacing: 0.14em;
 }
@@ -172,14 +174,53 @@ input {
   justify-content: flex-end;
 }
 
+/* --- 顶部栏分隔符 --- */
+.topbar-divider {
+  color: rgba(148, 163, 184, 0.25);
+  font-size: 1.1rem;
+  line-height: 1;
+  user-select: none;
+  flex-shrink: 0;
+}
+
+/* --- 快捷栏 --- */
+.topbar-shortcuts {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+.shortcut-btn {
+  cursor: pointer;
+  border-radius: 999px;
+  padding: 0.38rem 0.72rem;
+  font-size: 0.82rem;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  background: rgba(148, 163, 184, 0.08);
+  color: var(--text);
+  transition: background 0.12s, border-color 0.12s;
+  white-space: nowrap;
+}
+
+.shortcut-btn:hover {
+  background: rgba(148, 163, 184, 0.18);
+  border-color: rgba(148, 163, 184, 0.28);
+}
+
 .topbar-filters {
   display: flex;
   align-items: center;
   gap: 4px;
-  flex: 1;
   justify-content: center;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   min-width: 0;
+  /* 绝对定位实现页面水平正中央 */
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1;
 }
 
 .filter-tab {
@@ -241,6 +282,27 @@ input {
   color: rgba(148, 163, 184, 0.8);
 }
 
+/* --- badge 弹跳动画（数字变化时由 JS 触发） --- */
+@keyframes badge-bounce {
+  0% { transform: scale(1); }
+  30% { transform: scale(1.15); }
+  100% { transform: scale(1); }
+}
+
+.filter-badge.badge-bounce {
+  animation: badge-bounce 0.3s ease-out;
+}
+
+/* --- "待处理" badge 持续脉冲光晕 --- */
+.filter-tab--attention .filter-badge:not([hidden]) {
+  animation: attention-pulse 2s ease-in-out infinite;
+}
+
+@keyframes attention-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(251, 191, 36, 0.4); }
+  50% { box-shadow: 0 0 6px 2px rgba(251, 191, 36, 0.25); }
+}
+
 .filter-tab--attention .filter-badge {
   background: rgba(255, 214, 8, 0.22);
   color: #FFD608;
@@ -256,6 +318,46 @@ input {
 .filter-tab--hidden .filter-badge {
   background: rgba(148, 163, 184, 0.18);
   color: rgba(148, 163, 184, 0.7);
+}
+
+/* 筛选栏独占一行后，隐藏其前面的分隔符 */
+.topbar-shortcuts + .topbar-divider {
+  display: none;
+}
+
+/* --- 顶部栏分隔符 --- */
+.topbar-divider {
+  color: rgba(148, 163, 184, 0.25);
+  font-size: 1.1rem;
+  line-height: 1;
+  user-select: none;
+  flex-shrink: 0;
+}
+
+/* --- 快捷栏 --- */
+.topbar-shortcuts {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+.shortcut-btn {
+  cursor: pointer;
+  border-radius: 999px;
+  padding: 0.38rem 0.72rem;
+  font-size: 0.82rem;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  background: rgba(148, 163, 184, 0.08);
+  color: var(--text);
+  transition: background 0.12s, border-color 0.12s;
+  white-space: nowrap;
+}
+
+.shortcut-btn:hover {
+  background: rgba(148, 163, 184, 0.18);
+  border-color: rgba(148, 163, 184, 0.28);
 }
 
 .topbar-menu {
@@ -286,7 +388,8 @@ input {
 .topbar-menu-panel {
   position: absolute;
   top: calc(100% + 8px);
-  right: 0;
+  left: 0;
+  right: auto;
   min-width: 260px;
   max-width: min(420px, calc(100vw - 24px));
   display: flex;
@@ -298,10 +401,12 @@ input {
   background: rgba(7, 16, 28, 0.96);
   box-shadow: 0 18px 48px rgba(0, 0, 0, 0.36);
   backdrop-filter: blur(18px);
+  z-index: 50;
 }
 
 .topbar-menu--wide .topbar-menu-panel {
   min-width: min(560px, calc(100vw - 24px));
+  max-width: calc(100vw - 24px);
 }
 
 .topbar-form {
@@ -358,28 +463,58 @@ input {
   border-radius: 999px;
   padding: 0.34rem 0.72rem;
   font-size: 0.78rem;
-  border: 1px solid rgba(148, 163, 184, 0.14);
-  background: rgba(148, 163, 184, 0.08);
+  border: none;
+  background: transparent;
   color: var(--muted);
+  cursor: default;
+  user-select: none;
+}
+
+/* WebSocket 状态呼吸点 */
+#ws-status::before {
+  content: "";
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  flex-shrink: 0;
 }
 
 .status-connecting {
-  border-color: rgba(247, 201, 72, 0.24);
-  background: rgba(247, 201, 72, 0.12);
   color: #f7c948;
+}
+.status-connecting::before {
+  animation: pulse-breathe 1.2s ease-in-out infinite;
 }
 
 .status-connected {
-  border-color: rgba(56, 211, 159, 0.24);
-  background: rgba(56, 211, 159, 0.12);
   color: #70e1b4;
+}
+.status-connected::before {
+  animation: pulse-breathe 2s ease-in-out infinite;
 }
 
 .status-reconnecting,
 .status-disconnected {
-  border-color: rgba(255, 125, 125, 0.24);
-  background: rgba(255, 125, 125, 0.12);
   color: #ffb0b0;
+}
+.status-reconnecting::before {
+  animation: pulse-shake 0.4s ease-in-out infinite;
+}
+.status-disconnected::before {
+  animation: pulse-shake 0.4s ease-in-out 3;
+}
+
+@keyframes pulse-breathe {
+  0%, 100% { opacity: 0.4; transform: scale(1); }
+  50% { opacity: 1; transform: scale(1.2); }
+}
+
+@keyframes pulse-shake {
+  0%, 100% { transform: translateX(0); }
+  25% { transform: translateX(-1.5px); }
+  75% { transform: translateX(1.5px); }
 }
 
 
@@ -458,6 +593,7 @@ input {
   position: relative;
   align-content: stretch;
   grid-auto-rows: minmax(0, 1fr);
+  background: #000;
 }
 
 .monitor-wall[data-columns="1"] {
@@ -491,8 +627,7 @@ input {
 .wall-card {
   border-width: var(--wall-card-border-width-px);
   border-radius: var(--wall-card-radius-px);
-  padding: var(--wall-card-padding-px);
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.28);
+  padding: var(--wall-card-padding-px) 0 0 0;
   cursor: default;
   min-height: 0;
   height: 100%;
@@ -503,16 +638,17 @@ input {
 }
 
 .wall-card::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(180deg, rgba(255,255,255,0.03), transparent 24%);
-  pointer-events: none;
+  display: none;
 }
 
 .wall-card.status-running,
 .wall-card.status-idle {
   background: linear-gradient(180deg, rgba(10, 18, 30, 0.96), rgba(5, 10, 18, 0.96));
+}
+
+.wall-card.status-running {
+  background: linear-gradient(180deg, rgba(16, 36, 68, 0.96), rgba(8, 20, 42, 0.96));
+  border-color: rgba(59, 130, 246, 0.50);
 }
 
 .wall-card.status-done {
@@ -535,13 +671,23 @@ input {
   background: linear-gradient(180deg, rgba(27, 34, 49, 0.92), rgba(10, 13, 20, 0.92));
 }
 
+/* --- 待处理卡片边框呼吸光 --- */
+.wall-card[data-status="attention"] {
+  animation: card-attention-glow 2.5s ease-in-out infinite;
+}
+
+@keyframes card-attention-glow {
+  0%, 100% { border-color: var(--border); }
+  50% { border-color: rgba(251, 191, 36, 0.35); }
+}
+
 .wall-card-header {
   display: flex;
   flex-direction: row;
   align-items: center;
   gap: 6px;
   flex-shrink: 0;
-  padding-bottom: 6px;
+  padding: 0 var(--wall-card-padding-px) 6px;
 }
 
 .wall-card-topline {
@@ -615,7 +761,7 @@ input {
 .wall-card-details-panel {
   position: absolute;
   top: 40px;
-  left: var(--wall-card-padding-px);
+  right: var(--wall-card-padding-px);
   z-index: 10;
   min-width: 240px;
   max-width: min(360px, calc(100% - 50px));
@@ -623,10 +769,41 @@ input {
   overflow-y: auto;
   padding: 8px 10px;
   border-radius: 12px;
-  border: 1px solid var(--border);
-  background: rgba(7, 16, 28, 0.96);
-  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.4);
+  border: 1px solid rgba(138, 168, 212, 0.28);
+  background: rgba(22, 36, 58, 0.96);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(138, 168, 212, 0.08);
   backdrop-filter: blur(18px);
+}
+
+/* 面板颜色跟随终端状态（比标题栏暗） */
+.wall-card.status-running .wall-card-details-panel {
+  background: rgba(10, 28, 56, 0.96);
+  border-color: rgba(59, 130, 246, 0.40);
+}
+
+.wall-card.status-done .wall-card-details-panel {
+  background: rgba(4, 32, 26, 0.96);
+  border-color: rgba(56, 211, 159, 0.35);
+}
+
+.wall-card.status-idle .wall-card-details-panel {
+  background: rgba(8, 14, 24, 0.96);
+  border-color: rgba(138, 168, 212, 0.28);
+}
+
+.wall-card.status-waiting .wall-card-details-panel {
+  background: rgba(48, 36, 6, 0.96);
+  border-color: rgba(247, 201, 72, 0.35);
+}
+
+.wall-card.status-error .wall-card-details-panel {
+  background: rgba(50, 12, 18, 0.96);
+  border-color: rgba(255, 125, 125, 0.35);
+}
+
+.wall-card.status-closed .wall-card-details-panel {
+  background: rgba(18, 22, 32, 0.96);
+  border-color: rgba(138, 168, 212, 0.20);
 }
 
 .wall-card-details-panel[hidden] {
@@ -692,8 +869,8 @@ input {
   min-height: 0;
   min-width: 0;
   overflow: auto;
-  border-radius: 14px;
-  border: var(--wall-card-terminal-border-width-px) solid rgba(148, 163, 184, 0.12);
+  border-radius: 0;
+  border: none;
   background: rgba(1, 5, 12, 0.95);
 }
 
