@@ -872,11 +872,6 @@ function stopCardPointerDrag() {
   } catch {
   }
   session.card.classList.remove('is-dragging');
-  // 添加放下回弹动效
-  session.card.classList.add('drag-drop');
-  setTimeout(() => {
-    session.card.classList.remove('drag-drop');
-  }, 250);
   document.body.classList.remove('is-dragging-card');
   state.activeCardDrag = null;
   state.draggedTerminalId = null;
@@ -1108,13 +1103,6 @@ function syncFilterTabs() {
     const newText = attentionCount > 0 ? String(attentionCount) : "";
     if (attentionBadge.textContent !== newText) {
       attentionBadge.textContent = newText;
-      // 数字变化时触发弹跳动画
-      if (newText) {
-        attentionBadge.classList.remove('badge-bounce');
-        void attentionBadge.offsetWidth;
-        attentionBadge.classList.add('badge-bounce');
-        attentionBadge.addEventListener('animationend', () => attentionBadge.classList.remove('badge-bounce'), { once: true });
-      }
     }
     attentionBadge.hidden = attentionCount === 0;
   }
@@ -1123,12 +1111,6 @@ function syncFilterTabs() {
     const newText = hiddenCount > 0 ? String(hiddenCount) : "";
     if (hiddenBadge.textContent !== newText) {
       hiddenBadge.textContent = newText;
-      if (newText) {
-        hiddenBadge.classList.remove('badge-bounce');
-        void hiddenBadge.offsetWidth;
-        hiddenBadge.classList.add('badge-bounce');
-        hiddenBadge.addEventListener('animationend', () => hiddenBadge.classList.remove('badge-bounce'), { once: true });
-      }
     }
     hiddenBadge.hidden = hiddenCount === 0;
   }
@@ -1137,12 +1119,6 @@ function syncFilterTabs() {
     const newText = doneCount > 0 ? String(doneCount) : "";
     if (doneBadge.textContent !== newText) {
       doneBadge.textContent = newText;
-      if (newText) {
-        doneBadge.classList.remove('badge-bounce');
-        void doneBadge.offsetWidth;
-        doneBadge.classList.add('badge-bounce');
-        doneBadge.addEventListener('animationend', () => doneBadge.classList.remove('badge-bounce'), { once: true });
-      }
     }
     doneBadge.hidden = doneCount === 0;
   }
@@ -1151,12 +1127,6 @@ function syncFilterTabs() {
     const newText = runningCount > 0 ? String(runningCount) : "";
     if (runningBadge.textContent !== newText) {
       runningBadge.textContent = newText;
-      if (newText) {
-        runningBadge.classList.remove('badge-bounce');
-        void runningBadge.offsetWidth;
-        runningBadge.classList.add('badge-bounce');
-        runningBadge.addEventListener('animationend', () => runningBadge.classList.remove('badge-bounce'), { once: true });
-      }
     }
     runningBadge.hidden = runningCount === 0;
   }
@@ -1570,8 +1540,6 @@ function renderTerminal(record) {
   const wasDetailsOpen = card.querySelector(".wall-card-details-panel:not([hidden])") !== null;
 
   card.className = `wall-card status-${record.status}`;
-  // 设置 data-status 用于 CSS 动效（待处理卡片呼吸光等）
-  card.dataset.status = (record.status === "error" || record.status === "waiting") ? "attention" : record.status;
   card.innerHTML = `
     <div class="wall-card-header">
       <div class="wall-card-title-row">
@@ -1746,13 +1714,10 @@ function incrementalUpdate(layout = null, changedIds) {
     // 更新卡片状态样式（保留拖拽和 preview 相关 class）
     const preserveClasses = [];
     if (card.classList.contains('is-dragging')) preserveClasses.push('is-dragging');
-    if (card.classList.contains('drag-drop')) preserveClasses.push('drag-drop');
     for (const cls of card.classList) {
       if (cls.startsWith('split-preview-')) preserveClasses.push(cls);
     }
     card.className = `wall-card status-${record.status}${preserveClasses.length ? ' ' + preserveClasses.join(' ') : ''}`;
-    // 设置 data-status 用于 CSS 动效（待处理卡片呼吸光等）
-    card.dataset.status = (record.status === "error" || record.status === "waiting") ? "attention" : record.status;
     // 更新终端输出区域
     updateTerminalSnapshot(record, card.querySelector(".wall-card-terminal"));
     // 更新卡片元信息（标题、状态 badge 等）
@@ -1790,29 +1755,6 @@ function updateCardMeta(card, record) {
   }
 }
 
-// 首次渲染标志，stagger 动画只在首次渲染时播放
-let initialRenderDone = false;
-
-// 卡片入场过渡动效：首次渲染时使用 stagger 错开动画，后续使用简单过渡
-function animateCardsEntrance() {
-  const cards = grid.querySelectorAll('.wall-card');
-  if (cards.length === 0) return;
-
-  if (!initialRenderDone) {
-    // 首次渲染：stagger 错开入场动画
-    initialRenderDone = true;
-    cards.forEach((card, index) => {
-      card.classList.add('card-stagger');
-      card.style.animationDelay = `${index * 70}ms`;
-      // 动画结束后清理 class 和 inline style
-      card.addEventListener('animationend', () => {
-        card.classList.remove('card-stagger');
-        card.style.animationDelay = '';
-      }, { once: true });
-    });
-  }
-}
-
 function refreshWall(layout = null) {
   applyLayout(layout);
   const pageInfo = getPagedTerminals();
@@ -1833,8 +1775,6 @@ function refreshWall(layout = null) {
     }
     renderGridResizers();
   }
-  // 卡片入场过渡动效
-  animateCardsEntrance();
   renderToolbarExtras(pageInfo);
   syncFilterTabs();
   renderStats();

@@ -282,27 +282,6 @@ input {
   color: rgba(148, 163, 184, 0.8);
 }
 
-/* --- badge 弹跳动画（数字变化时由 JS 触发） --- */
-@keyframes badge-bounce {
-  0% { transform: scale(1); }
-  30% { transform: scale(1.15); }
-  100% { transform: scale(1); }
-}
-
-.filter-badge.badge-bounce {
-  animation: badge-bounce 0.3s ease-out;
-}
-
-/* --- "待处理" badge 持续脉冲光晕 --- */
-.filter-tab--attention .filter-badge:not([hidden]) {
-  animation: attention-pulse 2s ease-in-out infinite;
-}
-
-@keyframes attention-pulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(251, 191, 36, 0.4); }
-  50% { box-shadow: 0 0 6px 2px rgba(251, 191, 36, 0.25); }
-}
-
 .filter-tab--attention .filter-badge {
   background: rgba(255, 214, 8, 0.22);
   color: #FFD608;
@@ -637,23 +616,6 @@ input {
   flex-direction: column;
 }
 
-/* 卡片首次加载 stagger 错开入场动画 */
-@keyframes card-stagger-in {
-  from {
-    opacity: 0;
-    transform: translateY(12px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-.wall-card.card-stagger {
-  opacity: 0;
-  animation: card-stagger-in 0.35s ease-out forwards;
-}
-
 .wall-card.status-running,
 .wall-card.status-idle {
   background: linear-gradient(180deg, rgba(10, 18, 30, 0.96), rgba(5, 10, 18, 0.96));
@@ -682,16 +644,6 @@ input {
 .wall-card.status-closed {
   opacity: 0.54;
   background: linear-gradient(180deg, rgba(27, 34, 49, 0.92), rgba(10, 13, 20, 0.92));
-}
-
-/* --- 待处理卡片边框呼吸光 --- */
-.wall-card[data-status="attention"] {
-  animation: card-attention-glow 2.5s ease-in-out infinite;
-}
-
-@keyframes card-attention-glow {
-  0%, 100% { border-color: var(--border); }
-  50% { border-color: rgba(251, 191, 36, 0.35); }
 }
 
 .wall-card-header {
@@ -1048,18 +1000,10 @@ button.is-active {
 
 
 
-/* 拖拽中的卡片 —— "拿起"物理感 */
+/* 拖拽中的卡片 */
 .wall-card.is-dragging {
-  transform: scale(1.03) rotate(1.5deg);
-  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.35);
   z-index: 100;
-  opacity: 1;
-  transition: transform 0.15s ease-out, box-shadow 0.15s ease-out;
-}
-
-/* 拖拽放下后的回弹缓动 */
-.wall-card.drag-drop {
-  transition: transform 0.25s ease-out, box-shadow 0.25s ease-out;
+  opacity: 0.85;
 }
 
 body.is-dragging-card,
