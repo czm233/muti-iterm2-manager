@@ -872,6 +872,11 @@ function stopCardPointerDrag() {
   } catch {
   }
   session.card.classList.remove('is-dragging');
+  // 添加放下回弹动效
+  session.card.classList.add('drag-drop');
+  setTimeout(() => {
+    session.card.classList.remove('drag-drop');
+  }, 250);
   document.body.classList.remove('is-dragging-card');
   state.activeCardDrag = null;
   state.draggedTerminalId = null;
@@ -1753,6 +1758,7 @@ function incrementalUpdate(layout = null, changedIds) {
     // 更新卡片状态样式（保留拖拽和 preview 相关 class）
     const preserveClasses = [];
     if (card.classList.contains('is-dragging')) preserveClasses.push('is-dragging');
+    if (card.classList.contains('drag-drop')) preserveClasses.push('drag-drop');
     for (const cls of card.classList) {
       if (cls.startsWith('split-preview-')) preserveClasses.push(cls);
     }

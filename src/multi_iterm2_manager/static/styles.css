@@ -1074,9 +1074,18 @@ button.is-active {
 
 
 
+/* 拖拽中的卡片 —— "拿起"物理感 */
 .wall-card.is-dragging {
-  opacity: 0.58;
-  transform: scale(0.995);
+  transform: scale(1.03) rotate(1.5deg);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.35);
+  z-index: 100;
+  opacity: 1;
+  transition: transform 0.15s ease-out, box-shadow 0.15s ease-out;
+}
+
+/* 拖拽放下后的回弹缓动 */
+.wall-card.drag-drop {
+  transition: transform 0.25s ease-out, box-shadow 0.25s ease-out;
 }
 
 body.is-dragging-card,
