@@ -1020,19 +1020,7 @@ function updateTerminalSnapshot(record, mount) {
   }
   const text = record.screenText && record.screenText.trim() ? record.screenText : "暂无输出";
   const newHtml = record.screenHtml || `<pre class="terminal-mirror">${escapeHtml(text)}</pre>`;
-  // 检测内容是否实际发生变化，用于触发光带动效
-  const contentChanged = mount.innerHTML !== newHtml;
   mount.innerHTML = newHtml;
-  // 内容变化时触发卡片底部光带扫过动效（首次渲染不触发）
-  if (contentChanged && initialRenderDone) {
-    const card = mount.closest(".wall-card");
-    if (card) {
-      card.classList.remove("content-flash");
-      void card.offsetWidth;
-      card.classList.add("content-flash");
-      card.addEventListener("animationend", () => card.classList.remove("content-flash"), { once: true });
-    }
-  }
   window.requestAnimationFrame(() => {
     mount.scrollTop = mount.scrollHeight;
     const mirror = mount.querySelector(".terminal-mirror");
@@ -1172,19 +1160,6 @@ function syncFilterTabs() {
     }
     runningBadge.hidden = runningCount === 0;
   }
-  // 同步滑动下划线指示器
-  updateFilterIndicator();
-}
-
-// 更新筛选 tab 滑动下划线指示器位置
-function updateFilterIndicator() {
-  const activeTab = document.querySelector('#topbar-filters .filter-tab.is-active');
-  const container = document.getElementById('topbar-filters');
-  if (!activeTab || !container) return;
-  const containerRect = container.getBoundingClientRect();
-  const tabRect = activeTab.getBoundingClientRect();
-  container.style.setProperty('--indicator-left', `${tabRect.left - containerRect.left}px`);
-  container.style.setProperty('--indicator-width', `${tabRect.width}px`);
 }
 
 function getPagedTerminals() {
@@ -1772,7 +1747,6 @@ function incrementalUpdate(layout = null, changedIds) {
     const preserveClasses = [];
     if (card.classList.contains('is-dragging')) preserveClasses.push('is-dragging');
     if (card.classList.contains('drag-drop')) preserveClasses.push('drag-drop');
-    if (card.classList.contains('content-flash')) preserveClasses.push('content-flash');
     for (const cls of card.classList) {
       if (cls.startsWith('split-preview-')) preserveClasses.push(cls);
     }
@@ -1835,14 +1809,6 @@ function animateCardsEntrance() {
         card.classList.remove('card-stagger');
         card.style.animationDelay = '';
       }, { once: true });
-    });
-  } else {
-    // 后续渲染：简单 opacity/scale 过渡
-    cards.forEach((card) => card.classList.add('card-enter'));
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        cards.forEach((card) => card.classList.remove('card-enter'));
-      });
     });
   }
 }
@@ -2420,8 +2386,6 @@ window.addEventListener("resize", () => {
   if (state.layout.count > 0) {
     renderGridResizers();
   }
-  // 窗口大小变化时重新计算指示器位置
-  updateFilterIndicator();
 });
 
 // 记录 mousedown 起始目标，防止从面板内拖选文字到外部松开时误关闭面板
