@@ -1154,6 +1154,19 @@ function syncFilterTabs() {
     }
     runningBadge.hidden = runningCount === 0;
   }
+  // 同步滑动下划线指示器
+  updateFilterIndicator();
+}
+
+// 更新筛选 tab 滑动下划线指示器位置
+function updateFilterIndicator() {
+  const activeTab = document.querySelector('#topbar-filters .filter-tab.is-active');
+  const container = document.getElementById('topbar-filters');
+  if (!activeTab || !container) return;
+  const containerRect = container.getBoundingClientRect();
+  const tabRect = activeTab.getBoundingClientRect();
+  container.style.setProperty('--indicator-left', `${tabRect.left - containerRect.left}px`);
+  container.style.setProperty('--indicator-width', `${tabRect.width}px`);
 }
 
 function getPagedTerminals() {
@@ -1783,6 +1796,18 @@ function updateCardMeta(card, record) {
   }
 }
 
+// 卡片入场过渡动效：先设置透明+缩小，再在下一帧恢复触发 CSS transition
+function animateCardsEntrance() {
+  const cards = grid.querySelectorAll('.wall-card');
+  if (cards.length === 0) return;
+  cards.forEach((card) => card.classList.add('card-enter'));
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      cards.forEach((card) => card.classList.remove('card-enter'));
+    });
+  });
+}
+
 function refreshWall(layout = null) {
   applyLayout(layout);
   const pageInfo = getPagedTerminals();
@@ -1803,6 +1828,8 @@ function refreshWall(layout = null) {
     }
     renderGridResizers();
   }
+  // 卡片入场过渡动效
+  animateCardsEntrance();
   renderToolbarExtras(pageInfo);
   syncFilterTabs();
   renderStats();
@@ -2354,6 +2381,8 @@ window.addEventListener("resize", () => {
   if (state.layout.count > 0) {
     renderGridResizers();
   }
+  // 窗口大小变化时重新计算指示器位置
+  updateFilterIndicator();
 });
 
 // 记录 mousedown 起始目标，防止从面板内拖选文字到外部松开时误关闭面板
