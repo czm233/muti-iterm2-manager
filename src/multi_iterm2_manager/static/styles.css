@@ -135,12 +135,34 @@ input {
   position: sticky;
   top: 4px;
   z-index: 30;
+  flex-direction: column;
+  flex-wrap: nowrap;
+  align-items: stretch;
+  gap: 0;
+  padding: 0;
+  overflow: visible;
+}
+
+/* --- 顶部栏双行布局 --- */
+.topbar-row {
+  display: flex;
   flex-direction: row;
   flex-wrap: nowrap;
   align-items: center;
   gap: 8px 12px;
   padding: 4px 10px;
-  overflow: visible;
+  min-height: 36px;
+}
+
+/* 两行等高：各占 1fr */
+.topbar-row--primary,
+.topbar-row--secondary {
+  flex: 1 1 0;
+}
+
+/* 第二行与第一行之间的分隔线 */
+.topbar-row--secondary {
+  border-top: 1px solid var(--border);
 }
 
 .topbar-brand {
@@ -208,14 +230,13 @@ input {
   color: var(--text);
 }
 
-/* --- 筛选栏：靠右 --- */
+/* --- 筛选栏：第二行左对齐 --- */
 .topbar-filters {
   display: flex;
   align-items: center;
   gap: 4px;
   flex-wrap: nowrap;
   min-width: 0;
-  margin-left: auto;
   flex-shrink: 0;
   z-index: 1;
 }
@@ -1435,35 +1456,46 @@ body.is-resizing-split * {
   background: rgba(148, 163, 184, 0.15);
 }
 
-/* --- 标签筛选下拉选框 --- */
-.tag-filter-select {
-  appearance: none;
-  -webkit-appearance: none;
-  border: 1px solid rgba(148, 163, 184, 0.18);
-  border-radius: 6px;
-  padding: 4px 24px 4px 8px;
-  font-size: 0.82rem;
-  background: rgba(15, 23, 42, 0.64) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' fill='%2393a8cb'%3E%3Cpath d='M0 0l5 6 5-6z'/%3E%3C/svg%3E") no-repeat right 8px center;
-  color: var(--muted);
-  cursor: pointer;
+/* --- 标签筛选 Tab 按钮组 --- */
+.tag-filter-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: nowrap;
+  margin-left: auto;
   flex-shrink: 0;
-  max-width: 120px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  max-width: 60%;
+}
+
+.tag-filter-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.tag-tab {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 12px;
+  border-radius: 6px;
+  border: none;
+  background: none;
+  cursor: pointer;
+  font-size: 0.84rem;
+  color: var(--muted);
+  transition: background 0.15s, color 0.15s, box-shadow 0.15s;
   white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  transition: border-color 0.15s, color 0.15s;
 }
 
-.tag-filter-select:hover,
-.tag-filter-select:focus {
-  border-color: rgba(104, 210, 255, 0.35);
+.tag-tab:hover {
+  background: rgba(148, 163, 184, 0.08);
   color: var(--text);
-  outline: none;
 }
 
-.tag-filter-select.has-selection {
-  border-color: rgba(104, 210, 255, 0.45);
+.tag-tab.is-active {
+  background: none;
   color: var(--accent);
+  box-shadow: inset 0 -2px 0 0 var(--accent);
 }
 
 /* --- 筛选栏分隔线 --- */

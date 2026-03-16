@@ -1,37 +1,18 @@
-# muti-iterm2-manager
+# Multi iTerm2 Manager
 
-一个面向 macOS 的本地多 iTerm2 管理器与监控墙。
+macOS 本地多 iTerm2 终端监控墙 —— 在一个 Web 面板中实时监控和操作多个 iTerm2 终端窗口。
 
-当前实现聚焦在 **监控墙模式**：
+## 环境要求
 
-- 创建 iTerm2 窗口
-- 创建全尺寸运行的 iTerm2 窗口
-- 将真实 iTerm 窗口退到后台工作层
-- 实时抓取每个窗口当前屏幕文本
-- 在 Web 监控墙中同时查看多个窗口镜像
-- 2 个任务自动左右布局，3-4 个自动四宫格，5-6 个自动 2×3
-- 根据关键词把窗口标记为运行中、已完成、等待中、异常
-- 点击卡片后切回对应原生 iTerm2 窗口接管
-- 在监控墙里向指定会话发送命令
-- 一键回到监控模式 / 一键关闭全部窗口
-- 监控墙支持活跃 / 待处理 / 已完成筛选与分页
-- 支持一键接管下一个异常或等待中的任务
+- **macOS**（依赖 iTerm2 和 pyobjc）
+- **iTerm2** 已安装并运行
+- **Python 3.9+**
 
-## 技术方案
-
-- 后端：Python + FastAPI + WebSocket
-- iTerm2 控制：官方 Python API
-- 前端：原生 HTML/JS + xterm.js
-- 布局：前端监控墙自动自适应
-- 监控：优先使用 iTerm2 `ScreenStreamer`
-
-## 运行前准备
+## 快速开始
 
 ### 1. 开启 iTerm2 Python API
 
-在 iTerm2 中打开：
-
-`Prefs > General > Magic > Enable Python API server`
+iTerm2 → Settings → General → Magic → 勾选 **Enable Python API**
 
 ### 2. 安装依赖
 
@@ -41,101 +22,97 @@ source .venv/bin/activate
 pip install -e .
 ```
 
-### 3. 启动服务
-
-```bash
-python3 -m multi_iterm2_manager
-```
-
-默认地址：
-
-- Web 面板：`http://127.0.0.1:8765`
-- WebSocket：`ws://127.0.0.1:8765/ws`
-
-## 界面调优配置
-
-项目根目录提供默认界面配置文件：
-
-- `ui-settings.yaml`
-
-服务启动时会读取这份文件；你也可以直接在页面右上角的“调优”菜单里修改并保存，保存后会回写到这个文件中，后续启动会继续沿用。
-
-## 可选模式
-
-### 强制使用真实 iTerm2 后端
-
-```bash
-MITERM_BACKEND=iterm2 python3 -m multi_iterm2_manager
-```
-
-### 强制使用模拟后端
-
-如果你只是想先看 UI 或没有配置好 iTerm2，可以先跑模拟模式：
-
-```bash
-MITERM_BACKEND=mock python3 -m multi_iterm2_manager
-```
-
-## 启停脚本
-
-推荐直接用项目根目录脚本：
+### 3. 启动
 
 ```bash
 ./start.sh
+```
+
+服务就绪后会打印地址，默认 `http://127.0.0.1:8765`，浏览器打开即可。
+
+### 4. 停止
+
+```bash
 ./stop.sh
 ```
 
-脚本行为：
+`stop.sh` 会关闭所有受管终端窗口并退出 iTerm2（如果没有其他窗口）。
 
-- `./start.sh`：停止旧服务、启动新服务、写入 pid 文件、等待健康检查成功
-- `./stop.sh`：停止服务、清理本项目托管的 iTerm 会话、尝试退出空闲 iTerm
+## 启停脚本行为
 
-脚本运行日志默认放在：
+| 脚本 | 行为 |
+|------|------|
+| `./start.sh` | 安全重启模式：停旧进程 → 启新进程 → 自动接管之前的终端窗口（窗口不关闭、布局不丢失） |
+| `./stop.sh` | 完整清理：关闭所有受管终端 → 停止服务 |
 
-- `.run/multi-iterm2-manager.log`
+重启后端不需要重新接管终端，终端 ID 和布局跨重启持久化。
 
-## 开发 / 验收工作流
+日志路径：`.run/multi-iterm2-manager.log`
 
-本项目默认采用统一的需求 / Bug 处理流程，详见：
+## 手动启动（不用脚本）
 
-- `docs/development-workflow.md`
+```bash
+source .venv/bin/activate
 
-推荐顺序：
+# 真实 iTerm2 后端
+MITERM_BACKEND=iterm2 python -m multi_iterm2_manager
 
-1. 用户提出需求或 bug
-2. 修改代码
-3. `./stop.sh`
-4. 自测并关闭测试环境
-5. `./stop.sh`
-6. `./start.sh`
-7. 通知用户验收
+# 模拟后端（无需 iTerm2，仅看 UI）
+MITERM_BACKEND=mock python -m multi_iterm2_manager
+```
 
-## 当前接口
+## 功能概览
 
-- `GET /api/terminals`：列出所有终端
-- `POST /api/terminals`：创建新终端
-- `POST /api/terminals/demo`：创建 4 个四宫格示例窗口
-- `POST /api/terminals/{id}/focus`：聚焦某个终端
-- `POST /api/terminals/{id}/refresh`：刷新文本快照
-- `POST /api/terminals/{id}/send-text`：发送命令
-- `POST /api/terminals/{id}/frame`：设置窗口位置和大小
-- `POST /api/workspace/monitor-mode`：让真实 iTerm 退回后台监控模式
-- `POST /api/layouts/grid`：手动覆盖监控墙网格布局
-- `POST /api/terminals/close-all`：关闭全部未关闭窗口
-- `WS /ws`：接收终端状态与监控布局实时更新
+- 创建 / 接管 / 关闭 iTerm2 终端窗口
+- 实时屏幕镜像（带 ANSI 颜色）
+- 自动状态检测（运行中 / 已完成 / 异常 / 等待中）
+- 拖拽排序、分割布局、网格列宽调整
+- 标签分组筛选、按标签独立保存布局
+- 终端静默（不进入通知队列）
+- 隐藏终端（从默认视图移除但不关闭）
+- 待处理队列（异常/等待中的终端排队提醒）
+- 点击卡片跳转到原生 iTerm2 窗口
+- 向终端发送命令
+- 界面调优（边距、间距、边框等实时调整）
 
-## 目录说明
+## 界面调优
 
-- `src/multi_iterm2_manager/server.py`：FastAPI 入口
-- `src/multi_iterm2_manager/service.py`：终端编排与监控服务
-- `src/multi_iterm2_manager/backend/iterm2_backend.py`：真实 iTerm2 后端
-- `src/multi_iterm2_manager/backend/mock.py`：模拟后端
-- `src/multi_iterm2_manager/static/index.html`：看板入口页面
-- `src/multi_iterm2_manager/static/app.js`：前端逻辑
-- `src/multi_iterm2_manager/static/styles.css`：前端样式
+项目根目录 `ui-settings.yaml` 为默认界面配置，也可在页面菜单中直接修改并保存。
 
-## 当前限制
+## 目录结构
 
-- 当前监控墙展示的是 **终端文本镜像**，不是窗口视频流。
-- 关键词分析是规则式实现，后续可以扩展成更强的状态机。
-- 真实窗口当前通过“最大化 + 隐藏 iTerm app”实现后台工作层；如果后续要更强的置底能力，再补 Hammerspoon 桥接层。
+```
+src/multi_iterm2_manager/
+├── server.py          # FastAPI 入口 + 路由
+├── service.py         # 终端编排与监控服务
+├── models.py          # 数据模型
+├── config.py          # 配置加载
+├── analyzer.py        # 终端状态规则引擎
+├── display.py         # 屏幕/窗口坐标工具
+├── backend/
+│   ├── iterm2_backend.py  # 真实 iTerm2 后端
+│   └── mock.py            # 模拟后端
+└── static/
+    ├── index.html     # 前端入口
+    ├── app.js         # 前端逻辑
+    └── styles.css     # 前端样式
+```
+
+## API
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/terminals` | 列出所有终端 |
+| GET | `/api/health` | 健康检查 |
+| POST | `/api/terminals` | 创建终端 |
+| POST | `/api/terminals/{id}/focus` | 聚焦终端（跳转到 iTerm2） |
+| POST | `/api/terminals/{id}/send-text` | 发送命令 |
+| POST | `/api/terminals/{id}/hidden` | 设置隐藏 |
+| POST | `/api/terminals/{id}/muted` | 设置静默 |
+| POST | `/api/terminals/{id}/tags` | 设置标签 |
+| POST | `/api/terminals/{id}/close` | 关闭终端 |
+| POST | `/api/terminals/{id}/detach` | 解绑终端（不关闭窗口） |
+| POST | `/api/terminals/close-all` | 关闭全部 |
+| POST | `/api/sessions/adopt` | 接管已有终端 |
+| POST | `/api/workspace/monitor-mode` | 收起所有窗口 |
+| WS | `/ws` | 实时状态推送 |

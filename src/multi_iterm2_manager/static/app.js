@@ -148,7 +148,7 @@ const dashboardLayout = document.querySelector(".dashboard-layout");
 const uiSettingsForm = document.getElementById("ui-settings-form");
 const uiSettingsResetButton = document.getElementById("ui-settings-reset");
 const uiSettingsPath = document.getElementById("ui-settings-path");
-const tagFilterSelect = document.getElementById("tag-filter-select");
+const tagFilterTabs = document.getElementById("tag-filter-tabs");
 
 const DEFAULT_UI_SETTINGS = {
   dashboard_padding_px: 4,
@@ -1230,29 +1230,64 @@ function syncFilterTabs() {
 // 上次同步的标签快照，用于跳过无变化的重建（避免下拉框展开时被 DOM 重建关闭）
 let _lastSyncedTagsKey = "";
 
-// 同步标签下拉选框选项
+// 同步标签筛选 Tab 按钮组
 function syncTagFilterSelect() {
-  if (!tagFilterSelect) return;
-  // 只有标签列表真正变化时才重建 DOM，避免高频 WebSocket 消息导致下拉框闪烁
+  if (!tagFilterTabs) return;
+  // 只有标签列表真正变化时才重建 DOM
   const tagsKey = state.allTags.join(",");
   if (tagsKey !== _lastSyncedTagsKey) {
     _lastSyncedTagsKey = tagsKey;
-    tagFilterSelect.innerHTML = '<option value="">全部标签</option><option value="__untagged__">无标签</option>';
+    tagFilterTabs.innerHTML = "";
+    // "全部标签" 按钮
+    const allBtn = document.createElement("button");
+    allBtn.className = "tag-tab";
+    allBtn.dataset.tag = "";
+    allBtn.textContent = "全部标签";
+    tagFilterTabs.appendChild(allBtn);
+    // "无标签" 按钮
+    const untaggedBtn = document.createElement("button");
+    untaggedBtn.className = "tag-tab";
+    untaggedBtn.dataset.tag = "__untagged__";
+    untaggedBtn.textContent = "无标签";
+    tagFilterTabs.appendChild(untaggedBtn);
+    // 各标签按钮
     for (const tag of state.allTags) {
-      const opt = document.createElement("option");
-      opt.value = tag;
-      opt.textContent = tag;
-      tagFilterSelect.appendChild(opt);
+      const btn = document.createElement("button");
+      btn.className = "tag-tab";
+      btn.dataset.tag = tag;
+      btn.textContent = tag;
+      tagFilterTabs.appendChild(btn);
     }
+    // 绑定点击事件（事件委托）
+    tagFilterTabs.onclick = (e) => {
+      const btn = e.target.closest(".tag-tab");
+      if (!btn) return;
+      const tagValue = btn.dataset.tag;
+      // 先保存当前标签的布局快照
+      saveTagLayout();
+      // 切换到新标签
+      state.selectedTag = tagValue || null;
+      state.page = 1;
+      // 恢复新标签的布局（没有保存过则清空）
+      loadTagLayout();
+      // loadTagLayout 可能清空 orderedTerminalIds，需从 state.terminals 重建
+      syncTerminalOrder([...state.terminals.values()]);
+      saveViewState();
+      refreshWall();
+    };
   }
-  // 恢复之前的选中项（如果标签仍存在或是"无标签"选项）
-  if (state.selectedTag === "__untagged__" || (state.selectedTag && state.allTags.includes(state.selectedTag))) {
-    tagFilterSelect.value = state.selectedTag;
-  } else {
+  // 更新激活状态
+  const activeTag = state.selectedTag || "";
+  tagFilterTabs.querySelectorAll(".tag-tab").forEach((btn) => {
+    btn.classList.toggle("is-active", btn.dataset.tag === activeTag);
+  });
+  // 如果选中的标签已不存在，回退到全部
+  if (state.selectedTag && state.selectedTag !== "__untagged__" && !state.allTags.includes(state.selectedTag)) {
     state.selectedTag = null;
-    tagFilterSelect.value = "";
+    tagFilterTabs.querySelectorAll(".tag-tab").forEach((btn) => {
+      btn.classList.toggle("is-active", btn.dataset.tag === "");
+    });
   }
-  tagFilterSelect.classList.toggle("has-selection", !!state.selectedTag);
 }
 
 function getPagedTerminals() {
@@ -2965,26 +3000,7 @@ document.querySelectorAll("#topbar-filters .filter-tab").forEach((tab) => {
   };
 });
 
-// 标签筛选下拉框事件
-if (tagFilterSelect) {
-  tagFilterSelect.onchange = () => {
-    // 先保存当前标签的布局快照
-    saveTagLayout();
-
-    // 切换到新标签
-    state.selectedTag = tagFilterSelect.value || null;
-    tagFilterSelect.classList.toggle("has-selection", !!state.selectedTag);
-    state.page = 1;
-
-    // 恢复新标签的布局（没有保存过则清空）
-    loadTagLayout();
-    // loadTagLayout 可能清空 orderedTerminalIds，需从 state.terminals 重建
-    syncTerminalOrder([...state.terminals.values()]);
-
-    saveViewState();
-    refreshWall();
-  };
-}
+// 标签筛选事件已在 syncTagFilterSelect 中通过事件委托绑定
 
 window.addEventListener("resize", () => {
   if (state.layout.count > 0) {

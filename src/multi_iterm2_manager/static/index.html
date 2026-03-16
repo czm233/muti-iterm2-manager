@@ -11,120 +11,122 @@
     <div class="page">
       <div class="dashboard-layout">
         <header class="hero topbar">
-          <div class="topbar-brand">
-            <h1 class="eyebrow">Monitor Wall</h1>
-            <span id="build-version" class="status-pill">{{BUILD_VERSION}}</span>
-            <span id="ws-status" class="status-pill status-connecting">连接中</span>
-            <span id="stat-cpu" class="status-pill stat-pill" title="CPU 使用率">CPU --%</span>
-            <span id="stat-mem" class="status-pill stat-pill" title="内存使用率">MEM --%</span>
-            <span id="stat-disk" class="status-pill stat-pill" title="磁盘使用率">DISK --%</span>
-            <span id="stat-disk-free" class="status-pill stat-pill" title="磁盘剩余空间">剩余 --G</span>
-          </div>
-
-          <details class="topbar-menu topbar-menu--wide">
-            <summary>菜单</summary>
-            <div class="topbar-menu-panel">
-              <div class="panel-title">创建新任务</div>
-              <form id="create-form" class="create-form topbar-form">
-                <input id="name" name="name" type="text" placeholder="任务名称，例如：Claude 任务 A（可留空）" />
-                <div class="topbar-menu-actions">
-                  <button type="submit">启动并纳入监控</button>
-                  <button type="button" id="create-demo" class="secondary">创建示例任务</button>
-                </div>
-              </form>
-              <div class="panel-divider"></div>
-              <div class="panel-title-row">
-                <div class="panel-title">接管已有终端</div>
-                <button id="adopt-all-sessions" class="secondary" style="font-size:0.8rem;padding:2px 8px;">一键接管</button>
-              </div>
-              <div id="adopt-session-list" class="adopt-session-list">
-                <button id="scan-sessions" class="secondary">扫描可用终端</button>
-              </div>
-              <div class="panel-divider"></div>
-              <div class="panel-title">操作</div>
-              <div class="topbar-menu-actions">
-                <button id="monitor-mode" class="secondary">收起所有</button>
-                <button id="refresh-all" class="secondary">刷新全部</button>
-                <button id="close-all" class="danger">关闭全部</button>
-              </div>
-              <div class="panel-divider"></div>
-              <div class="panel-title">布局</div>
-              <div class="topbar-menu-actions">
-                <button id="layout-vertical" class="secondary">纵向均匀布局</button>
-                <button id="layout-horizontal" class="secondary">横向均匀布局</button>
-                <button id="layout-two-col" class="secondary">两列均匀布局</button>
-              </div>
-              <div class="panel-divider"></div>
-              <div class="panel-title">界面调优</div>
-              <form id="ui-settings-form" class="topbar-form ui-settings-form">
-                <label>
-                  <span>页面边距</span>
-                  <input name="dashboard_padding_px" type="number" min="0" max="48" step="1" />
-                </label>
-                <label>
-                  <span>区域间距</span>
-                  <input name="dashboard_gap_px" type="number" min="0" max="48" step="1" />
-                </label>
-                <label>
-                  <span>终端间距</span>
-                  <input name="monitor_grid_gap_px" type="number" min="0" max="48" step="1" />
-                </label>
-                <label>
-                  <span>终端外边框</span>
-                  <input name="wall_card_border_width_px" type="number" min="0" max="8" step="0.5" />
-                </label>
-                <label>
-                  <span>终端内边框</span>
-                  <input name="wall_card_terminal_border_width_px" type="number" min="0" max="8" step="0.5" />
-                </label>
-                <label>
-                  <span>终端内边距</span>
-                  <input name="wall_card_padding_px" type="number" min="0" max="48" step="1" />
-                </label>
-                <label>
-                  <span>分割透明边宽</span>
-                  <input name="split_resizer_hit_area_px" type="number" min="4" max="48" step="1" />
-                </label>
-                <label>
-                  <span>分割线宽</span>
-                  <input name="split_resizer_line_width_px" type="number" min="0" max="8" step="1" />
-                </label>
-                <label>
-                  <span>网格拖拽边宽</span>
-                  <input name="grid_resizer_hit_area_px" type="number" min="4" max="48" step="1" />
-                </label>
-                <label>
-                  <span>网格线宽</span>
-                  <input name="grid_resizer_line_width_px" type="number" min="0" max="8" step="1" />
-                </label>
-                <div class="topbar-menu-actions" style="align-items:center;">
-                  <button type="button" id="ui-settings-reset" class="ghost">恢复默认</button>
-                  <div id="ui-settings-path" class="wall-page-text" style="margin:0;"></div>
-                </div>
-              </form>
+          <div class="topbar-row topbar-row--primary">
+            <div class="topbar-brand">
+              <h1 class="eyebrow">Monitor Wall</h1>
+              <span id="build-version" class="status-pill">{{BUILD_VERSION}}</span>
+              <span id="ws-status" class="status-pill status-connecting">连接中</span>
+              <span id="stat-cpu" class="status-pill stat-pill" title="CPU 使用率">CPU --%</span>
+              <span id="stat-mem" class="status-pill stat-pill" title="内存使用率">MEM --%</span>
+              <span id="stat-disk" class="status-pill stat-pill" title="磁盘使用率">DISK --%</span>
+              <span id="stat-disk-free" class="status-pill stat-pill" title="磁盘剩余空间">剩余 --G</span>
             </div>
-          </details>
 
-          <span class="topbar-divider"></span>
-          <div class="topbar-shortcuts">
-            <button id="quick-create" class="shortcut-btn" title="创建新终端">新建</button>
-            <button id="quick-adopt-all" class="shortcut-btn" title="扫描并接管所有 iTerm2 终端">一键接管</button>
-            <button id="quick-layout-horizontal" class="shortcut-btn" title="横向均匀布局">横排</button>
+            <details class="topbar-menu topbar-menu--wide">
+              <summary>菜单</summary>
+              <div class="topbar-menu-panel">
+                <div class="panel-title">创建新任务</div>
+                <form id="create-form" class="create-form topbar-form">
+                  <input id="name" name="name" type="text" placeholder="任务名称，例如：Claude 任务 A（可留空）" />
+                  <div class="topbar-menu-actions">
+                    <button type="submit">启动并纳入监控</button>
+                    <button type="button" id="create-demo" class="secondary">创建示例任务</button>
+                  </div>
+                </form>
+                <div class="panel-divider"></div>
+                <div class="panel-title-row">
+                  <div class="panel-title">接管已有终端</div>
+                  <button id="adopt-all-sessions" class="secondary" style="font-size:0.8rem;padding:2px 8px;">一键接管</button>
+                </div>
+                <div id="adopt-session-list" class="adopt-session-list">
+                  <button id="scan-sessions" class="secondary">扫描可用终端</button>
+                </div>
+                <div class="panel-divider"></div>
+                <div class="panel-title">操作</div>
+                <div class="topbar-menu-actions">
+                  <button id="monitor-mode" class="secondary">收起所有</button>
+                  <button id="refresh-all" class="secondary">刷新全部</button>
+                  <button id="close-all" class="danger">关闭全部</button>
+                </div>
+                <div class="panel-divider"></div>
+                <div class="panel-title">布局</div>
+                <div class="topbar-menu-actions">
+                  <button id="layout-vertical" class="secondary">纵向均匀布局</button>
+                  <button id="layout-horizontal" class="secondary">横向均匀布局</button>
+                  <button id="layout-two-col" class="secondary">两列均匀布局</button>
+                </div>
+                <div class="panel-divider"></div>
+                <div class="panel-title">界面调优</div>
+                <form id="ui-settings-form" class="topbar-form ui-settings-form">
+                  <label>
+                    <span>页面边距</span>
+                    <input name="dashboard_padding_px" type="number" min="0" max="48" step="1" />
+                  </label>
+                  <label>
+                    <span>区域间距</span>
+                    <input name="dashboard_gap_px" type="number" min="0" max="48" step="1" />
+                  </label>
+                  <label>
+                    <span>终端间距</span>
+                    <input name="monitor_grid_gap_px" type="number" min="0" max="48" step="1" />
+                  </label>
+                  <label>
+                    <span>终端外边框</span>
+                    <input name="wall_card_border_width_px" type="number" min="0" max="8" step="0.5" />
+                  </label>
+                  <label>
+                    <span>终端内边框</span>
+                    <input name="wall_card_terminal_border_width_px" type="number" min="0" max="8" step="0.5" />
+                  </label>
+                  <label>
+                    <span>终端内边距</span>
+                    <input name="wall_card_padding_px" type="number" min="0" max="48" step="1" />
+                  </label>
+                  <label>
+                    <span>分割透明边宽</span>
+                    <input name="split_resizer_hit_area_px" type="number" min="4" max="48" step="1" />
+                  </label>
+                  <label>
+                    <span>分割线宽</span>
+                    <input name="split_resizer_line_width_px" type="number" min="0" max="8" step="1" />
+                  </label>
+                  <label>
+                    <span>网格拖拽边宽</span>
+                    <input name="grid_resizer_hit_area_px" type="number" min="4" max="48" step="1" />
+                  </label>
+                  <label>
+                    <span>网格线宽</span>
+                    <input name="grid_resizer_line_width_px" type="number" min="0" max="8" step="1" />
+                  </label>
+                  <div class="topbar-menu-actions" style="align-items:center;">
+                    <button type="button" id="ui-settings-reset" class="ghost">恢复默认</button>
+                    <div id="ui-settings-path" class="wall-page-text" style="margin:0;"></div>
+                  </div>
+                </form>
+              </div>
+            </details>
+
+            <span class="topbar-divider"></span>
+            <div class="topbar-shortcuts">
+              <button id="quick-create" class="shortcut-btn" title="创建新终端">新建</button>
+              <button id="quick-adopt-all" class="shortcut-btn" title="扫描并接管所有 iTerm2 终端">一键接管</button>
+              <button id="quick-layout-horizontal" class="shortcut-btn" title="横向均匀布局">横排</button>
+            </div>
+
+            <div id="topbar-queue" class="topbar-queue"></div>
           </div>
 
-          <div id="topbar-queue" class="topbar-queue"></div>
-          <nav id="topbar-filters" class="topbar-filters">
-            <select id="tag-filter-select" class="tag-filter-select">
-              <option value="">全部标签</option>
-            </select>
-            <span class="topbar-filter-divider"></span>
-            <button class="filter-tab is-active" data-filter="default">默认</button>
+          <div class="topbar-row topbar-row--secondary">
+            <nav id="topbar-filters" class="topbar-filters">
+              <button class="filter-tab is-active" data-filter="default">默认</button>
               <button class="filter-tab filter-tab--attention" data-filter="attention">待处理<span id="filter-attention-badge" class="filter-badge" hidden></span></button>
               <button class="filter-tab filter-tab--running" data-filter="running">工作中<span id="filter-running-badge" class="filter-badge" hidden></span></button>
               <button class="filter-tab filter-tab--done" data-filter="done">空闲<span id="filter-done-badge" class="filter-badge" hidden></span></button>
               <button class="filter-tab" data-filter="all">全部</button>
               <button class="filter-tab filter-tab--hidden" data-filter="hidden">已隐藏<span id="filter-hidden-badge" class="filter-badge" hidden></span></button>
-          </nav>
+            </nav>
+            <nav id="tag-filter-tabs" class="tag-filter-tabs"></nav>
+          </div>
         </header>
 
         <section class="monitor-stage">
