@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
+import re
 import time
 from contextlib import suppress
 from datetime import datetime
@@ -24,11 +25,18 @@ class DashboardService:
         self.monitor_tasks: dict[str, asyncio.Task[None]] = {}
         self._subscribers: set[asyncio.Queue[dict]] = set()
         self._lock = asyncio.Lock()
+        self._last_snapshot_time: float = 0.0
         self.backend: Any = self._build_backend()
         self._watchdog_task: asyncio.Task[None] | None = None
         self._timeout_check_task: asyncio.Task[None] | None = None
         self._rule_config: RuleEngineConfig = load_rules(settings.rules_file)
         self.ui_settings = settings.ui_settings
+        # 预热 psutil CPU 采样，避免首次调用返回 0.0
+        try:
+            import psutil
+            psutil.cpu_percent()
+        except ImportError:
+            pass
 
     async def start(self) -> None:
         await self.backend.start()
@@ -126,7 +134,7 @@ class DashboardService:
         return Path(__file__).with_name("static")
 
     async def subscribe(self) -> asyncio.Queue[dict]:
-        queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=20)
+        queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=100)
         self._subscribers.add(queue)
         await queue.put(self.snapshot_event())
         return queue
@@ -180,6 +188,89 @@ class DashboardService:
             "itermReady": await self.backend.ping(),
         }
 
+    def system_stats(self) -> dict:
+        """获取系统资源使用率（CPU、内存、磁盘）"""
+        try:
+            import psutil
+            cpu = psutil.cpu_percent(interval=None)
+            mem = psutil.virtual_memory().percent
+            disk_usage = psutil.disk_usage('/')
+            return {
+                "cpu_percent": cpu,
+                "memory_percent": mem,
+                "disk_percent": disk_usage.percent,
+                "disk_free_gb": round(disk_usage.free / (1024 ** 3), 1),
+                "disk_total_gb": round(disk_usage.total / (1024 ** 3), 1),
+            }
+        except ImportError:
+            # psutil 不可用时使用系统命令作为 fallback
+            return self._system_stats_fallback()
+
+    @staticmethod
+    def _system_stats_fallback() -> dict:
+        """psutil 不可用时通过系统命令获取资源使用率"""
+        import subprocess
+        stats: dict[str, float] = {"cpu_percent": 0.0, "memory_percent": 0.0, "disk_percent": 0.0, "disk_free_gb": 0.0, "disk_total_gb": 0.0}
+        try:
+            # macOS: 通过 top 获取 CPU 空闲率
+            out = subprocess.check_output(
+                ["top", "-l", "1", "-n", "0", "-s", "0"], text=True, timeout=5
+            )
+            for line in out.splitlines():
+                if "CPU usage" in line:
+                    # 格式: CPU usage: 3.33% user, 5.55% sys, 91.11% idle
+                    parts = line.split(",")
+                    for part in parts:
+                        if "idle" in part:
+                            idle = float(part.strip().split("%")[0])
+                            stats["cpu_percent"] = round(100.0 - idle, 1)
+                            break
+                    break
+        except Exception:
+            pass
+        try:
+            # macOS: 通过 vm_stat 获取内存使用率
+            import os
+            out = subprocess.check_output(["vm_stat"], text=True, timeout=5)
+            page_size = os.sysconf("SC_PAGE_SIZE")
+            pages: dict[str, int] = {}
+            for line in out.splitlines():
+                if ":" in line:
+                    key, val = line.split(":", 1)
+                    val = val.strip().rstrip(".")
+                    if val.isdigit():
+                        pages[key.strip()] = int(val)
+            free = pages.get("Pages free", 0)
+            active = pages.get("Pages active", 0)
+            inactive = pages.get("Pages inactive", 0)
+            speculative = pages.get("Pages speculative", 0)
+            wired = pages.get("Pages wired down", 0)
+            total = free + active + inactive + speculative + wired
+            if total > 0:
+                used = active + wired
+                stats["memory_percent"] = round(used / total * 100, 1)
+        except Exception:
+            pass
+        try:
+            # 通过 df 获取磁盘使用率和剩余空间
+            # 使用 -k (1K blocks) 避免 -h 的单位解析问题
+            out = subprocess.check_output(["df", "-k", "/"], text=True, timeout=5)
+            lines = out.strip().splitlines()
+            if len(lines) >= 2:
+                # 格式: Filesystem 1024-blocks Used Available Capacity ...
+                parts = lines[1].split()
+                if len(parts) >= 5:
+                    total_kb = int(parts[1])
+                    avail_kb = int(parts[3])
+                    cap_str = parts[4]  # e.g. "28%"
+                    stats["disk_total_gb"] = round(total_kb / (1024 * 1024), 1)
+                    stats["disk_free_gb"] = round(avail_kb / (1024 * 1024), 1)
+                    if cap_str.endswith("%"):
+                        stats["disk_percent"] = float(cap_str.rstrip("%"))
+        except Exception:
+            pass
+        return stats
+
     def get_screens(self) -> list[dict]:
         """获取所有可用屏幕信息"""
         return get_all_screens()
@@ -191,6 +282,22 @@ class DashboardService:
     def set_target_screen(self, screen_index: int) -> None:
         """设置目标屏幕索引，-1 表示不指定"""
         self.settings.target_screen = screen_index
+
+    def get_popup_settings(self) -> dict:
+        """获取弹出窗口位置和大小设置"""
+        return {
+            "x": self.settings.popup_x,
+            "y": self.settings.popup_y,
+            "width": self.settings.popup_width,
+            "height": self.settings.popup_height,
+        }
+
+    def set_popup_settings(self, x: int, y: int, width: int, height: int) -> None:
+        """设置弹出窗口位置和大小"""
+        self.settings.popup_x = x
+        self.settings.popup_y = y
+        self.settings.popup_width = width
+        self.settings.popup_height = height
 
     async def create_terminal(self, params: CreateTerminalParams) -> dict:
         final_name = (params.name or '').strip() or self._next_default_name()
@@ -206,6 +313,8 @@ class DashboardService:
         )
         async with self._lock:
             self.records[record.id] = record
+        # 对齐窗口大小到其他可见终端
+        await self._align_frame_to_siblings(record)
         await self.refresh_terminal(record.id)
         self._start_monitor(record.id)
         await self.enter_monitor_mode()
@@ -226,37 +335,29 @@ class DashboardService:
             )
         return created
 
+    async def _apply_popup_frame(self, record: TerminalRecord) -> None:
+        """如果设置了弹出窗口坐标，则移动窗口到指定位置和大小"""
+        popup_w = self.settings.popup_width
+        popup_h = self.settings.popup_height
+        if popup_w > 0 or popup_h > 0:
+            current_frame = await self.backend.get_frame(record.handle)
+            if current_frame is not None:
+                win_w = popup_w if popup_w > 0 else current_frame.width
+                win_h = popup_h if popup_h > 0 else current_frame.height
+                new_frame = TerminalFrame(
+                    x=float(self.settings.popup_x),
+                    y=float(self.settings.popup_y),
+                    width=float(win_w),
+                    height=float(win_h),
+                )
+                await self.backend.set_frame(record.handle, new_frame)
+                record.frame = new_frame
+
     async def focus_terminal(self, terminal_id: str) -> dict:
         record = self._get_record(terminal_id)
         try:
             await self.backend.focus(record.handle)
-            # 如果设置了目标屏幕，将窗口移动到该屏幕
-            target = self.settings.target_screen
-            if target >= 0:
-                bounds = get_screen_bounds(target)
-                if bounds is not None:
-                    # 将窗口移动到目标屏幕的中心位置
-                    # 使用当前窗口大小，移到目标屏幕可用区域的左上角偏移一点
-                    current_frame = await self.backend.get_frame(record.handle)
-                    if current_frame is not None:
-                        # 计算窗口在目标屏幕上的居中位置
-                        win_w = current_frame.width
-                        win_h = current_frame.height
-                        # 如果窗口比目标屏幕大，缩小到屏幕大小的 90%
-                        if win_w > bounds.width:
-                            win_w = bounds.width * 0.9
-                        if win_h > bounds.height:
-                            win_h = bounds.height * 0.9
-                        new_x = bounds.x + (bounds.width - win_w) / 2
-                        new_y = bounds.y + (bounds.height - win_h) / 2
-                        new_frame = TerminalFrame(
-                            x=round(new_x, 2),
-                            y=round(new_y, 2),
-                            width=round(win_w, 2),
-                            height=round(win_h, 2),
-                        )
-                        await self.backend.set_frame(record.handle, new_frame)
-                        record.frame = new_frame
+            await self._apply_popup_frame(record)
         except Exception as exc:
             if self._is_missing_terminal_error(exc):
                 return await self._mark_terminal_closed(record, reason="真实窗口已被手动关闭")
@@ -285,6 +386,44 @@ class DashboardService:
         record.updated_at = self._now()
         await self._broadcast(self.record_event(terminal_id))
         return record.to_dict()
+
+    async def set_hidden(self, terminal_id: str, hidden: bool) -> dict:
+        record = self._get_record(terminal_id)
+        record.hidden = hidden
+        await self.backend.set_hidden(record.handle, hidden)
+        # 取消隐藏时，将窗口大小对齐到其他可见终端
+        if not hidden:
+            await self._align_frame_to_siblings(record)
+        await self._broadcast(self.record_event(terminal_id))
+        return record.to_dict()
+
+    async def _align_frame_to_siblings(self, record: TerminalRecord) -> None:
+        """将窗口大小对齐到其他可见终端（取第一个非隐藏、非关闭终端的 frame）"""
+        # 优先使用 popup 设置
+        popup_w = self.settings.popup_width
+        popup_h = self.settings.popup_height
+        if popup_w > 0 or popup_h > 0:
+            await self._apply_popup_frame(record)
+            return
+        # 没有 popup 设置时，对齐到兄弟终端的 frame
+        for sibling in self.records.values():
+            if sibling.id == record.id:
+                continue
+            if sibling.status == TerminalStatus.closed or sibling.hidden:
+                continue
+            if sibling.frame is not None:
+                target = TerminalFrame(
+                    x=sibling.frame.x,
+                    y=sibling.frame.y,
+                    width=sibling.frame.width,
+                    height=sibling.frame.height,
+                )
+                try:
+                    await self.backend.set_frame(record.handle, target)
+                    record.frame = target
+                except Exception:
+                    pass
+                return
 
     async def enter_monitor_mode(self) -> dict:
         await self.backend.hide_app()
@@ -333,9 +472,13 @@ class DashboardService:
             name=final_name,
             handle=handle,
             frame=frame,
+            hidden=handle.adopted_hidden,
         )
         async with self._lock:
             self.records[record.id] = record
+        # 对齐窗口大小到其他可见终端
+        if not record.hidden:
+            await self._align_frame_to_siblings(record)
         await self.refresh_terminal(record.id)
         self._start_monitor(record.id)
         await self.enter_monitor_mode()
@@ -365,6 +508,10 @@ class DashboardService:
                 return await self._mark_terminal_closed(record, reason="真实窗口已被手动关闭")
             raise
         self._apply_screen_text(record, text, screen_html, is_live=False)
+        # 获取当前工作目录
+        cwd = await self.backend.get_cwd(record.handle)
+        if cwd is not None:
+            record.cwd = cwd
         await self._broadcast(self.record_event(terminal_id))
         return record.to_dict()
 
@@ -379,6 +526,20 @@ class DashboardService:
             raise
         await asyncio.sleep(0.1)
         return await self.refresh_terminal(terminal_id)
+
+    async def get_live_frame(self, terminal_id: str) -> dict:
+        """实时从 iTerm2 获取终端窗口的当前位置和大小"""
+        record = self._get_record(terminal_id)
+        try:
+            frame = await self.backend.get_frame(record.handle)
+        except Exception as exc:
+            if self._is_missing_terminal_error(exc):
+                return await self._mark_terminal_closed(record, reason="真实窗口已被手动关闭")
+            raise
+        if frame is None:
+            raise ValueError("无法获取窗口坐标")
+        record.frame = frame
+        return frame.to_dict()
 
     async def set_frame(self, terminal_id: str, frame: TerminalFrame) -> dict:
         record = self._get_record(terminal_id)
@@ -428,12 +589,17 @@ class DashboardService:
             try:
                 queue.put_nowait(payload)
             except asyncio.QueueFull:
-                # 清空旧消息，补发最新快照
+                # 清空旧消息
                 self._drain_queue(queue)
-                try:
-                    queue.put_nowait(self.snapshot_event())
-                except asyncio.QueueFull:
-                    dead.append(queue)
+                # 节流：至少间隔 2 秒才补发 snapshot
+                now = time.monotonic()
+                if now - self._last_snapshot_time >= 2.0:
+                    try:
+                        queue.put_nowait(self.snapshot_event())
+                        self._last_snapshot_time = now
+                    except asyncio.QueueFull:
+                        dead.append(queue)
+                # 不足 2 秒则跳过 snapshot，队列已清空，后续正常消息会继续推送
         for queue in dead:
             self._subscribers.discard(queue)
 
@@ -462,6 +628,12 @@ class DashboardService:
 
                 status_changed = record.status != old_status
                 content_changed = record.content_hash != old_hash
+
+                # 内容变化时才更新工作目录，避免无意义的 API 调用
+                if content_changed:
+                    cwd = await self.backend.get_cwd(record.handle)
+                    if cwd is not None:
+                        record.cwd = cwd
 
                 # 状态变了但内容没变（超时规则触发），立即广播不限速
                 if status_changed and not content_changed:
@@ -546,6 +718,11 @@ class DashboardService:
         ]
         return any(pattern in message for pattern in patterns)
 
+    # 提示符守卫：常见 shell 提示符字符（$=bash, %=zsh, ❯=fancy, #=root）
+    _PROMPT_CHAR_RE = re.compile(r'[$%❯#]\s')
+    # 空闲态集合
+    _IDLE_STATUSES = frozenset({TerminalStatus.done, TerminalStatus.idle, TerminalStatus.waiting})
+
     def _apply_screen_text(self, record: TerminalRecord, text: str, screen_html: str, is_live: bool) -> None:
         # 已关闭的终端不再更新状态
         if record.status == TerminalStatus.closed:
@@ -562,7 +739,17 @@ class DashboardService:
         if record.content_stable_since > 0:
             stable_seconds = time.time() - record.content_stable_since
 
+        old_status = record.status
         status, markers, summary = analyze_screen_text(text, stable_seconds, self._rule_config)
+
+        # 提示符守卫：空闲→运行中的转换需要额外验证
+        # 用户在 shell 提示符打字时，只有最后一行变化且提示符仍可见
+        if (old_status in self._IDLE_STATUSES
+                and status == TerminalStatus.running
+                and record.screen_text
+                and self._is_likely_typing(record.screen_text, text)):
+            status = old_status
+
         record.screen_text = text
         record.screen_html = screen_html
         record.status = status
@@ -572,6 +759,23 @@ class DashboardService:
         record.is_live = is_live
         if record.status != TerminalStatus.error:
             record.last_error = None
+
+    @classmethod
+    def _is_likely_typing(cls, old_text: str, new_text: str) -> bool:
+        """检测是否只是用户在提示符处打字（非命令执行）。
+
+        同时满足两个条件才返回 True：
+        1. 行数没有增加（没有新输出行）
+        2. 最后一行仍包含 shell 提示符特征
+        """
+        old_lines = old_text.rstrip('\n').split('\n')
+        new_lines = new_text.rstrip('\n').split('\n')
+        # 新增了行 → 命令产生了输出
+        if len(new_lines) > len(old_lines):
+            return False
+        # 最后一行是否仍有 shell 提示符
+        last_line = new_lines[-1] if new_lines else ''
+        return bool(cls._PROMPT_CHAR_RE.search(last_line))
 
     def _get_record(self, terminal_id: str) -> TerminalRecord:
         if terminal_id not in self.records:

@@ -37,6 +37,10 @@ class Settings:
     ui_settings_file: str = "ui-settings.yaml"
     ui_settings: UiSettings = field(default_factory=UiSettings)
     target_screen: int = -1  # -1 表示"跟随当前/不指定"，0 表示屏幕1，1 表示屏幕2...
+    popup_x: int = 0         # 弹出窗口 x 坐标
+    popup_y: int = 0         # 弹出窗口 y 坐标
+    popup_width: int = 0     # 弹出窗口宽度，0 = 保持当前大小
+    popup_height: int = 0    # 弹出窗口高度，0 = 保持当前大小
 
 
 def _resolve_project_file(path_value: str) -> Path:
@@ -104,4 +108,8 @@ def load_settings() -> Settings:
         ui_settings_file=ui_settings_file,
         ui_settings=load_ui_settings(ui_settings_file),
         target_screen=int(os.getenv("MITERM_TARGET_SCREEN", "-1")),
+        popup_x=int(os.getenv("MITERM_POPUP_X", "0")),
+        popup_y=int(os.getenv("MITERM_POPUP_Y", "0")),
+        popup_width=int(os.getenv("MITERM_POPUP_WIDTH", "0")),
+        popup_height=int(os.getenv("MITERM_POPUP_HEIGHT", "0")),
     )

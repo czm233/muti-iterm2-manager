@@ -12,9 +12,15 @@ try:
 except Exception:
     AppKit = None
 
+try:
+    import objc  # type: ignore
+except Exception:
+    objc = None
+
 # --- CoreGraphics ctypes 绑定（实时屏幕检测，不受 NSScreen 缓存影响） ---
 
 _cg_lib = None
+_cd_lib = None
 
 
 def _cg():
@@ -30,6 +36,39 @@ def _cg():
             _cg_lib.CGDisplayIsMain.argtypes = [ctypes.c_uint32]
             _cg_lib.CGDisplayIsBuiltin.argtypes = [ctypes.c_uint32]
     return _cg_lib
+
+
+def _cd():
+    """延迟加载 CoreDisplay 框架（用于实时获取屏幕名称，不受 NSScreen 缓存影响）"""
+    global _cd_lib
+    if _cd_lib is None:
+        try:
+            _cd_lib = ctypes.cdll.LoadLibrary(
+                "/System/Library/Frameworks/CoreDisplay.framework/CoreDisplay"
+            )
+            _cd_lib.CoreDisplay_DisplayCreateInfoDictionary.restype = ctypes.c_void_p
+            _cd_lib.CoreDisplay_DisplayCreateInfoDictionary.argtypes = [ctypes.c_uint32]
+        except Exception:
+            _cd_lib = False  # 标记为不可用，避免重复加载
+    return _cd_lib if _cd_lib is not False else None
+
+
+def _get_display_name_via_coredisplay(display_id: int) -> str | None:
+    """通过 CoreDisplay 实时获取屏幕名称（不依赖 NSScreen 缓存）"""
+    cd = _cd()
+    if cd is None or objc is None:
+        return None
+    try:
+        info_ptr = cd.CoreDisplay_DisplayCreateInfoDictionary(display_id)
+        if not info_ptr:
+            return None
+        info = objc.objc_object(c_void_p=ctypes.c_void_p(info_ptr))
+        names = info.get("DisplayProductName", {})
+        if names:
+            return names.get("en_US") or list(names.values())[0]
+    except Exception:
+        pass
+    return None
 
 
 class _CGPoint(ctypes.Structure):
@@ -117,19 +156,21 @@ def get_all_screens() -> list[dict]:
         x = int(bounds.origin.x)
         y = int(bounds.origin.y)
 
-        # 屏幕名称
-        name = "Built-in Retina Display" if is_builtin else f"外接屏幕 {i}"
-        if AppKit is not None:
-            try:
-                for s in AppKit.NSScreen.screens():
-                    desc = s.deviceDescription()
-                    if desc.get("NSScreenNumber") and int(desc["NSScreenNumber"]) == did:
-                        localized = s.localizedName()
-                        if localized:
-                            name = localized
-                        break
-            except Exception:
-                pass
+        # 屏幕名称：优先用 CoreDisplay（实时），回退到 NSScreen（可能缓存旧值）
+        name = _get_display_name_via_coredisplay(did)
+        if not name:
+            name = "Built-in Retina Display" if is_builtin else f"外接屏幕 {i}"
+            if AppKit is not None:
+                try:
+                    for s in AppKit.NSScreen.screens():
+                        desc = s.deviceDescription()
+                        if desc.get("NSScreenNumber") and int(desc["NSScreenNumber"]) == did:
+                            localized = s.localizedName()
+                            if localized:
+                                name = localized
+                            break
+                except Exception:
+                    pass
 
         # 可用区域：优先用 NSScreen 数据，否则近似
         vis = visible_map.get(did)

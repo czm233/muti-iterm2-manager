@@ -38,6 +38,7 @@ class TerminalHandle:
     session_id: str
     tab_id: str | None = None
     adopted_name: str | None = None  # 接管时从 iTerm2 读取的原始名字
+    adopted_hidden: bool = False  # 接管时从 iTerm2 读取的隐藏状态
 
 
 @dataclass
@@ -56,6 +57,8 @@ class TerminalRecord:
     updated_at: str = field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))
     is_live: bool = False
     last_error: str | None = None
+    cwd: str | None = None
+    hidden: bool = False
     content_hash: str = ""
     content_stable_since: float = 0.0
 
@@ -77,6 +80,8 @@ class TerminalRecord:
             "updatedAt": self.updated_at,
             "isLive": self.is_live,
             "lastError": self.last_error,
+            "cwd": self.cwd,
+            "hidden": self.hidden,
         }
 
 

@@ -43,6 +43,19 @@ rules:
       - "Esc.?to.?cancel"
       - "Arrow.?keys.?to.?navigate"
 
+  # --- 内容规则：Claude Code 团队模式（teammates 仍在工作） ---
+  # last_n_lines 设为 15：Claude Code 团队模式下底部状态栏较长
+  # （team 成员列表、统计信息、bypass 模式等占 5-8 行），
+  # "teammates running" 文字会被推到倒数 8-12 行的位置
+  - name: claude-code-team-running
+    status: running
+    type: content
+    priority: 96
+    last_n_lines: 15
+    patterns:
+      - "Idle\\s*[·•]\\s*teammates\\s+running"
+      - "teammates running"
+
   # --- 内容规则：等待人类（通用） ---
   - name: generic-waiting
     status: waiting
@@ -104,3 +117,4 @@ rules:
       - "\\(yes/no\\)"
       - "Enter.*select"
       - "Esc.*cancel"
+      - "teammates running"

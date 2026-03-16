@@ -81,6 +81,10 @@ class AdoptPayload(BaseModel):
     name: str | None = Field(default=None, max_length=60)
 
 
+class SetHiddenPayload(BaseModel):
+    hidden: bool
+
+
 class UiSettingsPayload(BaseModel):
     dashboard_padding_px: int = Field(default=4, ge=0, le=48)
     dashboard_gap_px: int = Field(default=6, ge=0, le=48)
@@ -125,6 +129,12 @@ async def health() -> dict:
     return status
 
 
+@app.get("/api/system-stats")
+async def system_stats() -> dict:
+    """获取系统资源使用率（CPU、内存、磁盘）"""
+    return await asyncio.to_thread(service.system_stats)
+
+
 @app.get("/api/screens")
 async def get_screens() -> dict:
     """获取所有可用屏幕列表"""
@@ -144,6 +154,26 @@ async def set_target_screen(payload: TargetScreenPayload) -> dict:
         raise HTTPException(status_code=400, detail=f"屏幕索引超出范围，当前共 {len(screens)} 个屏幕")
     service.set_target_screen(payload.target_screen)
     return {"targetScreen": service.get_target_screen()}
+
+
+class PopupSettingsPayload(BaseModel):
+    x: int = Field(default=0)
+    y: int = Field(default=0)
+    width: int = Field(default=0, ge=0)
+    height: int = Field(default=0, ge=0)
+
+
+@app.get("/api/popup-settings")
+async def get_popup_settings() -> dict:
+    """获取弹出窗口位置和大小设置"""
+    return service.get_popup_settings()
+
+
+@app.put("/api/popup-settings")
+async def put_popup_settings(payload: PopupSettingsPayload) -> dict:
+    """设置弹出窗口位置和大小坐标"""
+    service.set_popup_settings(payload.x, payload.y, payload.width, payload.height)
+    return service.get_popup_settings()
 
 
 @app.get("/api/ui-settings")
@@ -222,6 +252,16 @@ async def rename_terminal(terminal_id: str, payload: RenamePayload) -> dict:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+@app.post("/api/terminals/{terminal_id}/hidden")
+async def set_terminal_hidden(terminal_id: str, payload: SetHiddenPayload) -> dict:
+    try:
+        return {"item": await service.set_hidden(terminal_id, payload.hidden), "layout": service.monitor_layout()}
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @app.post("/api/terminals/{terminal_id}/focus")
 async def focus_terminal(terminal_id: str) -> dict:
     try:
@@ -288,6 +328,17 @@ async def refresh_terminal(terminal_id: str) -> dict:
 async def send_text(terminal_id: str, payload: SendTextPayload) -> dict:
     try:
         return {"item": await service.send_text(terminal_id, payload.text), "layout": service.monitor_layout()}
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.get("/api/terminals/{terminal_id}/frame")
+async def get_frame(terminal_id: str) -> dict:
+    """实时获取终端窗口的当前位置和大小"""
+    try:
+        return await service.get_live_frame(terminal_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:

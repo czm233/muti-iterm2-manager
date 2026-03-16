@@ -78,6 +78,7 @@ MANAGED_FLAG_VAR = "user.mitm_managed"
 MANAGED_OWNER_VAR = "user.mitm_owner"
 MANAGED_OWNER_VALUE = "multi-iterm2-manager"
 MANAGED_NAME_VAR = "user.mitm_name"
+MANAGED_HIDDEN_VAR = "user.mitm_hidden"
 ANCHOR_ROLE_VAR = "user.mitm_role"
 ANCHOR_ROLE_VALUE = "anchor"
 
@@ -244,7 +245,13 @@ class ITerm2Backend:
         return text
 
     async def stream_screen(self, handle: TerminalHandle):
+        MAX_RECONNECT = 10
+        INITIAL_BACKOFF = 0.5
+        MAX_BACKOFF = 10.0
+
         sent_initial = False
+        reconnect_count = 0
+        backoff = INITIAL_BACKOFF
         while True:
             try:
                 session = await self._get_session(handle.session_id)
@@ -252,6 +259,9 @@ class ITerm2Backend:
                     if not sent_initial:
                         yield await self.get_screen_render(handle)
                         sent_initial = True
+                    # 成功恢复连接，重置重连计数器
+                    reconnect_count = 0
+                    backoff = INITIAL_BACKOFF
                     while True:
                         try:
                             await asyncio.wait_for(streamer.async_get(), timeout=5)
@@ -269,9 +279,15 @@ class ITerm2Backend:
                 print(f"[stream_screen] _is_connection_lost={self._is_connection_lost_error(exc)}", flush=True)
                 if not self._is_connection_lost_error(exc):
                     raise
+                reconnect_count += 1
+                if reconnect_count > MAX_RECONNECT:
+                    print(f"[stream_screen] 超过最大重连次数({MAX_RECONNECT})，终止 stream", flush=True)
+                    return
+                print(f"[stream_screen] 第 {reconnect_count}/{MAX_RECONNECT} 次重连，退避 {backoff:.1f}s", flush=True)
                 await self._reset_runtime()
                 await self._ensure_connection(launch=False)
-                await asyncio.sleep(0.2)
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, MAX_BACKOFF)
 
     async def send_text(self, handle: TerminalHandle, text: str) -> None:
         async def _inner():
@@ -417,14 +433,43 @@ class ITerm2Backend:
                         adopted_name = await target_session.async_get_variable("session.name")
                 except Exception:
                     pass
+            # 读取隐藏状态
+            adopted_hidden = False
+            try:
+                hidden_val = await target_session.async_get_variable(MANAGED_HIDDEN_VAR)
+                adopted_hidden = bool(hidden_val)
+            except Exception:
+                pass
             await self.hide_app()
             return TerminalHandle(
                 window_id=target_window_id,
                 session_id=session_id,
                 tab_id=target_tab_id,
                 adopted_name=adopted_name,
+                adopted_hidden=adopted_hidden,
             )
         return await self._run_with_reconnect(_inner)
+
+    async def get_cwd(self, handle: TerminalHandle) -> str | None:
+        """获取终端 session 的当前工作目录"""
+        async def _inner():
+            session = await self._get_session(handle.session_id)
+            try:
+                path = await session.async_get_variable("path")
+                return path or None
+            except Exception:
+                return None
+        try:
+            return await self._run_with_reconnect(_inner)
+        except Exception:
+            return None
+
+    async def set_hidden(self, handle: TerminalHandle, hidden: bool) -> None:
+        """将隐藏状态写入 iTerm2 session 变量，重启后可恢复"""
+        async def _inner():
+            session = await self._get_session(handle.session_id)
+            await session.async_set_variable(MANAGED_HIDDEN_VAR, hidden)
+        await self._run_with_reconnect(_inner)
 
     async def rename(self, handle: TerminalHandle, name: str) -> None:
         async def _inner():

@@ -27,6 +27,8 @@ const state = {
   _needFullRefresh: false,        // 是否需要全量刷新
   _pendingLayout: null,           // 待应用的 layout
   _incrementalIds: new Set(),     // 需要增量更新的终端 ID 集合
+  queue: [],                       // 队列: [{ id, name, status }]
+  queueDismissed: new Map(),       // 用户手动移除的终端: Map<id, status> — 状态变化后自动清除
 };
 
 const VIEW_STATE_STORAGE_KEY = "mitm-monitor-view-state";
@@ -1009,12 +1011,33 @@ function escapeHtml(text) {
     .replaceAll("'", "&#39;");
 }
 
+/** 生成卡片显示标题：终端名 · 文件夹名 */
+function displayTitle(record) {
+  const name = record.name || "";
+  if (!record.cwd) return name;
+  const parts = record.cwd.replace(/\/+$/, "").split("/");
+  const folder = parts[parts.length - 1] || "";
+  if (!folder) return name;
+  return `${name} · ${folder}`;
+}
+
+// screenHtml 大小上限（100KB），超过时截断，防止极端情况内存暴涨
+const SCREEN_HTML_MAX_SIZE = 100 * 1024;
+
 function updateTerminalSnapshot(record, mount) {
   if (!mount) {
     return;
   }
   const text = record.screenText && record.screenText.trim() ? record.screenText : "暂无输出";
-  const newHtml = record.screenHtml || `<pre class="terminal-mirror">${escapeHtml(text)}</pre>`;
+  let newHtml = record.screenHtml || `<pre class="terminal-mirror">${escapeHtml(text)}</pre>`;
+  // 超过 100KB 时截断 screenHtml，防止内存暴涨
+  if (newHtml.length > SCREEN_HTML_MAX_SIZE) {
+    newHtml = newHtml.slice(0, SCREEN_HTML_MAX_SIZE) + '<pre class="terminal-mirror" style="color:#f59e0b">⚠ 输出过大，已截断显示</pre>';
+    // 同时截断 record 上缓存的原始数据，释放内存
+    if (record.screenHtml) {
+      record.screenHtml = newHtml;
+    }
+  }
   mount.innerHTML = newHtml;
   window.requestAnimationFrame(() => {
     mount.scrollTop = mount.scrollHeight;
@@ -1273,6 +1296,114 @@ async function focusTerminal(id, name) {
   setMessage(`已切到 ${name}，现在可以在原生 iTerm 手动接管`);
 }
 
+/* ---- 顶部队列 ---- */
+const ATTENTION_STATUSES = new Set(["waiting", "error"]);
+
+function updateQueue(terminalId, oldStatus, newStatus) {
+  // 隐藏的终端不入队
+  if (state.hiddenTerminalIds.has(terminalId)) {
+    state.queue = state.queue.filter((q) => q.id !== terminalId);
+    return;
+  }
+
+  // 用户手动移除过的终端：状态真正变化后才解除屏蔽
+  const dismissedStatus = state.queueDismissed.get(terminalId);
+  if (dismissedStatus !== undefined) {
+    if (newStatus !== dismissedStatus) {
+      state.queueDismissed.delete(terminalId); // 状态变了，解除屏蔽
+    } else {
+      return; // 状态没变，继续屏蔽
+    }
+  }
+
+  const terminal = state.terminals.get(terminalId);
+  if (!terminal) return;
+  const name = terminal.name || terminalId;
+  const inQueue = state.queue.findIndex((q) => q.id === terminalId);
+
+  // running → done：追加到队列末尾
+  if (oldStatus === "running" && newStatus === "done") {
+    if (inQueue === -1) {
+      state.queue.push({ id: terminalId, name, status: newStatus });
+    } else {
+      state.queue[inQueue].status = newStatus;
+    }
+    return;
+  }
+
+  // done → running：从队列移除
+  if (oldStatus === "done" && newStatus === "running") {
+    if (inQueue !== -1) state.queue.splice(inQueue, 1);
+    return;
+  }
+
+  // 任意 → waiting/error：插到队列最前面
+  if (ATTENTION_STATUSES.has(newStatus)) {
+    if (inQueue !== -1) state.queue.splice(inQueue, 1);
+    state.queue.unshift({ id: terminalId, name, status: newStatus });
+    return;
+  }
+
+  // waiting/error → 其他非 attention 状态：从队列移除
+  if (ATTENTION_STATUSES.has(oldStatus) && !ATTENTION_STATUSES.has(newStatus)) {
+    if (inQueue !== -1) state.queue.splice(inQueue, 1);
+    return;
+  }
+
+  // closed：移除
+  if (newStatus === "closed") {
+    if (inQueue !== -1) state.queue.splice(inQueue, 1);
+    return;
+  }
+}
+
+// 缓存上次队列快照，避免无变化时重建 DOM 导致 hover 闪烁
+let _lastQueueKey = "";
+
+function renderQueue() {
+  const container = document.getElementById("topbar-queue");
+  if (!container) return;
+  // 生成当前队列的指纹，无变化则跳过
+  const key = state.queue.map(q => `${q.id}:${q.name}:${q.status}`).join("|");
+  if (key === _lastQueueKey) return;
+  _lastQueueKey = key;
+  container.innerHTML = "";
+  for (const item of state.queue) {
+    const pill = document.createElement("span");
+    const isAttention = ATTENTION_STATUSES.has(item.status);
+    pill.className = "queue-pill" + (isAttention ? " queue-pill--attention" : item.status === "done" ? " queue-pill--done" : "");
+    pill.textContent = item.name;
+    pill.title = `${item.name} — ${item.status}（右键移除）`;
+    pill.onclick = () => focusTerminal(item.id, item.name);
+    pill.oncontextmenu = (e) => {
+      e.preventDefault();
+      state.queueDismissed.set(item.id, item.status); // 记录移除时的状态
+      state.queue = state.queue.filter((q) => q.id !== item.id);
+      _lastQueueKey = "__force__";
+      renderQueue();
+      setMessage(`已将 ${item.name} 移出队列`);
+    };
+    container.appendChild(pill);
+  }
+}
+
+function initQueueFromSnapshot() {
+  state.queue = [];
+  const attentionItems = [];
+  const doneItems = [];
+  for (const [id, terminal] of state.terminals) {
+    if (state.hiddenTerminalIds.has(id)) continue;
+    const name = terminal.name || id;
+    if (ATTENTION_STATUSES.has(terminal.status)) {
+      attentionItems.push({ id, name, status: terminal.status });
+    } else if (terminal.status === "done") {
+      doneItems.push({ id, name, status: terminal.status });
+    }
+    // running/idle 不入队
+  }
+  state.queue = [...attentionItems, ...doneItems];
+}
+
 async function renameTerminal(id, name) {
   return await request(`/api/terminals/${id}/rename`, {
     method: "POST",
@@ -1329,6 +1460,13 @@ function bindCardActions(card, record) {
     try {
       await renameTerminal(record.id, nextName);
       state.editingTitleTerminalId = null;
+      // 同步更新队列中的名称
+      const qItem = state.queue.find((q) => q.id === record.id);
+      if (qItem) {
+        qItem.name = nextName;
+        _lastQueueKey = "__force__";
+        renderQueue();
+      }
       setMessage(`已将终端重命名为 ${nextName}`);
     } catch (error) {
       state.editingTitleTerminalId = record.id;
@@ -1429,17 +1567,39 @@ function bindCardActions(card, record) {
 
   const toggleHideBtn = card.querySelector("[data-action='toggle-hide']");
   if (toggleHideBtn) {
-    toggleHideBtn.onclick = (event) => {
+    toggleHideBtn.onclick = async (event) => {
       event.stopPropagation();
-      if (state.hiddenTerminalIds.has(record.id)) {
-        state.hiddenTerminalIds.delete(record.id);
-        setMessage(`已取消隐藏 ${record.name}`);
-      } else {
+      const nowHidden = !state.hiddenTerminalIds.has(record.id);
+      if (nowHidden) {
         state.hiddenTerminalIds.add(record.id);
         setMessage(`已隐藏 ${record.name}，可在"已隐藏"筛选中找到`);
+        // 隐藏时从队列移除
+        state.queue = state.queue.filter((q) => q.id !== record.id);
+      } else {
+        state.hiddenTerminalIds.delete(record.id);
+        setMessage(`已取消隐藏 ${record.name}`);
+        // 取消隐藏时，检查状态决定是否入队（先去重）
+        const terminal = state.terminals.get(record.id);
+        if (terminal && !state.queue.some((q) => q.id === record.id)) {
+          if (ATTENTION_STATUSES.has(terminal.status)) {
+            state.queue.unshift({ id: record.id, name: terminal.name || record.id, status: terminal.status });
+          } else if (terminal.status === "done") {
+            state.queue.push({ id: record.id, name: terminal.name || record.id, status: terminal.status });
+          }
+        }
       }
       saveViewState();
       refreshWall();
+      // 同步隐藏状态到后端（写入 iTerm2 变量，重启后可恢复）
+      try {
+        await request(`/api/terminals/${record.id}/hidden`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ hidden: nowHidden }),
+        });
+      } catch (e) {
+        console.warn("同步隐藏状态到后端失败:", e);
+      }
     };
   }
 
@@ -1536,15 +1696,21 @@ function renderTerminal(record) {
     return card;
   }
 
-  // 保存面板展开状态，避免 innerHTML 替换后面板消失
-  const wasDetailsOpen = card.querySelector(".wall-card-details-panel:not([hidden])") !== null;
+  // 面板展开时跳过全卡 innerHTML 替换，避免面板被重建关闭
+  const detailsOpen = card.querySelector(".wall-card-details-panel:not([hidden])") !== null;
+  if (detailsOpen) {
+    updateTerminalSnapshot(record, card.querySelector(".wall-card-terminal"));
+    updateCardMeta(card, record);
+    card.className = `wall-card status-${record.status}`;
+    return card;
+  }
 
   card.className = `wall-card status-${record.status}`;
   card.innerHTML = `
     <div class="wall-card-header">
       <div class="wall-card-title-row">
-        <button type="button" class="ghost wall-card-drag-handle" title="拖拽排序" aria-label="拖拽排序">::</button>
-        <h2 class="wall-card-title" ${state.editingTitleTerminalId === record.id ? 'hidden' : ''}>${escapeHtml(record.name)}</h2>
+        <button type="button" class="ghost wall-card-drag-handle" title="拖拽排序" aria-label="拖拽排序"><svg width="100%" height="100%" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M12 1l-3 3.5h6L12 1z"/><path d="M12 23l-3-3.5h6L12 23z"/><path d="M1 12l3.5-3v6L1 12z"/><path d="M23 12l-3.5-3v6L23 12z"/><rect x="11.25" y="4" width="1.5" height="16" rx=".75"/><rect x="4" y="11.25" width="16" height="1.5" rx=".75"/></svg></button>
+        <h2 class="wall-card-title" ${state.editingTitleTerminalId === record.id ? 'hidden' : ''}>${escapeHtml(displayTitle(record))}</h2>
         <input class="wall-card-title-input" type="text" value="${escapeHtml(record.name)}" ${state.editingTitleTerminalId === record.id ? '' : 'hidden'} />
         <button data-action="toggle-hide" class="ghost wall-card-hide-button" title="${state.hiddenTerminalIds.has(record.id) ? "取消隐藏" : "隐藏"}">${state.hiddenTerminalIds.has(record.id) ? "取消隐藏" : "隐藏"}</button>
         <button type="button" class="ghost wall-card-more-button" title="更多信息">⋯</button>
@@ -1575,14 +1741,6 @@ function renderTerminal(record) {
   updateTerminalSnapshot(record, card.querySelector(".wall-card-terminal"));
   bindCardActions(card, record);
   restoreInputFocus(card, record);
-
-  // 恢复面板展开状态
-  if (wasDetailsOpen) {
-    const detailsPanel = card.querySelector(".wall-card-details-panel");
-    const detailsToggle = card.querySelector(".wall-card-more-button");
-    if (detailsPanel) detailsPanel.hidden = false;
-    if (detailsToggle) detailsToggle.classList.add("is-active");
-  }
 
   return card;
 }
@@ -1726,6 +1884,7 @@ function incrementalUpdate(layout = null, changedIds) {
   // 更新统计和筛选
   syncFilterTabs();
   renderStats();
+  renderQueue();
 }
 
 // 轻量更新卡片元信息：标题、状态 badge、摘要等（不重建 DOM）
@@ -1734,7 +1893,7 @@ function updateCardMeta(card, record) {
   if (state.editingTitleTerminalId === record.id) return;
   // 更新标题
   const title = card.querySelector(".wall-card-title");
-  if (title) title.textContent = record.name;
+  if (title) title.textContent = displayTitle(record);
   // 更新状态 badge
   const badge = card.querySelector(".badge");
   if (badge) {
@@ -1778,12 +1937,19 @@ function refreshWall(layout = null) {
   renderToolbarExtras(pageInfo);
   syncFilterTabs();
   renderStats();
+  renderQueue();
 }
 
 function applySnapshot(terminals, layout = null) {
   state.terminals.clear();
   for (const record of terminals) {
     state.terminals.set(record.id, record);
+  }
+  // 从后端数据恢复隐藏状态（优先级高于 localStorage）
+  for (const record of terminals) {
+    if (record.hidden) {
+      state.hiddenTerminalIds.add(record.id);
+    }
   }
   // 清理 hiddenTerminalIds 中不再存在的旧 ID
   for (const id of state.hiddenTerminalIds) {
@@ -1793,7 +1959,9 @@ function applySnapshot(terminals, layout = null) {
   }
   syncTerminalOrder(terminals);
   syncLayoutTree();
+  initQueueFromSnapshot();
   refreshWall(layout);
+  if (window._refreshCaptureTerminalList) window._refreshCaptureTerminalList();
 }
 
 async function loadUiSettings() {
@@ -1821,6 +1989,43 @@ function connectWebSocket() {
   setWebSocketStatus("connecting");
   const protocol = window.location.protocol === "https:" ? "wss" : "ws";
   const socket = new WebSocket(`${protocol}://${window.location.host}/ws`);
+  // 每个终端 ID 的限速状态：{ timer, lastTime, pending }
+  const _termThrottle = new Map();
+  const THROTTLE_MS = 200;
+
+  // 处理一条 terminal-updated 消息（限速后实际执行）
+  function _applyTerminalUpdate(payload) {
+    const oldRecord = state.terminals.get(payload.terminal.id);
+    const oldStatus = oldRecord ? oldRecord.status : null;
+    if (payload.terminal.status === "waiting" && oldStatus !== "waiting") {
+      playWaitingAlert();
+    }
+    state.terminals.set(payload.terminal.id, payload.terminal);
+    // 从后端同步隐藏状态（接管时恢复）
+    if (payload.terminal.hidden) {
+      state.hiddenTerminalIds.add(payload.terminal.id);
+      saveViewState();
+    }
+    if (!state.orderedTerminalIds.includes(payload.terminal.id)) {
+      state.orderedTerminalIds.push(payload.terminal.id);
+    }
+    syncLayoutTree();
+    updateQueue(payload.terminal.id, oldStatus, payload.terminal.status);
+    if (payload.terminal.status === "closed") {
+      state.terminals.delete(payload.terminal.id);
+      state.orderedTerminalIds = state.orderedTerminalIds.filter((id) => id !== payload.terminal.id);
+      state._needFullRefresh = true;
+      // 终端关闭后清理限速状态
+      const th = _termThrottle.get(payload.terminal.id);
+      if (th && th.timer) clearTimeout(th.timer);
+      _termThrottle.delete(payload.terminal.id);
+    } else {
+      state._incrementalIds.add(payload.terminal.id);
+    }
+    scheduleRender(payload.layout || null);
+    if (window._refreshCaptureTerminalList) window._refreshCaptureTerminalList();
+  }
+
   socket.onopen = () => { setWebSocketStatus("connected"); clearTransientErrorMessage(); socket.send("ready"); };
   socket.onmessage = (event) => {
     const payload = JSON.parse(event.data);
@@ -1829,27 +2034,45 @@ function connectWebSocket() {
       return;
     }
     if (payload.type === "terminal-updated") {
-      // 检测状态是否变为 waiting，播放提示音
-      const oldRecord = state.terminals.get(payload.terminal.id);
+      const termId = payload.terminal.id;
+      const now = Date.now();
+      // 状态变更类消息（closed/waiting）不限速，立即处理
+      const oldRecord = state.terminals.get(termId);
       const oldStatus = oldRecord ? oldRecord.status : null;
-      if (payload.terminal.status === "waiting" && oldStatus !== "waiting") {
-        playWaitingAlert();
+      const isStatusChange = payload.terminal.status !== oldStatus;
+      if (isStatusChange) {
+        _applyTerminalUpdate(payload);
+        const th = _termThrottle.get(termId);
+        if (th) { th.lastTime = now; }
+        return;
       }
-      state.terminals.set(payload.terminal.id, payload.terminal);
-      if (!state.orderedTerminalIds.includes(payload.terminal.id)) {
-        state.orderedTerminalIds.push(payload.terminal.id);
+      // 对同一终端的高频 terminal-updated 做限速
+      let th = _termThrottle.get(termId);
+      if (!th) {
+        th = { timer: null, lastTime: 0, pending: null };
+        _termThrottle.set(termId, th);
       }
-      syncLayoutTree();
-      // 终端关闭时从列表中移除并全量刷新
-      if (payload.terminal.status === "closed") {
-        state.terminals.delete(payload.terminal.id);
-        state.orderedTerminalIds = state.orderedTerminalIds.filter((id) => id !== payload.terminal.id);
-        state._needFullRefresh = true;
+      const elapsed = now - th.lastTime;
+      if (elapsed >= THROTTLE_MS) {
+        // 距离上次处理已超过阈值，立即处理
+        th.lastTime = now;
+        th.pending = null;
+        _applyTerminalUpdate(payload);
       } else {
-        // 增量更新：只标记变化的终端 ID，由 rAF 统一渲染
-        state._incrementalIds.add(payload.terminal.id);
+        // 距离上次处理不足阈值，暂存并延迟处理（保证最终一致性）
+        th.pending = payload;
+        if (!th.timer) {
+          th.timer = setTimeout(() => {
+            th.timer = null;
+            if (th.pending) {
+              th.lastTime = Date.now();
+              const p = th.pending;
+              th.pending = null;
+              _applyTerminalUpdate(p);
+            }
+          }, THROTTLE_MS - elapsed);
+        }
       }
-      scheduleRender(payload.layout || null);
       return;
     }
     if (payload.type === "monitor-layout" || payload.type === "workspace-mode") {
@@ -1940,6 +2163,10 @@ createDemoButton.onclick = async () => {
   } catch (error) {
     setMessage(error.message, true);
   }
+};
+
+document.getElementById("quick-layout-horizontal").onclick = () => {
+  layoutHorizontalBtn.click();
 };
 
 layoutVerticalBtn.onclick = () => {
@@ -2167,7 +2394,10 @@ function injectScreenSelector() {
   // 创建标题
   const title = document.createElement("div");
   title.className = "panel-title";
-  title.textContent = "终端弹出设置";
+  title.style.display = "flex";
+  title.style.justifyContent = "space-between";
+  title.style.alignItems = "center";
+  title.innerHTML = `<span>设置窗口弹出默认屏幕 <button type="button" id="refresh-screen-list" style="background:none;border:none;cursor:pointer;font-size:0.9rem;padding:2px 4px;color:var(--fg-muted);" title="刷新屏幕列表">&#x21bb;</button></span><span id="default-screen-hint" style="font-size:0.82rem;color:var(--fg-muted);font-weight:normal;"></span>`;
 
   // 创建表单
   const form = document.createElement("form");
@@ -2176,7 +2406,6 @@ function injectScreenSelector() {
   form.style.gridTemplateColumns = "1fr"; // 单列布局
   form.innerHTML = `
     <label>
-      <span>激活窗口目标屏幕</span>
       <select id="target-screen-select" style="
         background: var(--surface);
         color: var(--fg);
@@ -2189,15 +2418,80 @@ function injectScreenSelector() {
         <option value="-1">不指定（当前屏幕）</option>
       </select>
     </label>
-    <div id="default-screen-hint" style="font-size:0.82rem;color:var(--fg-muted);margin-top:2px;"></div>
+    <div class="panel-divider"></div>
+    <div style="color:var(--muted);font-weight:700;">弹出窗口坐标（宽高为 0 时不移动窗口）</div>
+    <div>
+      <label style="flex:1;">
+        <select id="popup-capture-terminal" style="
+          width:100%;
+          background:var(--bg);
+          color:var(--fg);
+          border:1px solid var(--border);
+          border-radius:6px;
+          padding:6px 8px;
+          font-size:0.92rem;
+        ">
+          <option value="">-- 选择终端获取坐标 --</option>
+        </select>
+      </label>
+    </div>
+    <div style="display:flex;gap:12px;">
+      <label style="flex:1;">
+        <span>X</span>
+        <input type="number" id="popup-x" step="1" placeholder="0" style="width:50%;" />
+      </label>
+      <label style="flex:1;">
+        <span>Y</span>
+        <input type="number" id="popup-y" step="1" placeholder="0" style="width:50%;" />
+      </label>
+    </div>
+    <div style="display:flex;gap:12px;">
+      <label style="flex:1;">
+        <span>宽度</span>
+        <input type="number" id="popup-width" min="0" step="1" placeholder="0 = 不移动" style="width:50%;" />
+      </label>
+      <label style="flex:1;">
+        <span>高度</span>
+        <input type="number" id="popup-height" min="0" step="1" placeholder="0 = 不移动" style="width:50%;" />
+      </label>
+    </div>
   `;
 
   tuningPanel.appendChild(divider);
   tuningPanel.appendChild(title);
   tuningPanel.appendChild(form);
 
-  // 选择即保存：change 事件自动提交到后端并记为默认
+  // 弹出窗口坐标控件变更时自动保存
+  const popupXInput = document.getElementById("popup-x");
+  const popupYInput = document.getElementById("popup-y");
+  const popupWInput = document.getElementById("popup-width");
+  const popupHInput = document.getElementById("popup-height");
+
+  const savePopupSettings = async () => {
+    try {
+      await request("/api/popup-settings", {
+        method: "PUT",
+        body: JSON.stringify({
+          x: Number(popupXInput.value) || 0,
+          y: Number(popupYInput.value) || 0,
+          width: Number(popupWInput.value) || 0,
+          height: Number(popupHInput.value) || 0,
+        }),
+      });
+      setMessage("弹出窗口设置已保存");
+    } catch (error) {
+      setMessage(error.message, true);
+    }
+  };
+
+  popupXInput.addEventListener("change", savePopupSettings);
+  popupYInput.addEventListener("change", savePopupSettings);
+  popupWInput.addEventListener("change", savePopupSettings);
+  popupHInput.addEventListener("change", savePopupSettings);
+
   const select = document.getElementById("target-screen-select");
+
+  // 选择即保存：change 事件自动提交到后端并记为默认
   select.addEventListener("change", async () => {
     const screenIndex = Number(select.value);
     try {
@@ -2205,7 +2499,6 @@ function injectScreenSelector() {
         method: "PUT",
         body: JSON.stringify({ target_screen: screenIndex }),
       });
-      // 同时保存为默认屏幕
       if (screenIndex === -1) {
         localStorage.removeItem("defaultScreenName");
       } else {
@@ -2218,6 +2511,64 @@ function injectScreenSelector() {
       setMessage(error.message, true);
     }
   });
+
+  // 选择终端后自动获取窗口坐标
+  const captureSelect = document.getElementById("popup-capture-terminal");
+
+  function refreshCaptureTerminalList() {
+    const current = captureSelect.value;
+    captureSelect.innerHTML = '<option value="">-- 选择终端获取坐标 --</option>';
+    for (const [id, t] of state.terminals) {
+      if (t.status === "closed") continue;
+      const opt = document.createElement("option");
+      opt.value = id;
+      opt.textContent = t.name || id;
+      captureSelect.appendChild(opt);
+    }
+    if (current && captureSelect.querySelector(`option[value="${current}"]`)) {
+      captureSelect.value = current;
+    }
+  }
+
+  refreshCaptureTerminalList();
+  window._refreshCaptureTerminalList = refreshCaptureTerminalList;
+
+  captureSelect.addEventListener("change", async () => {
+    const tid = captureSelect.value;
+    if (!tid) return;
+    try {
+      const frame = await request(`/api/terminals/${tid}/frame`);
+      popupXInput.value = Math.round(frame.x);
+      popupYInput.value = Math.round(frame.y);
+      popupWInput.value = Math.round(frame.width);
+      popupHInput.value = Math.round(frame.height);
+      await savePopupSettings();
+      setMessage("已获取窗口坐标并保存");
+    } catch (error) {
+      setMessage("获取坐标失败: " + error.message, true);
+    }
+  });
+}
+
+/**
+ * 加载弹出窗口设置并回填控件
+ */
+async function loadPopupSettings() {
+  const xInput = document.getElementById("popup-x");
+  const yInput = document.getElementById("popup-y");
+  const wInput = document.getElementById("popup-width");
+  const hInput = document.getElementById("popup-height");
+  if (!xInput || !yInput || !wInput || !hInput) return;
+
+  try {
+    const data = await request("/api/popup-settings");
+    xInput.value = data.x || "";
+    yInput.value = data.y || "";
+    wInput.value = data.width || "";
+    hInput.value = data.height || "";
+  } catch (error) {
+    console.warn("加载弹出窗口设置失败:", error.message);
+  }
 }
 
 /**
@@ -2292,12 +2643,24 @@ async function loadScreenSelector() {
 // 初始化屏幕选择 UI
 injectScreenSelector();
 
+// 刷新屏幕列表按钮
+const refreshScreenBtn = document.getElementById("refresh-screen-list");
+if (refreshScreenBtn) {
+  refreshScreenBtn.addEventListener("click", async () => {
+    refreshScreenBtn.style.transform = "rotate(360deg)";
+    refreshScreenBtn.style.transition = "transform 0.4s";
+    await loadScreenSelector();
+    setTimeout(() => { refreshScreenBtn.style.transform = ""; refreshScreenBtn.style.transition = ""; }, 400);
+  });
+}
+
 // 监听调优面板展开事件，实时刷新屏幕列表（支持热插拔外接屏幕）
 const tuningDetails = document.querySelector("details.topbar-menu--wide");
 if (tuningDetails) {
   tuningDetails.addEventListener("toggle", () => {
     if (tuningDetails.open) {
       loadScreenSelector();
+      loadPopupSettings();
     }
   });
 }
@@ -2359,7 +2722,55 @@ document.addEventListener("keydown", (e) => {
   }
 });
 
-loadInitialState().then(connectWebSocket).catch((error) => {
+/* --- 系统监控轮询 --- */
+const statCpuEl = document.getElementById("stat-cpu");
+const statMemEl = document.getElementById("stat-mem");
+const statDiskEl = document.getElementById("stat-disk");
+const statDiskFreeEl = document.getElementById("stat-disk-free");
+
+function getStatLevel(percent) {
+  if (percent >= 80) return "danger";
+  if (percent >= 60) return "warning";
+  return "normal";
+}
+
+function applyStatLevel(el, level) {
+  el.classList.remove("stat-level-normal", "stat-level-warning", "stat-level-danger");
+  el.classList.add(`stat-level-${level}`);
+}
+
+let _systemStatsTimer = null;
+
+async function fetchSystemStats() {
+  try {
+    const data = await request("/api/system-stats");
+
+    statCpuEl.textContent = `CPU ${data.cpu_percent.toFixed(0)}%`;
+    statMemEl.textContent = `MEM ${data.memory_percent.toFixed(0)}%`;
+    statDiskEl.textContent = `DISK ${data.disk_percent.toFixed(0)}%`;
+    statDiskFreeEl.textContent = `剩余 ${data.disk_free_gb}G`;
+
+    applyStatLevel(statCpuEl, getStatLevel(data.cpu_percent));
+    applyStatLevel(statMemEl, getStatLevel(data.memory_percent));
+    applyStatLevel(statDiskEl, getStatLevel(data.disk_percent));
+    // 磁盘剩余：< 10G 红色, 其他绿色
+    const diskFreeLevel = data.disk_free_gb < 10 ? "danger" : "normal";
+    applyStatLevel(statDiskFreeEl, diskFreeLevel);
+  } catch {
+    // 接口不可用时静默忽略，保持 "--%" 显示
+  }
+}
+
+function startSystemStatsPolling() {
+  fetchSystemStats();
+  _systemStatsTimer = setInterval(fetchSystemStats, 5000);
+}
+
+loadInitialState().then(() => {
+  connectWebSocket();
+  startSystemStatsPolling();
+}).catch((error) => {
   setMessage(error.message, true);
   connectWebSocket();
+  startSystemStatsPolling();
 });
