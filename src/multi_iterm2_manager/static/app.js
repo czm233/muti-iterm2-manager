@@ -22,6 +22,7 @@ const state = {
   uiSettings: null,
   defaultUiSettings: null,
   hiddenTerminalIds: new Set(),   // 用户手动隐藏的终端 ID 集合，持久化到 localStorage
+  mutedTerminalIds: new Set(),    // 用户手动静默的终端 ID 集合，静默终端不进入队列
   attentionSnapshot: null,        // 进入"待处理"筛选时快照的 ID 集合，避免处理后立即消失
   _rafPending: false,             // rAF 是否已调度
   _needFullRefresh: false,        // 是否需要全量刷新
@@ -29,6 +30,8 @@ const state = {
   _incrementalIds: new Set(),     // 需要增量更新的终端 ID 集合
   queue: [],                       // 队列: [{ id, name, status }]
   queueDismissed: new Map(),       // 用户手动移除的终端: Map<id, status> — 状态变化后自动清除
+  allTags: [],                     // 全局标签列表，从后端同步
+  selectedTag: null,               // 当前选中的标签筛选
 };
 
 const VIEW_STATE_STORAGE_KEY = "mitm-monitor-view-state";
@@ -40,11 +43,15 @@ function saveViewState() {
       gridTrackRatios: state.gridTrackRatios,
       layoutTree: state.layoutTree,
       hiddenTerminalIds: [...state.hiddenTerminalIds],
+      mutedTerminalIds: [...state.mutedTerminalIds],
       layoutMode: state.layoutMode === Infinity ? "horizontal" : state.layoutMode,
+      selectedTag: state.selectedTag,
     };
     window.localStorage.setItem(VIEW_STATE_STORAGE_KEY, JSON.stringify(payload));
   } catch {
   }
+  // 同时保存当前标签的布局快照
+  saveTagLayout();
 }
 
 function loadViewState() {
@@ -64,12 +71,64 @@ function loadViewState() {
     if (Array.isArray(payload.hiddenTerminalIds)) {
       state.hiddenTerminalIds = new Set(payload.hiddenTerminalIds);
     }
+    if (Array.isArray(payload.mutedTerminalIds)) {
+      state.mutedTerminalIds = new Set(payload.mutedTerminalIds);
+    }
     if (payload.layoutMode != null) {
       state.layoutMode = payload.layoutMode === "horizontal" ? Infinity : Number(payload.layoutMode);
+    }
+    if (payload.selectedTag) {
+      state.selectedTag = payload.selectedTag;
     }
   } catch {
   }
 }
+
+// ── 按标签独立保存布局 ──────────────────────────────────────────────────────
+
+const TAG_LAYOUTS_STORAGE_KEY = "mitm-tag-layouts";
+
+/** 获取当前标签对应的存储 key（null 标签用 __all__ 表示） */
+function getTagLayoutKey() {
+  return state.selectedTag || "__all__";
+}
+
+/** 保存当前标签的布局（orderedTerminalIds / gridTrackRatios / layoutTree）到 localStorage */
+function saveTagLayout() {
+  try {
+    const stored = JSON.parse(localStorage.getItem(TAG_LAYOUTS_STORAGE_KEY) || "{}");
+    stored[getTagLayoutKey()] = {
+      orderedTerminalIds: state.orderedTerminalIds ? [...state.orderedTerminalIds] : [],
+      gridTrackRatios: state.gridTrackRatios ? JSON.parse(JSON.stringify(state.gridTrackRatios)) : {},
+      layoutTree: state.layoutTree ? JSON.parse(JSON.stringify(state.layoutTree)) : null,
+    };
+    localStorage.setItem(TAG_LAYOUTS_STORAGE_KEY, JSON.stringify(stored));
+  } catch {
+    // 存储失败时静默忽略
+  }
+}
+
+/** 恢复当前标签的布局；若该标签没有保存过布局则清空以便自然排列 */
+function loadTagLayout() {
+  try {
+    const stored = JSON.parse(localStorage.getItem(TAG_LAYOUTS_STORAGE_KEY) || "{}");
+    const layout = stored[getTagLayoutKey()];
+    if (layout) {
+      if (layout.orderedTerminalIds) state.orderedTerminalIds = layout.orderedTerminalIds;
+      state.gridTrackRatios = layout.gridTrackRatios || {};
+      state.layoutTree = layout.layoutTree ? normalizeLayoutTree(layout.layoutTree) : null;
+    } else {
+      // 该标签没有保存过布局，清空让 syncTerminalOrder 自然排列
+      state.orderedTerminalIds = [];
+      state.gridTrackRatios = {};
+      state.layoutTree = null;
+    }
+  } catch {
+    // 读取失败时静默忽略
+  }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 
 const grid = document.getElementById("grid");
 const stats = document.getElementById("stats");
@@ -89,6 +148,7 @@ const dashboardLayout = document.querySelector(".dashboard-layout");
 const uiSettingsForm = document.getElementById("ui-settings-form");
 const uiSettingsResetButton = document.getElementById("ui-settings-reset");
 const uiSettingsPath = document.getElementById("ui-settings-path");
+const tagFilterSelect = document.getElementById("tag-filter-select");
 
 const DEFAULT_UI_SETTINGS = {
   dashboard_padding_px: 4,
@@ -599,17 +659,19 @@ function reorderTerminalsByZone(sourceId, targetId, zone) {
   if (!sourceId || !targetId || sourceId === targetId) {
     return;
   }
-  const active = getActiveTerminalRecords();
-  const activeIds = active.map((record) => record.id);
-  if (!activeIds.includes(sourceId) || !activeIds.includes(targetId)) {
+  // 用当前可见（筛选后）的终端构建初始布局树，避免不可见终端撑多行
+  const filtered = getFilteredTerminals();
+  const filteredIds = filtered.map((record) => record.id);
+  if (!filteredIds.includes(sourceId) || !filteredIds.includes(targetId)) {
     reorderTerminals(sourceId, targetId);
     return;
   }
-  const baseTree = state.layoutTree || buildInitialLayoutTree(active, Math.max(1, state.layout.columns || 2));
+  const baseTree = state.layoutTree || buildInitialLayoutTree(filtered, Math.max(1, state.layout.columns || 2));
   const draggedNode = createTerminalLayoutNode(sourceId);
   const removed = removeTerminalFromTree(baseTree, sourceId);
   state.layoutTree = insertTerminalBySplit(removed, targetId, draggedNode, zone || "right");
-  mergeVisibleIds(getTerminalIdsFromTree(state.layoutTree).filter((id) => activeIds.includes(id)), activeIds);
+  const allActiveIds = getActiveTerminalRecords().map((record) => record.id);
+  mergeVisibleIds(getTerminalIdsFromTree(state.layoutTree).filter((id) => allActiveIds.includes(id)), allActiveIds);
   saveViewState();
   refreshWall();
 }
@@ -1083,19 +1145,26 @@ function getFilteredTerminals() {
   const all = state.orderedTerminalIds
     .map((id) => state.terminals.get(id))
     .filter(Boolean);
-  if (state.filter === "all") return all.filter((record) => record.status !== "closed");
-  if (state.filter === "hidden") return all.filter((record) => state.hiddenTerminalIds.has(record.id));
-  if (state.filter === "done") return all.filter((record) => record.status === "done" && !state.hiddenTerminalIds.has(record.id));
-  if (state.filter === "running") return all.filter((record) => record.status === "running" && !state.hiddenTerminalIds.has(record.id));
+  // 标签预过滤
+  let pool = all;
+  if (state.selectedTag === "__untagged__") {
+    pool = pool.filter(r => !Array.isArray(r.tags) || r.tags.length === 0);
+  } else if (state.selectedTag) {
+    pool = pool.filter(r => Array.isArray(r.tags) && r.tags.includes(state.selectedTag));
+  }
+  if (state.filter === "all") return pool.filter((record) => record.status !== "closed");
+  if (state.filter === "hidden") return pool.filter((record) => state.hiddenTerminalIds.has(record.id));
+  if (state.filter === "done") return pool.filter((record) => record.status === "done" && !state.hiddenTerminalIds.has(record.id));
+  if (state.filter === "running") return pool.filter((record) => record.status === "running" && !state.hiddenTerminalIds.has(record.id));
   if (state.filter === "attention") {
     // 进入"待处理"时会生成快照，快照期间不随状态变化自动删除终端
     if (state.attentionSnapshot) {
-      return all.filter((record) => state.attentionSnapshot.has(record.id));
+      return pool.filter((record) => state.attentionSnapshot.has(record.id));
     }
-    return all.filter((record) => ["error", "waiting"].includes(record.status) && !state.hiddenTerminalIds.has(record.id));
+    return pool.filter((record) => ["error", "waiting"].includes(record.status) && !state.hiddenTerminalIds.has(record.id));
   }
   // default：不显示已隐藏和已关闭的终端
-  return all.filter((record) => record.status !== "closed" && !state.hiddenTerminalIds.has(record.id));
+  return pool.filter((record) => record.status !== "closed" && !state.hiddenTerminalIds.has(record.id));
 }
 
 function shouldPaginateCurrentFilter() {
@@ -1107,7 +1176,7 @@ function syncFilterTabs() {
   document.querySelectorAll("#topbar-filters .filter-tab").forEach((tab) => {
     tab.classList.toggle("is-active", tab.dataset.filter === state.filter);
   });
-  // 单次遍历计算所有 badge 数量
+  // 单次遍历计算所有 badge 数量（先应用标签筛选）
   let attentionCount = 0;
   let hiddenCount = 0;
   let doneCount = 0;
@@ -1115,6 +1184,9 @@ function syncFilterTabs() {
   for (const id of state.orderedTerminalIds) {
     const r = state.terminals.get(id);
     if (!r) continue;
+    // 标签预过滤：选中标签时只统计匹配的终端
+    if (state.selectedTag === "__untagged__" && Array.isArray(r.tags) && r.tags.length > 0) continue;
+    if (state.selectedTag && state.selectedTag !== "__untagged__" && !(Array.isArray(r.tags) && r.tags.includes(state.selectedTag))) continue;
     const isHidden = state.hiddenTerminalIds.has(r.id);
     if (isHidden) { hiddenCount++; continue; }
     if (r.status === "error" || r.status === "waiting") attentionCount++;
@@ -1153,6 +1225,34 @@ function syncFilterTabs() {
     }
     runningBadge.hidden = runningCount === 0;
   }
+}
+
+// 上次同步的标签快照，用于跳过无变化的重建（避免下拉框展开时被 DOM 重建关闭）
+let _lastSyncedTagsKey = "";
+
+// 同步标签下拉选框选项
+function syncTagFilterSelect() {
+  if (!tagFilterSelect) return;
+  // 只有标签列表真正变化时才重建 DOM，避免高频 WebSocket 消息导致下拉框闪烁
+  const tagsKey = state.allTags.join(",");
+  if (tagsKey !== _lastSyncedTagsKey) {
+    _lastSyncedTagsKey = tagsKey;
+    tagFilterSelect.innerHTML = '<option value="">全部标签</option><option value="__untagged__">无标签</option>';
+    for (const tag of state.allTags) {
+      const opt = document.createElement("option");
+      opt.value = tag;
+      opt.textContent = tag;
+      tagFilterSelect.appendChild(opt);
+    }
+  }
+  // 恢复之前的选中项（如果标签仍存在或是"无标签"选项）
+  if (state.selectedTag === "__untagged__" || (state.selectedTag && state.allTags.includes(state.selectedTag))) {
+    tagFilterSelect.value = state.selectedTag;
+  } else {
+    state.selectedTag = null;
+    tagFilterSelect.value = "";
+  }
+  tagFilterSelect.classList.toggle("has-selection", !!state.selectedTag);
 }
 
 function getPagedTerminals() {
@@ -1302,6 +1402,12 @@ const ATTENTION_STATUSES = new Set(["waiting", "error"]);
 function updateQueue(terminalId, oldStatus, newStatus) {
   // 隐藏的终端不入队
   if (state.hiddenTerminalIds.has(terminalId)) {
+    state.queue = state.queue.filter((q) => q.id !== terminalId);
+    return;
+  }
+
+  // 静默的终端不入队
+  if (state.mutedTerminalIds.has(terminalId)) {
     state.queue = state.queue.filter((q) => q.id !== terminalId);
     return;
   }
@@ -1603,6 +1709,34 @@ function bindCardActions(card, record) {
     };
   }
 
+  const toggleMuteBtn = card.querySelector("[data-action='toggle-mute']");
+  if (toggleMuteBtn) {
+    toggleMuteBtn.onclick = (event) => {
+      event.stopPropagation();
+      const nowMuted = !state.mutedTerminalIds.has(record.id);
+      if (nowMuted) {
+        state.mutedTerminalIds.add(record.id);
+        // 静默时从队列移除
+        state.queue = state.queue.filter((q) => q.id !== record.id);
+        setMessage(`已静默 ${record.name}，状态变更不再进入队列`);
+      } else {
+        state.mutedTerminalIds.delete(record.id);
+        setMessage(`已取消静默 ${record.name}`);
+      }
+      // 更新按钮显示
+      toggleMuteBtn.textContent = nowMuted ? "🔇" : "🔔";
+      toggleMuteBtn.title = nowMuted ? "取消静默" : "静默（不进入队列）";
+      saveViewState();
+      renderQueue();
+      // 同步到后端持久化
+      fetch(`/api/terminals/${record.id}/muted`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ muted: nowMuted }),
+      }).catch(() => {});
+    };
+  }
+
   const detachBtn = card.querySelector("[data-action='detach']");
   if (detachBtn) {
     detachBtn.onclick = async (event) => {
@@ -1615,6 +1749,104 @@ function bindCardActions(card, record) {
       }
     };
   }
+
+  // 标签添加/移除事件绑定
+  const tagAddBtn = card.querySelector(".wall-card-tag-add");
+  const tagInput = card.querySelector(".wall-card-tag-input");
+  const addTagFromInput = async () => {
+    if (!tagInput || !tagInput.value.trim()) return;
+    const newTag = tagInput.value.trim();
+    const currentTags = Array.isArray(record.tags) ? [...record.tags] : [];
+    if (currentTags.includes(newTag)) {
+      tagInput.value = "";
+      return;
+    }
+    currentTags.push(newTag);
+    try {
+      const res = await request(`/api/terminals/${record.id}/tags`, {
+        method: "POST",
+        body: JSON.stringify({ tags: currentTags }),
+      });
+      tagInput.value = "";
+      // 同步后端返回的 allTags
+      if (res.allTags) {
+        state.allTags = res.allTags;
+        syncTagFilterSelect();
+      }
+      if (res.item) {
+        state.terminals.set(res.item.id, res.item);
+      }
+      refreshWall();
+    } catch (error) {
+      setMessage(error.message, true);
+    }
+  };
+  if (tagAddBtn) {
+    tagAddBtn.onclick = (event) => {
+      event.stopPropagation();
+      addTagFromInput();
+    };
+  }
+  if (tagInput) {
+    tagInput.onclick = (event) => event.stopPropagation();
+    tagInput.onkeydown = (event) => {
+      event.stopPropagation();
+      if (event.key === "Enter") {
+        event.preventDefault();
+        addTagFromInput();
+      }
+    };
+  }
+  // 候选标签快速添加
+  card.querySelectorAll(".wall-card-tag-candidate").forEach((btn) => {
+    btn.onclick = async (event) => {
+      event.stopPropagation();
+      const tagToAdd = btn.dataset.tag;
+      const currentTags = Array.isArray(record.tags) ? [...record.tags] : [];
+      if (currentTags.includes(tagToAdd)) return;
+      currentTags.push(tagToAdd);
+      try {
+        const res = await request(`/api/terminals/${record.id}/tags`, {
+          method: "POST",
+          body: JSON.stringify({ tags: currentTags }),
+        });
+        if (res.allTags) {
+          state.allTags = res.allTags;
+          syncTagFilterSelect();
+        }
+        if (res.item) {
+          state.terminals.set(res.item.id, res.item);
+        }
+        refreshWall();
+      } catch (error) {
+        setMessage(error.message, true);
+      }
+    };
+  });
+  // 标签移除按钮
+  card.querySelectorAll(".wall-card-tag-remove").forEach((btn) => {
+    btn.onclick = async (event) => {
+      event.stopPropagation();
+      const tagToRemove = btn.dataset.tag;
+      const currentTags = Array.isArray(record.tags) ? record.tags.filter(t => t !== tagToRemove) : [];
+      try {
+        const res = await request(`/api/terminals/${record.id}/tags`, {
+          method: "POST",
+          body: JSON.stringify({ tags: currentTags }),
+        });
+        if (res.allTags) {
+          state.allTags = res.allTags;
+          syncTagFilterSelect();
+        }
+        if (res.item) {
+          state.terminals.set(res.item.id, res.item);
+        }
+        refreshWall();
+      } catch (error) {
+        setMessage(error.message, true);
+      }
+    };
+  });
 
   const inputWrap = card.querySelector(".wall-card-input-wrap");
   const inputToggle = card.querySelector(".wall-card-input-toggle");
@@ -1712,7 +1944,8 @@ function renderTerminal(record) {
         <button type="button" class="ghost wall-card-drag-handle" title="拖拽排序" aria-label="拖拽排序"><svg width="100%" height="100%" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M12 1l-3 3.5h6L12 1z"/><path d="M12 23l-3-3.5h6L12 23z"/><path d="M1 12l3.5-3v6L1 12z"/><path d="M23 12l-3.5-3v6L23 12z"/><rect x="11.25" y="4" width="1.5" height="16" rx=".75"/><rect x="4" y="11.25" width="16" height="1.5" rx=".75"/></svg></button>
         <h2 class="wall-card-title" ${state.editingTitleTerminalId === record.id ? 'hidden' : ''}>${escapeHtml(displayTitle(record))}</h2>
         <input class="wall-card-title-input" type="text" value="${escapeHtml(record.name)}" ${state.editingTitleTerminalId === record.id ? '' : 'hidden'} />
-        <button data-action="toggle-hide" class="ghost wall-card-hide-button" title="${state.hiddenTerminalIds.has(record.id) ? "取消隐藏" : "隐藏"}">${state.hiddenTerminalIds.has(record.id) ? "取消隐藏" : "隐藏"}</button>
+        <button data-action="toggle-hide" class="ghost wall-card-hide-button" title="${state.hiddenTerminalIds.has(record.id) ? "取消隐藏" : "隐藏"}">${state.hiddenTerminalIds.has(record.id) ? "显" : "隐"}</button>
+        <button data-action="toggle-mute" class="ghost wall-card-mute-button" title="${state.mutedTerminalIds.has(record.id) ? "取消静默" : "静默（不进入队列）"}">${state.mutedTerminalIds.has(record.id) ? "🔇" : "🔔"}</button>
         <button type="button" class="ghost wall-card-more-button" title="更多信息">⋯</button>
       </div>
       <div class="wall-card-details-panel" hidden>
@@ -1724,6 +1957,16 @@ function renderTerminal(record) {
           <button data-action="monitor-mode" class="secondary">回监控模式</button>
           ${record.status !== "closed" ? '<button data-action="detach" class="secondary">解绑</button>' : ''}
           <button type="button" class="secondary wall-card-input-toggle">命令</button>
+        </div>
+        <div class="wall-card-tags">
+          ${(Array.isArray(record.tags) ? record.tags : []).map(tag => `<span class="wall-card-tag">${escapeHtml(tag)}<button class="wall-card-tag-remove" data-tag="${escapeHtml(tag)}" title="移除标签">×</button></span>`).join("")}
+        </div>
+        <div class="wall-card-tags-candidates">
+          ${state.allTags.filter(t => !(Array.isArray(record.tags) && record.tags.includes(t))).map(t => `<button class="wall-card-tag-candidate" data-tag="${escapeHtml(t)}" title="点击添加标签">+ ${escapeHtml(t)}</button>`).join("")}
+        </div>
+        <div class="wall-card-tags-input">
+          <input type="text" class="wall-card-tag-input" placeholder="新标签名称" />
+          <button type="button" class="secondary wall-card-tag-add">+</button>
         </div>
         ${record.lastError ? `<div class="wall-card-error">错误：${escapeHtml(record.lastError)}</div>` : ""}
         <div class="wall-card-input-wrap">
@@ -1855,13 +2098,21 @@ function scheduleRender(layout = null) {
 // 增量 DOM 更新：只更新变化的卡片，避免全量重建
 function incrementalUpdate(layout = null, changedIds) {
   applyLayout(layout);
-  // 检查是否有新终端（无对应卡片），回退到全量刷新
+  // 获取当前过滤后可见的终端 ID 集合
+  const visibleIds = new Set(getFilteredTerminals().map(r => r.id));
+  // 检查是否有新的可见终端（在过滤结果中但无对应卡片），回退到全量刷新
+  let needFullRefresh = false;
   for (const id of changedIds) {
+    if (!visibleIds.has(id)) continue; // 不在当前过滤结果中，跳过
     const existing = document.getElementById(`card-${id}`);
     if (!existing) {
-      refreshWall(layout);
-      return;
+      needFullRefresh = true;
+      break;
     }
+  }
+  if (needFullRefresh) {
+    refreshWall(layout);
+    return;
   }
   // 增量更新每张变化的卡片
   for (const id of changedIds) {
@@ -1940,7 +2191,7 @@ function refreshWall(layout = null) {
   renderQueue();
 }
 
-function applySnapshot(terminals, layout = null) {
+function applySnapshot(terminals, layout = null, allTags = null) {
   state.terminals.clear();
   for (const record of terminals) {
     state.terminals.set(record.id, record);
@@ -1951,15 +2202,32 @@ function applySnapshot(terminals, layout = null) {
       state.hiddenTerminalIds.add(record.id);
     }
   }
+  // 从后端数据恢复静默状态（优先级高于 localStorage）
+  for (const record of terminals) {
+    if (record.muted) {
+      state.mutedTerminalIds.add(record.id);
+    }
+  }
   // 清理 hiddenTerminalIds 中不再存在的旧 ID
   for (const id of state.hiddenTerminalIds) {
     if (!state.terminals.has(id)) {
       state.hiddenTerminalIds.delete(id);
     }
   }
+  // 清理 mutedTerminalIds 中不再存在的旧 ID
+  for (const id of state.mutedTerminalIds) {
+    if (!state.terminals.has(id)) {
+      state.mutedTerminalIds.delete(id);
+    }
+  }
   syncTerminalOrder(terminals);
   syncLayoutTree();
   initQueueFromSnapshot();
+  // 同步全局标签列表
+  if (allTags) {
+    state.allTags = allTags;
+    syncTagFilterSelect();
+  }
   refreshWall(layout);
   if (window._refreshCaptureTerminalList) window._refreshCaptureTerminalList();
 }
@@ -1975,8 +2243,10 @@ async function loadUiSettings() {
 
 async function loadInitialState() {
   loadViewState();
+  // loadViewState 恢复了 selectedTag，需要同步加载该标签的独立布局
+  loadTagLayout();
   const [terminalsData, healthData] = await Promise.all([request("/api/terminals"), request("/api/health"), loadUiSettings()]);
-  applySnapshot(terminalsData.items || [], terminalsData.layout || null);
+  applySnapshot(terminalsData.items || [], terminalsData.layout || null, terminalsData.allTags || null);
   if (buildVersion && healthData.version) {
     buildVersion.textContent = `v${healthData.version}`;
   }
@@ -2006,6 +2276,11 @@ function connectWebSocket() {
       state.hiddenTerminalIds.add(payload.terminal.id);
       saveViewState();
     }
+    // 同步全局标签列表
+    if (payload.allTags) {
+      state.allTags = payload.allTags;
+      syncTagFilterSelect();
+    }
     if (!state.orderedTerminalIds.includes(payload.terminal.id)) {
       state.orderedTerminalIds.push(payload.terminal.id);
     }
@@ -2030,7 +2305,7 @@ function connectWebSocket() {
   socket.onmessage = (event) => {
     const payload = JSON.parse(event.data);
     if (payload.type === "snapshot") {
-      applySnapshot(payload.terminals || [], payload.layout || null);
+      applySnapshot(payload.terminals || [], payload.layout || null, payload.allTags || null);
       return;
     }
     if (payload.type === "terminal-updated") {
@@ -2104,7 +2379,7 @@ createForm.addEventListener("submit", async (event) => {
   const name = document.getElementById("name").value.trim();
   const command = "";
   try {
-    const result = await request("/api/terminals", { method: "POST", body: JSON.stringify({ name: name || null, command: command || null }) });
+    const result = await request("/api/terminals", { method: "POST", body: JSON.stringify({ name: name || null, command: command || null, ...(state.selectedTag && state.selectedTag !== "__untagged__" ? { tags: [state.selectedTag] } : {}) }) });
     createForm.reset();
     setMessage(`已启动 ${result.item.name}，真实 iTerm 窗口已被纳入监控墙`);
   } catch (error) {
@@ -2114,7 +2389,12 @@ createForm.addEventListener("submit", async (event) => {
 
 document.getElementById("quick-create").onclick = async () => {
   try {
-    const result = await request("/api/terminals", { method: "POST", body: JSON.stringify({ name: null, command: null }) });
+    // 如果当前选中了标签（且不是"无标签"），自动赋予该标签
+    const body = { name: null, command: null };
+    if (state.selectedTag && state.selectedTag !== "__untagged__") {
+      body.tags = [state.selectedTag];
+    }
+    const result = await request("/api/terminals", { method: "POST", body: JSON.stringify(body) });
     setMessage(`已创建 ${result.item.name}，已纳入监控墙`);
   } catch (error) {
     setMessage(error.message, true);
@@ -2318,7 +2598,7 @@ closeAllButton.onclick = async () => {
     await request("/api/terminals/close-all", { method: "POST" });
     // 主动从服务器获取最新状态，避免依赖 WebSocket 事件
     const terminalsData = await request("/api/terminals");
-    applySnapshot(terminalsData.items || [], terminalsData.layout || null);
+    applySnapshot(terminalsData.items || [], terminalsData.layout || null, terminalsData.allTags || null);
     saveViewState();
     setMessage("已关闭全部真实窗口，并清空监控墙");
   } catch (error) {
@@ -2684,6 +2964,27 @@ document.querySelectorAll("#topbar-filters .filter-tab").forEach((tab) => {
     refreshWall();
   };
 });
+
+// 标签筛选下拉框事件
+if (tagFilterSelect) {
+  tagFilterSelect.onchange = () => {
+    // 先保存当前标签的布局快照
+    saveTagLayout();
+
+    // 切换到新标签
+    state.selectedTag = tagFilterSelect.value || null;
+    tagFilterSelect.classList.toggle("has-selection", !!state.selectedTag);
+    state.page = 1;
+
+    // 恢复新标签的布局（没有保存过则清空）
+    loadTagLayout();
+    // loadTagLayout 可能清空 orderedTerminalIds，需从 state.terminals 重建
+    syncTerminalOrder([...state.terminals.values()]);
+
+    saveViewState();
+    refreshWall();
+  };
+}
 
 window.addEventListener("resize", () => {
   if (state.layout.count > 0) {

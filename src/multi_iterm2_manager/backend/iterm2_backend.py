@@ -79,6 +79,9 @@ MANAGED_OWNER_VAR = "user.mitm_owner"
 MANAGED_OWNER_VALUE = "multi-iterm2-manager"
 MANAGED_NAME_VAR = "user.mitm_name"
 MANAGED_HIDDEN_VAR = "user.mitm_hidden"
+MANAGED_TAGS_VAR = "user.mitm_tags"  # 标签列表，逗号分隔存储
+MANAGED_ID_VAR = "user.mitm_id"  # 持久化终端 ID，跨重启稳定
+MANAGED_MUTED_VAR = "user.mitm_muted"  # 静默状态，跨重启稳定
 ANCHOR_ROLE_VAR = "user.mitm_role"
 ANCHOR_ROLE_VALUE = "anchor"
 
@@ -440,13 +443,39 @@ class ITerm2Backend:
                 adopted_hidden = bool(hidden_val)
             except Exception:
                 pass
+            # 读取静默状态
+            adopted_muted = False
+            try:
+                muted_val = await target_session.async_get_variable(MANAGED_MUTED_VAR)
+                adopted_muted = bool(muted_val)
+            except Exception:
+                pass
+            # 读取标签列表
+            adopted_tags: list[str] = []
+            try:
+                tags_val = await target_session.async_get_variable(MANAGED_TAGS_VAR)
+                if tags_val and isinstance(tags_val, str):
+                    adopted_tags = [t.strip() for t in tags_val.split(",") if t.strip()]
+            except Exception:
+                pass
+            # 读取持久化终端 ID
+            adopted_id = None
+            try:
+                adopted_id = await target_session.async_get_variable(MANAGED_ID_VAR)
+                if not adopted_id or not isinstance(adopted_id, str):
+                    adopted_id = None
+            except Exception:
+                pass
             await self.hide_app()
             return TerminalHandle(
                 window_id=target_window_id,
                 session_id=session_id,
                 tab_id=target_tab_id,
                 adopted_name=adopted_name,
+                adopted_id=adopted_id,
+                adopted_muted=adopted_muted,
                 adopted_hidden=adopted_hidden,
+                adopted_tags=adopted_tags,
             )
         return await self._run_with_reconnect(_inner)
 
@@ -469,6 +498,27 @@ class ITerm2Backend:
         async def _inner():
             session = await self._get_session(handle.session_id)
             await session.async_set_variable(MANAGED_HIDDEN_VAR, hidden)
+        await self._run_with_reconnect(_inner)
+
+    async def set_tags(self, handle: TerminalHandle, tags: list[str]) -> None:
+        """将标签列表写入 iTerm2 session 变量，逗号分隔存储，重启后可恢复"""
+        async def _inner():
+            session = await self._get_session(handle.session_id)
+            await session.async_set_variable(MANAGED_TAGS_VAR, ",".join(tags))
+        await self._run_with_reconnect(_inner)
+
+    async def set_terminal_id(self, handle: TerminalHandle, terminal_id: str) -> None:
+        """将终端 ID 写入 iTerm2 session 变量，跨重启持久化"""
+        async def _inner():
+            session = await self._get_session(handle.session_id)
+            await session.async_set_variable(MANAGED_ID_VAR, terminal_id)
+        await self._run_with_reconnect(_inner)
+
+    async def set_muted(self, handle: TerminalHandle, muted: bool) -> None:
+        """将静默状态写入 iTerm2 session 变量，重启后可恢复"""
+        async def _inner():
+            session = await self._get_session(handle.session_id)
+            await session.async_set_variable(MANAGED_MUTED_VAR, muted)
         await self._run_with_reconnect(_inner)
 
     async def rename(self, handle: TerminalHandle, name: str) -> None:

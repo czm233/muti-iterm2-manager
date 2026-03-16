@@ -716,15 +716,19 @@ input {
 }
 
 .wall-card-more-button,
-.wall-card-hide-button {
+.wall-card-hide-button,
+.wall-card-mute-button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: auto;
-  padding: 0.2rem 0.3rem;
+  min-width: 0;
+  width: 24px;
+  height: 24px;
+  padding: 0;
   font-size: 0.72rem;
   line-height: 1;
   flex-shrink: 0;
+  border-radius: 8px;
 }
 
 .wall-card-details-panel {
@@ -1429,4 +1433,148 @@ body.is-resizing-split * {
 
 .queue-context-item:hover {
   background: rgba(148, 163, 184, 0.15);
+}
+
+/* --- 标签筛选下拉选框 --- */
+.tag-filter-select {
+  appearance: none;
+  -webkit-appearance: none;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 6px;
+  padding: 4px 24px 4px 8px;
+  font-size: 0.82rem;
+  background: rgba(15, 23, 42, 0.64) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' fill='%2393a8cb'%3E%3Cpath d='M0 0l5 6 5-6z'/%3E%3C/svg%3E") no-repeat right 8px center;
+  color: var(--muted);
+  cursor: pointer;
+  flex-shrink: 0;
+  max-width: 120px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.tag-filter-select:hover,
+.tag-filter-select:focus {
+  border-color: rgba(104, 210, 255, 0.35);
+  color: var(--text);
+  outline: none;
+}
+
+.tag-filter-select.has-selection {
+  border-color: rgba(104, 210, 255, 0.45);
+  color: var(--accent);
+}
+
+/* --- 筛选栏分隔线 --- */
+.topbar-filter-divider {
+  width: 1px;
+  height: 16px;
+  background: rgba(148, 163, 184, 0.2);
+  flex-shrink: 0;
+  margin: 0 2px;
+}
+
+/* --- 卡片标签区域 --- */
+.wall-card-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+  margin: 4px 0;
+}
+
+.wall-card-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  background: rgba(104, 210, 255, 0.12);
+  border: 1px solid rgba(104, 210, 255, 0.22);
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+.wall-card-tag-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.65rem;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+
+.wall-card-tag-remove:hover {
+  background: rgba(255, 125, 125, 0.25);
+  color: var(--error);
+}
+
+/* --- 候选标签快速选择 --- */
+.wall-card-tags-candidates {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+  margin: 2px 0;
+}
+
+.wall-card-tags-candidates:empty {
+  display: none;
+}
+
+.wall-card-tag-candidate {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  background: rgba(148, 163, 184, 0.08);
+  border: 1px dashed rgba(148, 163, 184, 0.25);
+  color: var(--muted);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+  min-width: auto;
+  box-shadow: none;
+}
+
+.wall-card-tag-candidate:hover {
+  background: rgba(104, 210, 255, 0.12);
+  border-color: rgba(104, 210, 255, 0.35);
+  color: var(--accent);
+}
+
+.wall-card-tags-input {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 4px 0 0;
+}
+
+.wall-card-tags-input input {
+  flex: 1;
+  min-width: 80px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-size: 0.74rem;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  background: rgba(15, 23, 42, 0.64);
+  color: var(--text);
+}
+
+.wall-card-tags-input button {
+  padding: 3px 8px;
+  font-size: 0.72rem;
+  border-radius: 6px;
+  min-width: auto;
 }

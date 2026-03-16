@@ -45,6 +45,20 @@ class DashboardService:
             print("[service] 安全重启模式：跳过 iTerm2 终端清理", flush=True)
             # 启动完成后清理标志文件（旧进程 stop 已用完或不存在）
             self._remove_safe_restart_flag()
+            # 自动接管所有孤儿终端（带管理标记但不在 records 中的 session）
+            try:
+                orphans = await self.scan_sessions()
+                adopted_count = 0
+                for orphan in orphans:
+                    try:
+                        await self.adopt_terminal(orphan["session_id"])
+                        adopted_count += 1
+                    except Exception as exc:
+                        print(f"[service] 自动接管失败 session={orphan['session_id']}: {exc}", flush=True)
+                if adopted_count > 0:
+                    print(f"[service] 自动接管 {adopted_count} 个终端", flush=True)
+            except Exception as exc:
+                print(f"[service] 自动接管扫描失败: {exc}", flush=True)
         else:
             try:
                 await asyncio.wait_for(self.backend.cleanup_managed_terminals(), timeout=6)
@@ -311,6 +325,11 @@ class DashboardService:
             profile=params.profile,
             frame=frame,
         )
+        # 将终端 ID 写回 iTerm2 session 变量，跨重启持久化
+        try:
+            await self.backend.set_terminal_id(handle, record.id)
+        except Exception:
+            pass
         async with self._lock:
             self.records[record.id] = record
         # 对齐窗口大小到其他可见终端
@@ -397,6 +416,50 @@ class DashboardService:
         await self._broadcast(self.record_event(terminal_id))
         return record.to_dict()
 
+    async def set_tags(self, terminal_id: str, tags: list[str]) -> dict:
+        """设置终端标签（最多10个标签，每标签最长20字符，不含逗号）"""
+        record = self._get_record(terminal_id)
+        # 验证标签
+        if len(tags) > 10:
+            raise ValueError("最多设置 10 个标签")
+        for tag in tags:
+            if not tag or not tag.strip():
+                raise ValueError("标签不能为空")
+            if len(tag) > 20:
+                raise ValueError(f"标签长度不能超过 20 个字符：{tag}")
+            if "," in tag:
+                raise ValueError(f"标签不能包含逗号：{tag}")
+        # 去重并保持顺序
+        seen: set[str] = set()
+        clean_tags: list[str] = []
+        for tag in tags:
+            t = tag.strip()
+            if t not in seen:
+                seen.add(t)
+                clean_tags.append(t)
+        record.tags = clean_tags
+        record.updated_at = self._now()
+        await self.backend.set_tags(record.handle, clean_tags)
+        await self._broadcast(self.record_event(terminal_id))
+        return record.to_dict()
+
+    async def set_muted(self, terminal_id: str, muted: bool) -> dict:
+        """设置终端静默状态，同步到 iTerm2 session 变量"""
+        record = self._get_record(terminal_id)
+        record.muted = muted
+        record.updated_at = self._now()
+        await self.backend.set_muted(record.handle, muted)
+        await self._broadcast(self.record_event(terminal_id))
+        return record.to_dict()
+
+    def list_all_tags(self) -> list[str]:
+        """遍历所有非关闭终端，收集去重排序的标签列表"""
+        all_tags: set[str] = set()
+        for record in self.records.values():
+            if record.status != TerminalStatus.closed:
+                all_tags.update(record.tags)
+        return sorted(all_tags)
+
     async def _align_frame_to_siblings(self, record: TerminalRecord) -> None:
         """将窗口大小对齐到其他可见终端（取第一个非隐藏、非关闭终端的 frame）"""
         # 优先使用 popup 设置
@@ -467,13 +530,22 @@ class DashboardService:
         # 把最终名字写回 iTerm2 自定义变量，确保下次重启/接管时不会丢失
         await self.backend.rename(handle, final_name)
         frame = await self.backend.get_frame(handle)
+        # 复用持久化的终端 ID（跨重启稳定），若已存在则回退到新 ID
+        terminal_id = handle.adopted_id if (handle.adopted_id and handle.adopted_id not in self.records) else new_terminal_id()
         record = TerminalRecord(
-            id=new_terminal_id(),
+            id=terminal_id,
             name=final_name,
             handle=handle,
             frame=frame,
             hidden=handle.adopted_hidden,
+            muted=handle.adopted_muted,
+            tags=handle.adopted_tags,
         )
+        # 将最终 ID 写回 iTerm2 session 变量，确保下次重启可复用
+        try:
+            await self.backend.set_terminal_id(handle, record.id)
+        except Exception:
+            pass
         async with self._lock:
             self.records[record.id] = record
         # 对齐窗口大小到其他可见终端
@@ -573,6 +645,7 @@ class DashboardService:
             "type": "snapshot",
             "terminals": self.list_terminals(),
             "layout": self.monitor_layout(),
+            "allTags": self.list_all_tags(),
         }
 
     def record_event(self, terminal_id: str) -> dict:
@@ -581,6 +654,7 @@ class DashboardService:
             "type": "terminal-updated",
             "terminal": record.to_dict(),
             "layout": self.monitor_layout(),
+            "allTags": self.list_all_tags(),
         }
 
     async def _broadcast(self, payload: dict) -> None:

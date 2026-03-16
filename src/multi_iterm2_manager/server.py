@@ -54,6 +54,7 @@ class CreateTerminalPayload(BaseModel):
     command: str | None = None
     profile: str | None = None
     frame: FramePayload | None = None
+    tags: list[str] | None = None
 
 
 class SendTextPayload(BaseModel):
@@ -83,6 +84,14 @@ class AdoptPayload(BaseModel):
 
 class SetHiddenPayload(BaseModel):
     hidden: bool
+
+
+class SetMutedPayload(BaseModel):
+    muted: bool
+
+
+class SetTagsPayload(BaseModel):
+    tags: list[str] = Field(default_factory=list, max_length=10)
 
 
 class UiSettingsPayload(BaseModel):
@@ -193,7 +202,7 @@ async def put_ui_settings(payload: UiSettingsPayload) -> dict:
 
 @app.get("/api/terminals")
 async def list_terminals() -> dict:
-    return {"items": service.list_terminals(), "layout": service.monitor_layout()}
+    return {"items": service.list_terminals(), "layout": service.monitor_layout(), "allTags": service.list_all_tags()}
 
 
 @app.post("/api/terminals")
@@ -210,7 +219,13 @@ async def create_terminal(payload: CreateTerminalPayload) -> dict:
                 frame=frame,
             )
         )
-        return {"item": terminal, "layout": service.monitor_layout()}
+        # 如果传入了 tags，创建后立即设置标签（失败时降级，终端仍正常返回）
+        if payload.tags:
+            try:
+                terminal = await service.set_tags(terminal["id"], payload.tags)
+            except Exception:
+                pass
+        return {"item": terminal, "layout": service.monitor_layout(), "allTags": service.list_all_tags()}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -260,6 +275,36 @@ async def set_terminal_hidden(terminal_id: str, payload: SetHiddenPayload) -> di
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/terminals/{terminal_id}/tags")
+async def set_terminal_tags(terminal_id: str, payload: SetTagsPayload) -> dict:
+    """设置终端标签"""
+    try:
+        return {"item": await service.set_tags(terminal_id, payload.tags), "layout": service.monitor_layout(), "allTags": service.list_all_tags()}
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/terminals/{terminal_id}/muted")
+async def set_terminal_muted(terminal_id: str, payload: SetMutedPayload) -> dict:
+    """设置终端静默状态"""
+    try:
+        return {"item": await service.set_muted(terminal_id, payload.muted), "layout": service.monitor_layout()}
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.get("/api/tags")
+async def list_all_tags() -> dict:
+    """获取所有终端的标签列表（去重排序）"""
+    return {"items": service.list_all_tags()}
 
 
 @app.post("/api/terminals/{terminal_id}/focus")

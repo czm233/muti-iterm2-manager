@@ -117,3 +117,21 @@ class MockTerminalBackend:
             return None
         frame = self._items[handle.session_id]["frame"]
         return frame if isinstance(frame, TerminalFrame) else None
+
+    async def get_cwd(self, handle: TerminalHandle) -> str | None:
+        return None
+
+    async def set_hidden(self, handle: TerminalHandle, hidden: bool) -> None:
+        pass
+
+    async def set_tags(self, handle: TerminalHandle, tags: list[str]) -> None:
+        pass
+
+    async def set_terminal_id(self, handle: TerminalHandle, terminal_id: str) -> None:
+        pass
+
+    async def set_muted(self, handle: TerminalHandle, muted: bool) -> None:
+        pass
+
+    async def unmark_all_managed(self) -> int:
+        return 0

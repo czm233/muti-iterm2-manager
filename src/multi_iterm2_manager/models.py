@@ -38,7 +38,10 @@ class TerminalHandle:
     session_id: str
     tab_id: str | None = None
     adopted_name: str | None = None  # 接管时从 iTerm2 读取的原始名字
+    adopted_id: str | None = None  # 接管时从 iTerm2 读取的持久化终端 ID
+    adopted_muted: bool = False  # 接管时从 iTerm2 读取的静默状态
     adopted_hidden: bool = False  # 接管时从 iTerm2 读取的隐藏状态
+    adopted_tags: list[str] = field(default_factory=list)  # 接管时从 iTerm2 读取的标签
 
 
 @dataclass
@@ -59,6 +62,8 @@ class TerminalRecord:
     last_error: str | None = None
     cwd: str | None = None
     hidden: bool = False
+    muted: bool = False  # 静默状态，不进入通知队列
+    tags: list[str] = field(default_factory=list)  # 终端标签列表
     content_hash: str = ""
     content_stable_since: float = 0.0
 
@@ -82,6 +87,8 @@ class TerminalRecord:
             "lastError": self.last_error,
             "cwd": self.cwd,
             "hidden": self.hidden,
+            "muted": self.muted,
+            "tags": self.tags,
         }
 
 
