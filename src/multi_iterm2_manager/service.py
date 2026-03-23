@@ -14,7 +14,7 @@ from typing import Any
 from multi_iterm2_manager.analyzer import analyze_screen_text, analyze_timeout_only, load_rules, RuleEngineConfig
 from multi_iterm2_manager.backend.mock import MockTerminalBackend
 from multi_iterm2_manager.config import Settings, save_ui_settings
-from multi_iterm2_manager.display import get_all_screens, get_screen_bounds, suggest_monitor_grid
+from multi_iterm2_manager.display import build_maximized_frame, get_all_screens, get_screen_index_from_coordinates, suggest_monitor_grid
 from multi_iterm2_manager.models import CreateTerminalParams, GridLayoutParams, TerminalFrame, TerminalRecord, TerminalStatus, new_terminal_id
 
 
@@ -31,6 +31,9 @@ class DashboardService:
         self._timeout_check_task: asyncio.Task[None] | None = None
         self._rule_config: RuleEngineConfig = load_rules(settings.rules_file)
         self.ui_settings = settings.ui_settings
+        # 焦点抑制：记录因焦点而抑制了 idle→running 转换的终端 ID
+        self._focus_suppressed: set[str] = set()
+        self._focus_recheck_task: asyncio.Task[None] | None = None
         # 预热 psutil CPU 采样，避免首次调用返回 0.0
         try:
             import psutil
@@ -70,6 +73,13 @@ class DashboardService:
                 pass
         self._watchdog_task = asyncio.create_task(self._watchdog_loop())
         self._timeout_check_task = asyncio.create_task(self._timeout_check_loop())
+        self._focus_recheck_task = asyncio.create_task(self._focus_recheck_loop())
+        # 启动焦点监控（后端支持时）
+        if hasattr(self.backend, 'start_focus_monitor'):
+            try:
+                await self.backend.start_focus_monitor()
+            except Exception as exc:
+                print(f"[service] 焦点监控启动失败（不影响核心功能）: {exc}", flush=True)
 
     async def stop(self) -> None:
         if self._watchdog_task is not None:
@@ -82,6 +92,17 @@ class DashboardService:
             with suppress(asyncio.CancelledError):
                 await self._timeout_check_task
             self._timeout_check_task = None
+        if self._focus_recheck_task is not None:
+            self._focus_recheck_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._focus_recheck_task
+            self._focus_recheck_task = None
+        # 停止后端焦点监控
+        if hasattr(self.backend, 'stop_focus_monitor'):
+            try:
+                await self.backend.stop_focus_monitor()
+            except Exception:
+                pass
 
         # 反转默认行为：
         # - 只有 stop.sh 明确要求完整清理时（创建 full-cleanup 标志），才执行完整清理
@@ -291,31 +312,44 @@ class DashboardService:
 
     def get_target_screen(self) -> int:
         """获取当前配置的目标屏幕索引"""
-        return self.settings.target_screen
+        return self.ui_settings.target_screen
 
     def set_target_screen(self, screen_index: int) -> None:
-        """设置目标屏幕索引，-1 表示不指定"""
-        self.settings.target_screen = screen_index
+        """设置目标屏幕索引，-1 表示不指定，并持久化到配置文件"""
+        self.ui_settings = replace(self.ui_settings, target_screen=screen_index)
+        self.settings.ui_settings = self.ui_settings
+        save_ui_settings(self.settings.ui_settings_file, self.ui_settings)
 
     def get_popup_settings(self) -> dict:
         """获取弹出窗口位置和大小设置"""
         return {
-            "x": self.settings.popup_x,
-            "y": self.settings.popup_y,
-            "width": self.settings.popup_width,
-            "height": self.settings.popup_height,
+            "x": self.ui_settings.popup_x,
+            "y": self.ui_settings.popup_y,
+            "width": self.ui_settings.popup_width,
+            "height": self.ui_settings.popup_height,
         }
 
     def set_popup_settings(self, x: int, y: int, width: int, height: int) -> None:
-        """设置弹出窗口位置和大小"""
-        self.settings.popup_x = x
-        self.settings.popup_y = y
-        self.settings.popup_width = width
-        self.settings.popup_height = height
+        """设置弹出窗口位置和大小，并持久化到配置文件"""
+        self.ui_settings = replace(self.ui_settings, popup_x=x, popup_y=y, popup_width=width, popup_height=height)
+        self.settings.ui_settings = self.ui_settings
+        save_ui_settings(self.settings.ui_settings_file, self.ui_settings)
 
     async def create_terminal(self, params: CreateTerminalParams) -> dict:
         final_name = (params.name or '').strip() or self._next_default_name()
-        handle = await self.backend.create_terminal(CreateTerminalParams(name=final_name, command=params.command, profile=params.profile, frame=params.frame))
+
+        # 优先使用浏览器坐标计算屏幕，其次使用全局 target_screen
+        screen_index = -1
+        if params.browser_x is not None and params.browser_y is not None:
+            screen_index = get_screen_index_from_coordinates(params.browser_x, params.browser_y)
+        if screen_index < 0:
+            screen_index = self.ui_settings.target_screen
+
+        # 如果未指定 frame 且确定了屏幕索引，使用该屏幕的边界
+        target_frame = params.frame
+        if target_frame is None and screen_index >= 0:
+            target_frame = build_maximized_frame(screen_index=screen_index)
+        handle = await self.backend.create_terminal(CreateTerminalParams(name=final_name, command=params.command, profile=params.profile, frame=target_frame))
         frame = await self.backend.get_frame(handle)
         record = TerminalRecord(
             id=new_terminal_id(),
@@ -355,28 +389,73 @@ class DashboardService:
         return created
 
     async def _apply_popup_frame(self, record: TerminalRecord) -> None:
-        """如果设置了弹出窗口坐标，则移动窗口到指定位置和大小"""
-        popup_w = self.settings.popup_width
-        popup_h = self.settings.popup_height
+        """聚焦终端时移动窗口：优先 popup 坐标，其次 target_screen"""
+        popup_w = self.ui_settings.popup_width
+        popup_h = self.ui_settings.popup_height
         if popup_w > 0 or popup_h > 0:
             current_frame = await self.backend.get_frame(record.handle)
             if current_frame is not None:
                 win_w = popup_w if popup_w > 0 else current_frame.width
                 win_h = popup_h if popup_h > 0 else current_frame.height
                 new_frame = TerminalFrame(
-                    x=float(self.settings.popup_x),
-                    y=float(self.settings.popup_y),
+                    x=float(self.ui_settings.popup_x),
+                    y=float(self.ui_settings.popup_y),
                     width=float(win_w),
                     height=float(win_h),
                 )
                 await self.backend.set_frame(record.handle, new_frame)
                 record.frame = new_frame
+            return
+        # 没有 popup 设置时，如果设置了目标屏幕，确保窗口在目标屏幕上
+        if self.ui_settings.target_screen >= 0:
+            from multi_iterm2_manager.display import get_screen_bounds
+            bounds = get_screen_bounds(self.ui_settings.target_screen)
+            if bounds is not None:
+                current_frame = await self.backend.get_frame(record.handle)
+                if current_frame is not None:
+                    # 检查窗口是否已经在目标屏幕范围内
+                    in_screen = (bounds.x <= current_frame.x < bounds.x + bounds.width
+                                 and bounds.y <= current_frame.y < bounds.y + bounds.height)
+                    if not in_screen:
+                        # 保持窗口大小，移动到目标屏幕中心区域
+                        new_frame = TerminalFrame(
+                            x=round(bounds.x + 18.0, 2),
+                            y=round(bounds.y + 18.0, 2),
+                            width=current_frame.width,
+                            height=current_frame.height,
+                        )
+                        await self.backend.set_frame(record.handle, new_frame)
+                        record.frame = new_frame
 
-    async def focus_terminal(self, terminal_id: str) -> dict:
+    async def focus_terminal(self, terminal_id: str, browser_x: float | None = None, browser_y: float | None = None) -> dict:
         record = self._get_record(terminal_id)
         try:
             await self.backend.focus(record.handle)
-            await self._apply_popup_frame(record)
+            # 如果传入了浏览器坐标，根据坐标计算屏幕并移动窗口
+            if browser_x is not None and browser_y is not None:
+                screen_index = get_screen_index_from_coordinates(browser_x, browser_y)
+                if screen_index >= 0:
+                    from multi_iterm2_manager.display import get_screen_bounds
+                    bounds = get_screen_bounds(screen_index)
+                    if bounds is not None:
+                        current_frame = await self.backend.get_frame(record.handle)
+                        if current_frame is not None:
+                            # 检查窗口是否已经在当前屏幕范围内，避免覆盖用户手动移动的位置
+                            in_screen = (bounds.x <= current_frame.x < bounds.x + bounds.width
+                                         and bounds.y <= current_frame.y < bounds.y + bounds.height)
+                            if not in_screen:
+                                new_frame = TerminalFrame(
+                                    x=round(bounds.x + 18.0, 2),
+                                    y=round(bounds.y + 18.0, 2),
+                                    width=current_frame.width,
+                                    height=current_frame.height,
+                                )
+                                await self.backend.set_frame(record.handle, new_frame)
+                                record.frame = new_frame
+                        # 让其他可见终端也跟随移动到同一屏幕
+                        await self._move_siblings_to_screen(record, bounds)
+            else:
+                await self._apply_popup_frame(record)
         except Exception as exc:
             if self._is_missing_terminal_error(exc):
                 return await self._mark_terminal_closed(record, reason="真实窗口已被手动关闭")
@@ -460,11 +539,36 @@ class DashboardService:
                 all_tags.update(record.tags)
         return sorted(all_tags)
 
+    async def _move_siblings_to_screen(self, source_record: TerminalRecord, bounds) -> None:
+        """将其他可见终端移动到与源终端相同的屏幕"""
+        for sibling in self.records.values():
+            if sibling.id == source_record.id:
+                continue
+            if sibling.status == TerminalStatus.closed or sibling.hidden:
+                continue
+            try:
+                current_frame = await self.backend.get_frame(sibling.handle)
+                if current_frame is not None:
+                    # 检查是否已经在目标屏幕内
+                    in_screen = (bounds.x <= current_frame.x < bounds.x + bounds.width
+                                 and bounds.y <= current_frame.y < bounds.y + bounds.height)
+                    if not in_screen:
+                        new_frame = TerminalFrame(
+                            x=round(bounds.x + 18.0, 2),
+                            y=round(bounds.y + 18.0, 2),
+                            width=current_frame.width,
+                            height=current_frame.height,
+                        )
+                        await self.backend.set_frame(sibling.handle, new_frame)
+                        sibling.frame = new_frame
+            except Exception:
+                pass
+
     async def _align_frame_to_siblings(self, record: TerminalRecord) -> None:
         """将窗口大小对齐到其他可见终端（取第一个非隐藏、非关闭终端的 frame）"""
         # 优先使用 popup 设置
-        popup_w = self.settings.popup_width
-        popup_h = self.settings.popup_height
+        popup_w = self.ui_settings.popup_width
+        popup_h = self.ui_settings.popup_height
         if popup_w > 0 or popup_h > 0:
             await self._apply_popup_frame(record)
             return
@@ -487,6 +591,14 @@ class DashboardService:
                 except Exception:
                     pass
                 return
+        # 没有兄弟终端时，如果设置了目标屏幕，移动到目标屏幕
+        if self.ui_settings.target_screen >= 0:
+            target = build_maximized_frame(screen_index=self.ui_settings.target_screen)
+            try:
+                await self.backend.set_frame(record.handle, target)
+                record.frame = target
+            except Exception:
+                pass
 
     async def enter_monitor_mode(self) -> dict:
         await self.backend.hide_app()
@@ -816,8 +928,17 @@ class DashboardService:
         old_status = record.status
         status, markers, summary = analyze_screen_text(text, stable_seconds, self._rule_config)
 
-        # 提示符守卫：空闲→运行中的转换需要额外验证
-        # 用户在 shell 提示符打字时，只有最后一行变化且提示符仍可见
+        # ── 状态守卫链（顺序不可调换）──
+        # 1. 焦点守卫：终端有焦点时（用户正在交互），不要从空闲变为运行中
+        #    等终端失焦后由 _focus_recheck_loop 重新评估
+        if (old_status in self._IDLE_STATUSES
+                and status == TerminalStatus.running
+                and self._is_terminal_focused(record)):
+            status = old_status
+            self._focus_suppressed.add(record.id)
+
+        # 2. 提示符守卫：空闲→运行中的转换需要额外验证
+        #    用户在 shell 提示符打字时，只有最后一行变化且提示符仍可见
         if (old_status in self._IDLE_STATUSES
                 and status == TerminalStatus.running
                 and record.screen_text
@@ -850,6 +971,46 @@ class DashboardService:
         # 最后一行是否仍有 shell 提示符
         last_line = new_lines[-1] if new_lines else ''
         return bool(cls._PROMPT_CHAR_RE.search(last_line))
+
+    def _is_terminal_focused(self, record: TerminalRecord) -> bool:
+        """检查终端是否当前有焦点（用户正在交互）"""
+        if hasattr(self.backend, 'is_session_focused'):
+            return self.backend.is_session_focused(record.handle.session_id)
+        return False
+
+    async def _focus_recheck_loop(self) -> None:
+        """定期检查焦点抑制的终端，失焦后重新评估状态"""
+        while True:
+            await asyncio.sleep(1.5)
+            if not self._focus_suppressed:
+                continue
+            for terminal_id in list(self._focus_suppressed):
+                record = self.records.get(terminal_id)
+                if record is None or record.status == TerminalStatus.closed:
+                    self._focus_suppressed.discard(terminal_id)
+                    continue
+                if self._is_terminal_focused(record):
+                    continue  # 仍然有焦点，继续抑制
+                # 终端已失焦，重新评估状态
+                self._focus_suppressed.discard(terminal_id)
+                if not record.screen_text.strip():
+                    continue
+                # 使用 stable_seconds=0 避免超时规则误判：
+                # 焦点抑制期间 content_stable_since 可能已经很久没更新，
+                # 用真实 stable_seconds 会让超时规则以为内容停滞了很久而误判为 done。
+                # 只用 content 类规则判断即可，超时规则留给 _timeout_check_loop 自然处理。
+                new_status, markers, summary = analyze_screen_text(
+                    record.screen_text, 0.0, self._rule_config
+                )
+                if new_status != record.status:
+                    record.status = new_status
+                    record.markers = markers
+                    record.summary = summary
+                    record.updated_at = self._now()
+                    if new_status != TerminalStatus.error:
+                        record.last_error = None
+                    if record.id in self.records:
+                        await self._broadcast(self.record_event(record.id))
 
     def _get_record(self, terminal_id: str) -> TerminalRecord:
         if terminal_id not in self.records:
@@ -911,6 +1072,12 @@ class DashboardService:
                     continue
                 new_status, markers, summary = result
                 if new_status != record.status:
+                    # 焦点守卫：终端有焦点时（用户正在交互），不要从空闲变为运行中
+                    if (record.status in self._IDLE_STATUSES
+                            and new_status == TerminalStatus.running
+                            and self._is_terminal_focused(record)):
+                        self._focus_suppressed.add(record.id)
+                        continue
                     record.status = new_status
                     record.markers = markers
                     record.summary = summary
