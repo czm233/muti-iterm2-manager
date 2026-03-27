@@ -94,11 +94,16 @@ class ITerm2Backend:
         self._app: Any = None
         self._lock = asyncio.Lock()
         self._last_refresh: float = 0
+        # 焦点 session 跟踪
+        self._focused_session_id: str | None = None
+        self._app_active: bool = False  # iTerm2 是否为前台应用
+        self._focus_monitor_task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
         await self._ensure_connection()
 
     async def stop(self) -> None:
+        await self.stop_focus_monitor()
         if self._connection is not None:
             try:
                 await self._connection.async_close()
@@ -106,6 +111,61 @@ class ITerm2Backend:
                 pass
         self._connection = None
         self._app = None
+
+    # ── 焦点监控 ──────────────────────────────────────────────
+
+    async def start_focus_monitor(self) -> None:
+        """启动焦点监控任务，实时追踪 iTerm2 焦点变化"""
+        if self._focus_monitor_task is not None:
+            return
+        # 初始化：检测 iTerm2 是否在前台
+        self._app_active = self._is_iterm2_foreground()
+        self._focus_monitor_task = asyncio.create_task(self._focus_monitor_loop())
+
+    async def stop_focus_monitor(self) -> None:
+        """停止焦点监控任务"""
+        if self._focus_monitor_task is not None:
+            self._focus_monitor_task.cancel()
+            try:
+                await self._focus_monitor_task
+            except asyncio.CancelledError:
+                pass
+            self._focus_monitor_task = None
+
+    def is_session_focused(self, session_id: str) -> bool:
+        """检查指定 session 是否当前有焦点（iTerm2 在前台且 session 激活）"""
+        return self._app_active and self._focused_session_id == session_id
+
+    def _is_iterm2_foreground(self) -> bool:
+        """检查 iTerm2 是否为当前前台应用（AppKit 兜底检测）"""
+        if AppKit is None:
+            return False
+        try:
+            apps = AppKit.NSRunningApplication.runningApplicationsWithBundleIdentifier_("com.googlecode.iterm2")
+            return bool(apps and apps[0].isActive())
+        except Exception:
+            return False
+
+    async def _focus_monitor_loop(self) -> None:
+        """通过 iTerm2 FocusMonitor 实时跟踪焦点变化"""
+        while True:
+            try:
+                connection = await self._ensure_connection(launch=False)
+                async with iterm2.FocusMonitor(connection) as monitor:
+                    print("[focus-monitor] 已启动焦点监控", flush=True)
+                    while True:
+                        update = await monitor.async_get_next_update()
+                        if update.application_active is not None:
+                            self._app_active = update.application_active.application_active
+                        if update.active_session_changed is not None:
+                            self._focused_session_id = update.active_session_changed.session_id
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                print(f"[focus-monitor] 异常: {type(exc).__name__}: {exc}", flush=True)
+                self._focused_session_id = None
+                self._app_active = self._is_iterm2_foreground()
+                await asyncio.sleep(3)
 
     def is_alive(self) -> bool:
         return self._is_iterm2_running()

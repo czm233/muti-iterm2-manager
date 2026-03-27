@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.util
+import hashlib
 from dataclasses import dataclass
+from datetime import datetime
 from math import ceil, sqrt
 
-from multi_iterm2_manager.models import GridLayoutParams, TerminalFrame
+from multi_iterm2_manager.models import GridLayoutParams, ScreenConfig, ScreenInfo, TerminalFrame
 
 try:
     import AppKit  # type: ignore
@@ -253,8 +255,23 @@ def get_screen_bounds(screen_index: int) -> DisplayBounds | None:
     )
 
 
-def build_maximized_frame(padding: float = 18.0) -> TerminalFrame:
-    bounds = get_primary_display_bounds()
+def get_screen_index_from_coordinates(x: float, y: float) -> int:
+    """根据坐标判断所在屏幕索引，返回 -1 表示未找到"""
+    screens = get_all_screens()
+    for screen in screens:
+        if (screen["x"] <= x < screen["x"] + screen["width"] and
+            screen["y"] <= y < screen["y"] + screen["height"]):
+            return screen["index"]
+    return -1
+
+
+def build_maximized_frame(padding: float = 18.0, screen_index: int = -1) -> TerminalFrame:
+    """构建最大化窗口 frame。当 screen_index >= 0 时使用指定屏幕的边界。"""
+    bounds = None
+    if screen_index >= 0:
+        bounds = get_screen_bounds(screen_index)
+    if bounds is None:
+        bounds = get_primary_display_bounds()
     return TerminalFrame(
         x=round(bounds.x + padding, 2),
         y=round(bounds.y + padding, 2),
@@ -277,7 +294,7 @@ def suggest_monitor_grid(count: int) -> tuple[int, int]:
     return columns, rows
 
 
-def build_grid_frames(count: int, params: GridLayoutParams) -> list[TerminalFrame]:
+def build_grid_frames(count: int, params: GridLayoutParams, screen_index: int = -1) -> list[TerminalFrame]:
     if count <= 0:
         return []
 
@@ -285,7 +302,11 @@ def build_grid_frames(count: int, params: GridLayoutParams) -> list[TerminalFram
     rows = max(params.rows, ceil(count / columns))
     gap = max(0.0, params.gap)
     padding = max(0.0, params.padding)
-    bounds = get_primary_display_bounds()
+    bounds = None
+    if screen_index >= 0:
+        bounds = get_screen_bounds(screen_index)
+    if bounds is None:
+        bounds = get_primary_display_bounds()
 
     usable_width = max(100.0, bounds.width - padding * 2 - gap * (columns - 1))
     usable_height = max(100.0, bounds.height - padding * 2 - gap * (rows - 1))
@@ -307,3 +328,73 @@ def build_grid_frames(count: int, params: GridLayoutParams) -> list[TerminalFram
             )
         )
     return frames
+
+
+# ============ 屏幕配置快照功能 ============
+
+
+def _dict_to_screen_info(screen_dict: dict) -> ScreenInfo:
+    """将 get_all_screens() 返回的 dict 转换为 ScreenInfo 对象"""
+    # 判断是否为主屏幕：x=0 且 y=0 或者是第一个屏幕
+    is_primary = screen_dict.get("index", 0) == 0 or (screen_dict["x"] == 0 and screen_dict["y"] == 0)
+    return ScreenInfo(
+        name=screen_dict["name"],
+        width=screen_dict["width"],
+        height=screen_dict["height"],
+        x=screen_dict["x"],
+        y=screen_dict["y"],
+        is_primary=is_primary,
+    )
+
+
+def generate_screen_fingerprint(screens: list[ScreenInfo] | None = None) -> str:
+    """生成当前屏幕配置的唯一指纹 (8位)
+
+    基于屏幕的名称、尺寸和位置生成指纹，确保相同的屏幕配置总是产生相同的指纹。
+
+    Args:
+        screens: 屏幕列表，如果为 None 则自动获取当前屏幕配置
+
+    Returns:
+        8位十六进制指纹字符串
+    """
+    if screens is None:
+        screen_dicts = get_all_screens()
+        screens = [_dict_to_screen_info(s) for s in screen_dicts]
+
+    if not screens:
+        return "00000000"
+
+    # 收集所有屏幕的关键信息
+    screen_data = []
+    for s in screens:
+        screen_data.append(f"{s.name}:{s.width}x{s.height}@{s.x},{s.y}")
+
+    # 按字符串排序，确保顺序一致
+    screen_data.sort()
+
+    # 生成指纹
+    fingerprint_str = "|".join(screen_data)
+
+    return hashlib.md5(fingerprint_str.encode()).hexdigest()[:8]
+
+
+def get_current_screen_config() -> ScreenConfig:
+    """获取当前屏幕配置快照
+
+    Returns:
+        ScreenConfig 包含当前所有屏幕信息和配置指纹
+    """
+    screen_dicts = get_all_screens()
+    screens = [_dict_to_screen_info(s) for s in screen_dicts]
+    fingerprint = generate_screen_fingerprint(screens)
+
+    # 找到主屏幕
+    primary = next((s for s in screens if s.is_primary), screens[0] if screens else None)
+
+    return ScreenConfig(
+        fingerprint=fingerprint,
+        primary_screen_name=primary.name if primary else "",
+        screens=screens,
+        created_at=datetime.now().isoformat(timespec="seconds"),
+    )

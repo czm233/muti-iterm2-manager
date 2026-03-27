@@ -127,6 +127,10 @@ input {
   border-radius: 20px;
 }
 
+.hero {
+  border-radius: 0;
+}
+
 .hero-copy {
   max-width: 100%;
 }
@@ -1366,10 +1370,20 @@ body.is-resizing-split * {
 }
 
 .topbar-queue:empty::after {
-  content: "待处理队列";
+  content: "空闲队列";
   color: rgba(148, 163, 184, 0.3);
   font-size: 0.76rem;
   white-space: nowrap;
+}
+
+.topbar-message {
+  font-size: 0.8rem;
+  color: #93a8cb;
+  margin-left: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 200px;
 }
 
 .topbar-queue:not(:empty) {
@@ -1607,6 +1621,26 @@ body.is-resizing-split * {
 .wall-card-tags-input button {
   padding: 3px 8px;
   font-size: 0.72rem;
+  border-radius: 6px;
+  min-width: auto;
+}
+
+/* --- 屏幕配置管理 --- */
+.screen-config-item {
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.screen-config-item:hover {
+  background: rgba(148, 163, 184, 0.1);
+}
+
+.screen-config-item.is-current {
+  background: rgba(56, 211, 159, 0.06);
+}
+
+.screen-config-item button {
+  padding: 4px 8px;
+  font-size: 0.76rem;
   border-radius: 6px;
   min-width: auto;
 }

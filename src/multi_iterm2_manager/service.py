@@ -320,21 +320,6 @@ class DashboardService:
         self.settings.ui_settings = self.ui_settings
         save_ui_settings(self.settings.ui_settings_file, self.ui_settings)
 
-    def get_popup_settings(self) -> dict:
-        """获取弹出窗口位置和大小设置"""
-        return {
-            "x": self.ui_settings.popup_x,
-            "y": self.ui_settings.popup_y,
-            "width": self.ui_settings.popup_width,
-            "height": self.ui_settings.popup_height,
-        }
-
-    def set_popup_settings(self, x: int, y: int, width: int, height: int) -> None:
-        """设置弹出窗口位置和大小，并持久化到配置文件"""
-        self.ui_settings = replace(self.ui_settings, popup_x=x, popup_y=y, popup_width=width, popup_height=height)
-        self.settings.ui_settings = self.ui_settings
-        save_ui_settings(self.settings.ui_settings_file, self.ui_settings)
-
     async def create_terminal(self, params: CreateTerminalParams) -> dict:
         final_name = (params.name or '').strip() or self._next_default_name()
 
@@ -345,8 +330,13 @@ class DashboardService:
         if screen_index < 0:
             screen_index = self.ui_settings.target_screen
 
-        # 如果未指定 frame 且确定了屏幕索引，使用该屏幕的边界
+        # 优先级：1. 显式传入的 frame > 2. 默认窗口模板 > 3. build_maximized_frame
         target_frame = params.frame
+        if target_frame is None:
+            default_frame = self.get_default_frame()
+            if default_frame is not None:
+                target_frame = TerminalFrame(**default_frame)
+
         if target_frame is None and screen_index >= 0:
             target_frame = build_maximized_frame(screen_index=screen_index)
         handle = await self.backend.create_terminal(CreateTerminalParams(name=final_name, command=params.command, profile=params.profile, frame=target_frame))
@@ -388,25 +378,8 @@ class DashboardService:
             )
         return created
 
-    async def _apply_popup_frame(self, record: TerminalRecord) -> None:
-        """聚焦终端时移动窗口：优先 popup 坐标，其次 target_screen"""
-        popup_w = self.ui_settings.popup_width
-        popup_h = self.ui_settings.popup_height
-        if popup_w > 0 or popup_h > 0:
-            current_frame = await self.backend.get_frame(record.handle)
-            if current_frame is not None:
-                win_w = popup_w if popup_w > 0 else current_frame.width
-                win_h = popup_h if popup_h > 0 else current_frame.height
-                new_frame = TerminalFrame(
-                    x=float(self.ui_settings.popup_x),
-                    y=float(self.ui_settings.popup_y),
-                    width=float(win_w),
-                    height=float(win_h),
-                )
-                await self.backend.set_frame(record.handle, new_frame)
-                record.frame = new_frame
-            return
-        # 没有 popup 设置时，如果设置了目标屏幕，确保窗口在目标屏幕上
+    async def _move_to_target_screen(self, record: TerminalRecord) -> None:
+        """如果设置了目标屏幕，确保窗口在目标屏幕上"""
         if self.ui_settings.target_screen >= 0:
             from multi_iterm2_manager.display import get_screen_bounds
             bounds = get_screen_bounds(self.ui_settings.target_screen)
@@ -455,7 +428,7 @@ class DashboardService:
                         # 让其他可见终端也跟随移动到同一屏幕
                         await self._move_siblings_to_screen(record, bounds)
             else:
-                await self._apply_popup_frame(record)
+                await self._move_to_target_screen(record)
         except Exception as exc:
             if self._is_missing_terminal_error(exc):
                 return await self._mark_terminal_closed(record, reason="真实窗口已被手动关闭")
@@ -566,13 +539,7 @@ class DashboardService:
 
     async def _align_frame_to_siblings(self, record: TerminalRecord) -> None:
         """将窗口大小对齐到其他可见终端（取第一个非隐藏、非关闭终端的 frame）"""
-        # 优先使用 popup 设置
-        popup_w = self.ui_settings.popup_width
-        popup_h = self.ui_settings.popup_height
-        if popup_w > 0 or popup_h > 0:
-            await self._apply_popup_frame(record)
-            return
-        # 没有 popup 设置时，对齐到兄弟终端的 frame
+        # 对齐到兄弟终端的 frame
         for sibling in self.records.values():
             if sibling.id == record.id:
                 continue
@@ -737,6 +704,64 @@ class DashboardService:
         record.updated_at = self._now()
         await self._broadcast(self.record_event(terminal_id))
         return record.to_dict()
+
+    # ============ 默认窗口位置模板 ============
+
+    def get_default_frame(self) -> dict | None:
+        """获取默认窗口模板，若未设置返回 None"""
+        if (self.ui_settings.default_frame_x is not None and
+            self.ui_settings.default_frame_y is not None and
+            self.ui_settings.default_frame_width is not None and
+            self.ui_settings.default_frame_height is not None):
+            return {
+                "x": self.ui_settings.default_frame_x,
+                "y": self.ui_settings.default_frame_y,
+                "width": self.ui_settings.default_frame_width,
+                "height": self.ui_settings.default_frame_height,
+            }
+        return None
+
+    async def set_default_frame(self, frame: TerminalFrame) -> dict:
+        """设置默认窗口模板并持久化"""
+        self.ui_settings = replace(
+            self.ui_settings,
+            default_frame_x=frame.x,
+            default_frame_y=frame.y,
+            default_frame_width=frame.width,
+            default_frame_height=frame.height,
+        )
+        self.settings.ui_settings = self.ui_settings
+        save_ui_settings(self.settings.ui_settings_file, self.ui_settings)
+
+        payload = {
+            "type": "default-frame-updated",
+            "defaultFrame": frame.to_dict(),
+        }
+        await self._broadcast(payload)
+        return payload
+
+    async def apply_default_frame_to_all(self) -> dict:
+        """将默认位置应用到所有活跃终端"""
+        default_frame = self.get_default_frame()
+        if default_frame is None:
+            raise ValueError("尚未设置默认窗口模板")
+
+        frame = TerminalFrame(**default_frame)
+        applied = 0
+        errors = []
+
+        for record in self.records.values():
+            if record.status == TerminalStatus.closed or record.hidden:
+                continue
+            try:
+                await self.backend.set_frame(record.handle, frame)
+                record.frame = frame
+                applied += 1
+            except Exception as e:
+                errors.append({"terminalId": record.id, "error": str(e)})
+
+        await self._broadcast(self.snapshot_event())
+        return {"applied": applied, "errors": errors, "frame": frame.to_dict()}
 
     async def apply_grid_layout(self, params: GridLayoutParams) -> dict:
         columns = max(1, params.columns)

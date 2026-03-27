@@ -73,6 +73,15 @@ class MockTerminalBackend:
     async def focus(self, handle: TerminalHandle) -> None:
         return None
 
+    def is_session_focused(self, session_id: str) -> bool:
+        return False
+
+    async def start_focus_monitor(self) -> None:
+        pass
+
+    async def stop_focus_monitor(self) -> None:
+        pass
+
     async def rename(self, handle: TerminalHandle, name: str) -> None:
         if handle.session_id in self._items:
             self._items[handle.session_id]["name"] = name

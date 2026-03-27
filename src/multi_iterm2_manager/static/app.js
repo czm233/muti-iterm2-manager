@@ -1268,6 +1268,11 @@ function syncTagFilterSelect() {
       // 切换到新标签
       state.selectedTag = tagValue || null;
       state.page = 1;
+      // 立即更新标签按钮激活状态
+      const activeTag = state.selectedTag || "";
+      tagFilterTabs.querySelectorAll(".tag-tab").forEach((b) => {
+        b.classList.toggle("is-active", b.dataset.tag === activeTag);
+      });
       // 恢复新标签的布局（没有保存过则清空）
       loadTagLayout();
       // loadTagLayout 可能清空 orderedTerminalIds，需从 state.terminals 重建
@@ -1427,8 +1432,18 @@ function renderStats() {
 }
 
 async function focusTerminal(id, name) {
-  await request(`/api/terminals/${id}/focus`, { method: "POST" });
-  setMessage(`已切到 ${name}，现在可以在原生 iTerm 手动接管`);
+  await request(`/api/terminals/${id}/focus`, {
+    method: "POST",
+    body: JSON.stringify({
+      browser_x: window.screenX,
+      browser_y: window.screenY
+    })
+  });
+  // 点击队列项聚焦时，自动从队列移除
+  state.queue = state.queue.filter((q) => q.id !== id);
+  _lastQueueKey = "__force__";
+  renderQueue();
+  setMessage(`已切到 ${name}，已从队列移除`);
 }
 
 /* ---- 顶部队列 ---- */
@@ -1601,6 +1616,11 @@ function bindCardActions(card, record) {
     try {
       await renameTerminal(record.id, nextName);
       state.editingTitleTerminalId = null;
+      // 同步更新本地 state 中的名称
+      const terminal = state.terminals.get(record.id);
+      if (terminal) {
+        terminal.name = nextName;
+      }
       // 同步更新队列中的名称
       const qItem = state.queue.find((q) => q.id === record.id);
       if (qItem) {
@@ -1608,6 +1628,8 @@ function bindCardActions(card, record) {
         _lastQueueKey = "__force__";
         renderQueue();
       }
+      // 刷新 UI 以退出编辑状态
+      refreshWall();
       setMessage(`已将终端重命名为 ${nextName}`);
     } catch (error) {
       state.editingTitleTerminalId = record.id;
@@ -1705,6 +1727,39 @@ function bindCardActions(card, record) {
       setMessage(error.message, true);
     }
   };
+
+  const setDefaultFrameBtn = card.querySelector("[data-action='set-default-frame']");
+  if (setDefaultFrameBtn) {
+    setDefaultFrameBtn.onclick = async (event) => {
+      event.stopPropagation();
+      try {
+        // 先获取终端的实时位置
+        const frameData = await request(`/api/terminals/${record.id}/frame`);
+        await request("/api/default-frame", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(frameData),
+        });
+        setMessage(`已将 ${record.name} 的位置设为默认模板`);
+      } catch (error) {
+        setMessage(error.message, true);
+      }
+    };
+  }
+
+  const applyDefaultFrameAllBtn = card.querySelector("[data-action='apply-default-frame-all']");
+  if (applyDefaultFrameAllBtn) {
+    applyDefaultFrameAllBtn.onclick = async (event) => {
+      event.stopPropagation();
+      if (!confirm("确定将所有终端移动到默认位置吗？")) return;
+      try {
+        const result = await request("/api/default-frame/apply-all", { method: "POST" });
+        setMessage(`已将 ${result.applied} 个终端对齐到默认位置`);
+      } catch (error) {
+        setMessage(error.message, true);
+      }
+    };
+  }
 
   const toggleHideBtn = card.querySelector("[data-action='toggle-hide']");
   if (toggleHideBtn) {
@@ -1990,6 +2045,8 @@ function renderTerminal(record) {
         <div class="wall-card-tools">
           <button data-action="refresh" class="secondary">刷新</button>
           <button data-action="monitor-mode" class="secondary">回监控模式</button>
+          ${record.status !== "closed" ? '<button data-action="set-default-frame" class="secondary">设为默认位置</button>' : ''}
+          ${record.status !== "closed" ? '<button data-action="apply-default-frame-all" class="secondary">全部对齐</button>' : ''}
           ${record.status !== "closed" ? '<button data-action="detach" class="secondary">解绑</button>' : ''}
           <button type="button" class="secondary wall-card-input-toggle">命令</button>
         </div>
@@ -2414,7 +2471,7 @@ createForm.addEventListener("submit", async (event) => {
   const name = document.getElementById("name").value.trim();
   const command = "";
   try {
-    const result = await request("/api/terminals", { method: "POST", body: JSON.stringify({ name: name || null, command: command || null, ...(state.selectedTag && state.selectedTag !== "__untagged__" ? { tags: [state.selectedTag] } : {}) }) });
+    const result = await request("/api/terminals", { method: "POST", body: JSON.stringify({ name: name || null, command: command || null, ...(state.selectedTag && state.selectedTag !== "__untagged__" ? { tags: [state.selectedTag] } : {}), browser_x: window.screenX, browser_y: window.screenY }) });
     createForm.reset();
     setMessage(`已启动 ${result.item.name}，真实 iTerm 窗口已被纳入监控墙`);
   } catch (error) {
@@ -2429,7 +2486,7 @@ document.getElementById("quick-create").onclick = async () => {
     if (state.selectedTag && state.selectedTag !== "__untagged__") {
       body.tags = [state.selectedTag];
     }
-    const result = await request("/api/terminals", { method: "POST", body: JSON.stringify(body) });
+    const result = await request("/api/terminals", { method: "POST", body: JSON.stringify({ ...body, browser_x: window.screenX, browser_y: window.screenY }) });
     setMessage(`已创建 ${result.item.name}，已纳入监控墙`);
   } catch (error) {
     setMessage(error.message, true);
@@ -2733,76 +2790,11 @@ function injectScreenSelector() {
         <option value="-1">不指定（当前屏幕）</option>
       </select>
     </label>
-    <div class="panel-divider"></div>
-    <div style="color:var(--muted);font-weight:700;">弹出窗口坐标（宽高为 0 时不移动窗口）</div>
-    <div>
-      <label style="flex:1;">
-        <select id="popup-capture-terminal" style="
-          width:100%;
-          background:var(--bg);
-          color:var(--fg);
-          border:1px solid var(--border);
-          border-radius:6px;
-          padding:6px 8px;
-          font-size:0.92rem;
-        ">
-          <option value="">-- 选择终端获取坐标 --</option>
-        </select>
-      </label>
-    </div>
-    <div style="display:flex;gap:12px;">
-      <label style="flex:1;">
-        <span>X</span>
-        <input type="number" id="popup-x" step="1" placeholder="0" style="width:50%;" />
-      </label>
-      <label style="flex:1;">
-        <span>Y</span>
-        <input type="number" id="popup-y" step="1" placeholder="0" style="width:50%;" />
-      </label>
-    </div>
-    <div style="display:flex;gap:12px;">
-      <label style="flex:1;">
-        <span>宽度</span>
-        <input type="number" id="popup-width" min="0" step="1" placeholder="0 = 不移动" style="width:50%;" />
-      </label>
-      <label style="flex:1;">
-        <span>高度</span>
-        <input type="number" id="popup-height" min="0" step="1" placeholder="0 = 不移动" style="width:50%;" />
-      </label>
-    </div>
   `;
 
   tuningPanel.appendChild(divider);
   tuningPanel.appendChild(title);
   tuningPanel.appendChild(form);
-
-  // 弹出窗口坐标控件变更时自动保存
-  const popupXInput = document.getElementById("popup-x");
-  const popupYInput = document.getElementById("popup-y");
-  const popupWInput = document.getElementById("popup-width");
-  const popupHInput = document.getElementById("popup-height");
-
-  const savePopupSettings = async () => {
-    try {
-      await request("/api/popup-settings", {
-        method: "PUT",
-        body: JSON.stringify({
-          x: Number(popupXInput.value) || 0,
-          y: Number(popupYInput.value) || 0,
-          width: Number(popupWInput.value) || 0,
-          height: Number(popupHInput.value) || 0,
-        }),
-      });
-      setMessage("弹出窗口设置已保存");
-    } catch (error) {
-      setMessage(error.message, true);
-    }
-  };
-
-  popupXInput.addEventListener("change", savePopupSettings);
-  popupYInput.addEventListener("change", savePopupSettings);
-  popupWInput.addEventListener("change", savePopupSettings);
-  popupHInput.addEventListener("change", savePopupSettings);
 
   const select = document.getElementById("target-screen-select");
 
@@ -2826,64 +2818,6 @@ function injectScreenSelector() {
       setMessage(error.message, true);
     }
   });
-
-  // 选择终端后自动获取窗口坐标
-  const captureSelect = document.getElementById("popup-capture-terminal");
-
-  function refreshCaptureTerminalList() {
-    const current = captureSelect.value;
-    captureSelect.innerHTML = '<option value="">-- 选择终端获取坐标 --</option>';
-    for (const [id, t] of state.terminals) {
-      if (t.status === "closed") continue;
-      const opt = document.createElement("option");
-      opt.value = id;
-      opt.textContent = t.name || id;
-      captureSelect.appendChild(opt);
-    }
-    if (current && captureSelect.querySelector(`option[value="${current}"]`)) {
-      captureSelect.value = current;
-    }
-  }
-
-  refreshCaptureTerminalList();
-  window._refreshCaptureTerminalList = refreshCaptureTerminalList;
-
-  captureSelect.addEventListener("change", async () => {
-    const tid = captureSelect.value;
-    if (!tid) return;
-    try {
-      const frame = await request(`/api/terminals/${tid}/frame`);
-      popupXInput.value = Math.round(frame.x);
-      popupYInput.value = Math.round(frame.y);
-      popupWInput.value = Math.round(frame.width);
-      popupHInput.value = Math.round(frame.height);
-      await savePopupSettings();
-      setMessage("已获取窗口坐标并保存");
-    } catch (error) {
-      setMessage("获取坐标失败: " + error.message, true);
-    }
-  });
-}
-
-/**
- * 加载弹出窗口设置并回填控件
- */
-async function loadPopupSettings() {
-  const xInput = document.getElementById("popup-x");
-  const yInput = document.getElementById("popup-y");
-  const wInput = document.getElementById("popup-width");
-  const hInput = document.getElementById("popup-height");
-  if (!xInput || !yInput || !wInput || !hInput) return;
-
-  try {
-    const data = await request("/api/popup-settings");
-    xInput.value = data.x || "";
-    yInput.value = data.y || "";
-    wInput.value = data.width || "";
-    hInput.value = data.height || "";
-  } catch (error) {
-    console.warn("加载弹出窗口设置失败:", error.message);
-  }
 }
 
 /**
@@ -2958,6 +2892,188 @@ async function loadScreenSelector() {
 // 初始化屏幕选择 UI
 injectScreenSelector();
 
+// --- 屏幕配置管理 UI ---
+
+/**
+ * 在调优面板中动态注入屏幕配置管理 UI
+ */
+function injectScreenConfigPanel() {
+  const tuningPanel = document.querySelector(".topbar-menu--wide > .topbar-menu-panel");
+  if (!tuningPanel) return;
+
+  // 创建分隔线
+  const divider = document.createElement("div");
+  divider.className = "panel-divider";
+
+  // 创建标题
+  const title = document.createElement("div");
+  title.className = "panel-title";
+  title.style.display = "flex";
+  title.style.justifyContent = "space-between";
+  title.style.alignItems = "center";
+  title.innerHTML = `<span>屏幕配置</span><span id="screen-config-status" style="font-size:0.82rem;color:var(--fg-muted);font-weight:normal;"></span>`;
+
+  // 创建内容区
+  const container = document.createElement("div");
+  container.id = "screen-config-container";
+  container.innerHTML = `
+    <div id="screen-config-current" style="margin-bottom:10px;padding:8px 10px;background:rgba(15,23,42,0.5);border-radius:8px;font-size:0.84rem;">
+      <div style="color:var(--muted);">当前屏幕配置：<span id="current-screen-info" style="color:var(--text);">加载中...</span></div>
+      <div style="color:var(--muted);margin-top:4px;">配置指纹：<span id="current-fingerprint" style="font-family:monospace;color:var(--accent);">--</span></div>
+    </div>
+    <div style="margin-bottom:8px;color:var(--muted);font-weight:700;font-size:0.84rem;">已保存的布局</div>
+    <div id="screen-config-list" style="display:flex;flex-direction:column;gap:6px;max-height:180px;overflow-y:auto;">
+      <div style="color:var(--muted);font-size:0.82rem;padding:4px 0;">暂无保存的布局</div>
+    </div>
+    <div style="margin-top:10px;">
+      <button id="save-screen-config" class="secondary" style="width:100%;">💾 保存当前布局</button>
+    </div>
+  `;
+
+  tuningPanel.appendChild(divider);
+  tuningPanel.appendChild(title);
+  tuningPanel.appendChild(container);
+
+  // 保存按钮点击事件
+  const saveBtn = document.getElementById("save-screen-config");
+  if (saveBtn) {
+    saveBtn.addEventListener("click", async () => {
+      const name = prompt("请输入配置名称（可选，留空则自动生成）");
+      if (name === null) return; // 用户点击取消
+      try {
+        saveBtn.disabled = true;
+        saveBtn.textContent = "⏳ 保存中...";
+        await request("/api/screen-configs/save", {
+          method: "POST",
+          body: JSON.stringify({ config_name: name || "" }),
+        });
+        setMessage("布局已保存");
+        await loadScreenConfigs();
+      } catch (error) {
+        setMessage("保存失败: " + error.message, true);
+      } finally {
+        saveBtn.disabled = false;
+        saveBtn.textContent = "💾 保存当前布局";
+      }
+    });
+  }
+}
+
+/**
+ * 加载屏幕配置数据并更新 UI
+ */
+async function loadScreenConfigs() {
+  const currentInfoEl = document.getElementById("current-screen-info");
+  const fingerprintEl = document.getElementById("current-fingerprint");
+  const listEl = document.getElementById("screen-config-list");
+  const statusEl = document.getElementById("screen-config-status");
+
+  if (!currentInfoEl || !fingerprintEl || !listEl) return;
+
+  try {
+    const data = await request("/api/screen-configs");
+    const current = data.current || {};
+    const savedLayouts = data.savedLayouts || {};
+
+    // 更新当前配置信息
+    const primaryScreen = current.primaryScreen || "未知";
+    const screenCount = (current.screens || []).length;
+    const screenType = screenCount === 1 ? "单屏" : `${screenCount} 屏`;
+    currentInfoEl.textContent = `${primaryScreen} (${screenType})`;
+
+    // 更新指纹
+    const fingerprint = current.fingerprint || "--";
+    fingerprintEl.textContent = fingerprint.length > 8 ? fingerprint.substring(0, 8) : fingerprint;
+
+    // 检查当前配置是否已保存
+    const hasLayout = savedLayouts[current.fingerprint];
+    if (statusEl) {
+      if (hasLayout) {
+        statusEl.textContent = "✓";
+        statusEl.style.color = "var(--done)";
+      } else {
+        statusEl.textContent = "新配置";
+        statusEl.style.color = "var(--warn)";
+      }
+    }
+
+    // 渲染已保存的布局列表
+    const entries = Object.entries(savedLayouts);
+    if (entries.length === 0) {
+      listEl.innerHTML = '<div style="color:var(--muted);font-size:0.82rem;padding:4px 0;">暂无保存的布局</div>';
+    } else {
+      listEl.innerHTML = entries.map(([fp, layout]) => {
+        const name = layout.configName || fp.substring(0, 8);
+        const isCurrent = fp === current.fingerprint;
+        return `
+          <div class="screen-config-item${isCurrent ? " is-current" : ""}" data-fingerprint="${fp}" style="
+            display:flex;
+            align-items:center;
+            justify-content:space-between;
+            gap:8px;
+            padding:6px 10px;
+            background:rgba(148,163,184,0.06);
+            border:1px solid ${isCurrent ? "rgba(56,211,159,0.3)" : "rgba(148,163,184,0.1)"};
+            border-radius:8px;
+          ">
+            <div style="flex:1;min-width:0;overflow:hidden;">
+              <div style="font-size:0.84rem;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
+                ${isCurrent ? '<span style="color:var(--done);">✓</span> ' : '📺 '}
+                ${escapeHtml(name)}
+              </div>
+              <div style="font-size:0.72rem;color:var(--muted);font-family:monospace;">${fp.substring(0, 8)}</div>
+            </div>
+            <div style="display:flex;gap:4px;flex-shrink:0;">
+              <button class="screen-config-apply" data-fingerprint="${fp}" style="padding:4px 8px;font-size:0.76rem;background:var(--accent);color:#fff;border:none;border-radius:4px;cursor:pointer;" title="应用此布局">应用</button>
+              <button class="screen-config-delete danger" data-fingerprint="${fp}" style="padding:4px 8px;font-size:0.76rem;" title="删除此布局">删除</button>
+            </div>
+          </div>
+        `;
+      }).join("");
+
+      // 绑定应用按钮事件
+      listEl.querySelectorAll(".screen-config-apply").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const fp = btn.dataset.fingerprint;
+          try {
+            btn.disabled = true;
+            btn.textContent = "应用中...";
+            const result = await request(`/api/screen-configs/${fp}/apply`, { method: "POST" });
+            setMessage(`已应用布局，${result.applied} 个终端位置已更新`);
+          } catch (error) {
+            setMessage("应用布局失败: " + error.message, true);
+          } finally {
+            btn.disabled = false;
+            btn.textContent = "应用";
+          }
+        });
+      });
+
+      // 绑定删除按钮事件
+      listEl.querySelectorAll(".screen-config-delete").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const fp = btn.dataset.fingerprint;
+          if (!confirm("确定要删除此布局配置吗？")) return;
+          try {
+            await request(`/api/screen-configs/${fp}`, { method: "DELETE" });
+            setMessage("布局已删除");
+            await loadScreenConfigs();
+          } catch (error) {
+            setMessage("删除失败: " + error.message, true);
+          }
+        });
+      });
+    }
+  } catch (error) {
+    console.warn("加载屏幕配置失败:", error.message);
+    currentInfoEl.textContent = "加载失败";
+    fingerprintEl.textContent = "--";
+  }
+}
+
+// 初始化屏幕配置管理 UI
+injectScreenConfigPanel();
+
 // 刷新屏幕列表按钮
 const refreshScreenBtn = document.getElementById("refresh-screen-list");
 if (refreshScreenBtn) {
@@ -2975,7 +3091,7 @@ if (tuningDetails) {
   tuningDetails.addEventListener("toggle", () => {
     if (tuningDetails.open) {
       loadScreenSelector();
-      loadPopupSettings();
+      loadScreenConfigs();
     }
   });
 }

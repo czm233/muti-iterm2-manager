@@ -7,6 +7,88 @@ from typing import Any
 from uuid import uuid4
 
 
+# ============ 屏幕配置相关模型 ============
+
+
+@dataclass
+class ScreenInfo:
+    """单个屏幕信息"""
+    name: str  # 屏幕名称如 "Color LCD" / "MI"
+    width: int
+    height: int
+    x: int  # 在虚拟坐标系中的位置
+    y: int
+    is_primary: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "width": self.width,
+            "height": self.height,
+            "x": self.x,
+            "y": self.y,
+            "isPrimary": self.is_primary,
+        }
+
+
+@dataclass
+class ScreenConfig:
+    """屏幕配置快照"""
+    fingerprint: str  # 屏幕配置指纹 (8位)
+    config_name: str = ""  # 用户友好的配置名称
+    primary_screen_name: str = ""
+    screens: list[ScreenInfo] = field(default_factory=list)
+    created_at: str = ""  # ISO 格式时间戳
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "fingerprint": self.fingerprint,
+            "configName": self.config_name,
+            "primaryScreenName": self.primary_screen_name,
+            "screens": [s.to_dict() for s in self.screens],
+            "createdAt": self.created_at,
+        }
+
+
+@dataclass
+class TerminalLayout:
+    """单个终端的位置信息"""
+    terminal_id: str
+    x: int
+    y: int
+    width: int
+    height: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "terminalId": self.terminal_id,
+            "x": self.x,
+            "y": self.y,
+            "width": self.width,
+            "height": self.height,
+        }
+
+
+@dataclass
+class ScreenLayoutConfig:
+    """完整的屏幕布局配置"""
+    screen_fingerprint: str = ""  # 关联的屏幕配置指纹
+    config_name: str = ""
+    created_at: str = ""
+    terminals: dict[str, TerminalLayout] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "screenFingerprint": self.screen_fingerprint,
+            "configName": self.config_name,
+            "createdAt": self.created_at,
+            "terminals": {k: v.to_dict() for k, v in self.terminals.items()},
+        }
+
+
+# ============ 终端相关模型 ============
+
+
 class TerminalStatus(str, Enum):
     idle = "idle"
     running = "running"
@@ -98,6 +180,8 @@ class CreateTerminalParams:
     command: str | None = None
     profile: str | None = None
     frame: TerminalFrame | None = None
+    browser_x: float | None = None
+    browser_y: float | None = None
 
 
 @dataclass
