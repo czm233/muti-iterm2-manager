@@ -12,41 +12,6 @@ ui:
   grid_resizer_line_width_px: 0
   target_screen: 1
   default_frame_x: 1710.0
-  default_frame_y: -209.0
+  default_frame_y: 0.0
   default_frame_width: 2524.0
-  default_frame_height: 1125.0
-screen_layouts:
-  470bcf6b:
-    configName: '111'
-    createdAt: '2026-03-27T15:39:22'
-    terminals:
-      task-534a75e6:
-        terminalId: task-534a75e6
-        x: 1710
-        y: -209
-        width: 2524
-        height: 1125
-      task-f311c9b3:
-        terminalId: task-f311c9b3
-        x: 1710
-        y: -209
-        width: 2524
-        height: 1125
-      task-d49dfd9c:
-        terminalId: task-d49dfd9c
-        x: 1710
-        y: -209
-        width: 2524
-        height: 1125
-      task-204252f5:
-        terminalId: task-204252f5
-        x: 1710
-        y: -209
-        width: 2524
-        height: 1125
-      task-22c2e520:
-        terminalId: task-22c2e520
-        x: 1710
-        y: -209
-        width: 2524
-        height: 1125
+  default_frame_height: 1108.0

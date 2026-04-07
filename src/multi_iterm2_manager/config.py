@@ -25,13 +25,10 @@ class UiSettings:
     grid_resizer_line_width_px: int = 2
     # 屏幕设置
     target_screen: int = -1  # -1 表示"跟随当前/不指定"，0 表示屏幕1，1 表示屏幕2...
-    # 默认窗口位置模板（None 表示使用 build_maximized_frame 生成）
-    default_frame_x: float | None = None
-    default_frame_y: float | None = None
-    default_frame_width: float | None = None
-    default_frame_height: float | None = None
+    # 默认窗口位置模板（按屏幕名称存储，键是屏幕名称，值是 {"x":..., "y":..., "width":..., "height":...}）
+    default_frames_by_screen: dict | None = None
 
-    def to_dict(self) -> dict[str, float | int | None]:
+    def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
@@ -67,6 +64,25 @@ def load_ui_settings(path_value: str) -> UiSettings:
     raw_ui = payload.get("ui")
     ui_payload: dict[str, Any] = raw_ui if isinstance(raw_ui, dict) else payload
 
+    # 向后兼容：如果旧配置有 default_frame_x/y/width/height，自动迁移到新格式
+    if "default_frame_x" in ui_payload and "default_frames_by_screen" not in ui_payload:
+        old_x = ui_payload.pop("default_frame_x", None)
+        old_y = ui_payload.pop("default_frame_y", None)
+        old_w = ui_payload.pop("default_frame_width", None)
+        old_h = ui_payload.pop("default_frame_height", None)
+        if all(v is not None for v in [old_x, old_y, old_w, old_h]):
+            # 尝试用坐标检测真实屏幕名称
+            try:
+                from .display import get_screen_name_from_coordinates
+                screen_name = get_screen_name_from_coordinates(old_x, old_y)
+            except Exception:
+                screen_name = None
+            if not screen_name:
+                screen_name = "默认"
+            ui_payload["default_frames_by_screen"] = {
+                screen_name: {"x": old_x, "y": old_y, "width": old_w, "height": old_h}
+            }
+
     defaults = UiSettings()
     values: dict[str, Any] = {}
     for field_name in defaults.to_dict():
@@ -93,11 +109,8 @@ def save_ui_settings(path_value: str, ui_settings: UiSettings) -> Path:
             "grid_resizer_line_width_px": ui_settings.grid_resizer_line_width_px,
             # 屏幕设置
             "target_screen": ui_settings.target_screen,
-            # 默认窗口位置模板
-            "default_frame_x": ui_settings.default_frame_x,
-            "default_frame_y": ui_settings.default_frame_y,
-            "default_frame_width": ui_settings.default_frame_width,
-            "default_frame_height": ui_settings.default_frame_height,
+            # 默认窗口位置模板（按屏幕名称）
+            "default_frames_by_screen": ui_settings.default_frames_by_screen,
         }
     }
     path.write_text(

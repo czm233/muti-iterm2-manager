@@ -265,6 +265,27 @@ def get_screen_index_from_coordinates(x: float, y: float) -> int:
     return -1
 
 
+def get_screen_name_from_coordinates(x: float, y: float) -> str | None:
+    """根据坐标获取所在屏幕名称，返回 None 表示未找到
+
+    macOS 多显示器场景下，窗口 y 坐标可能为负数（在屏幕上方），
+    此时回退到仅根据 x 坐标推断屏幕。
+    """
+    screens = get_all_screens()
+    # 首先尝试精确匹配（x 和 y 都在范围内）
+    for screen in screens:
+        if (screen["x"] <= x < screen["x"] + screen["width"] and
+            screen["y"] <= y < screen["y"] + screen["height"]):
+            return screen["name"]
+
+    # 回退：仅根据 x 坐标推断（处理 y 坐标异常的情况）
+    for screen in screens:
+        if screen["x"] <= x < screen["x"] + screen["width"]:
+            return screen["name"]
+
+    return None
+
+
 def build_maximized_frame(padding: float = 18.0, screen_index: int = -1) -> TerminalFrame:
     """构建最大化窗口 frame。当 screen_index >= 0 时使用指定屏幕的边界。"""
     bounds = None

@@ -14,7 +14,7 @@ from typing import Any
 from multi_iterm2_manager.analyzer import analyze_screen_text, analyze_timeout_only, load_rules, RuleEngineConfig
 from multi_iterm2_manager.backend.mock import MockTerminalBackend
 from multi_iterm2_manager.config import Settings, save_ui_settings
-from multi_iterm2_manager.display import build_maximized_frame, get_all_screens, get_screen_index_from_coordinates, suggest_monitor_grid
+from multi_iterm2_manager.display import build_maximized_frame, get_all_screens, get_screen_index_from_coordinates, get_screen_name_from_coordinates, suggest_monitor_grid
 from multi_iterm2_manager.models import CreateTerminalParams, GridLayoutParams, TerminalFrame, TerminalRecord, TerminalStatus, new_terminal_id
 
 
@@ -325,15 +325,17 @@ class DashboardService:
 
         # 优先使用浏览器坐标计算屏幕，其次使用全局 target_screen
         screen_index = -1
+        screen_name = None
         if params.browser_x is not None and params.browser_y is not None:
             screen_index = get_screen_index_from_coordinates(params.browser_x, params.browser_y)
+            screen_name = get_screen_name_from_coordinates(params.browser_x, params.browser_y)
         if screen_index < 0:
             screen_index = self.ui_settings.target_screen
 
-        # 优先级：1. 显式传入的 frame > 2. 默认窗口模板 > 3. build_maximized_frame
+        # 优先级：1. 显式传入的 frame > 2. 默认窗口模板（按屏幕名称） > 3. build_maximized_frame
         target_frame = params.frame
         if target_frame is None:
-            default_frame = self.get_default_frame()
+            default_frame = self.get_default_frame(screen_name)
             if default_frame is not None:
                 target_frame = TerminalFrame(**default_frame)
 
@@ -407,6 +409,7 @@ class DashboardService:
             # 如果传入了浏览器坐标，根据坐标计算屏幕并移动窗口
             if browser_x is not None and browser_y is not None:
                 screen_index = get_screen_index_from_coordinates(browser_x, browser_y)
+                screen_name = get_screen_name_from_coordinates(browser_x, browser_y)
                 if screen_index >= 0:
                     from multi_iterm2_manager.display import get_screen_bounds
                     bounds = get_screen_bounds(screen_index)
@@ -417,12 +420,17 @@ class DashboardService:
                             in_screen = (bounds.x <= current_frame.x < bounds.x + bounds.width
                                          and bounds.y <= current_frame.y < bounds.y + bounds.height)
                             if not in_screen:
-                                new_frame = TerminalFrame(
-                                    x=round(bounds.x + 18.0, 2),
-                                    y=round(bounds.y + 18.0, 2),
-                                    width=current_frame.width,
-                                    height=current_frame.height,
-                                )
+                                # 优先使用用户设置的默认位置（按屏幕名称查找）
+                                default_frame = self.get_default_frame(screen_name)
+                                if default_frame is not None:
+                                    new_frame = TerminalFrame(**default_frame)
+                                else:
+                                    new_frame = TerminalFrame(
+                                        x=round(bounds.x + 18.0, 2),
+                                        y=round(bounds.y + 18.0, 2),
+                                        width=current_frame.width,
+                                        height=current_frame.height,
+                                    )
                                 await self.backend.set_frame(record.handle, new_frame)
                                 record.frame = new_frame
                         # 让其他可见终端也跟随移动到同一屏幕
@@ -707,53 +715,64 @@ class DashboardService:
 
     # ============ 默认窗口位置模板 ============
 
-    def get_default_frame(self) -> dict | None:
-        """获取默认窗口模板，若未设置返回 None"""
-        if (self.ui_settings.default_frame_x is not None and
-            self.ui_settings.default_frame_y is not None and
-            self.ui_settings.default_frame_width is not None and
-            self.ui_settings.default_frame_height is not None):
-            return {
-                "x": self.ui_settings.default_frame_x,
-                "y": self.ui_settings.default_frame_y,
-                "width": self.ui_settings.default_frame_width,
-                "height": self.ui_settings.default_frame_height,
-            }
+    def get_default_frame(self, screen_name: str | None = None) -> dict | None:
+        """获取默认窗口模板，若未设置返回 None
+
+        Args:
+            screen_name: 屏幕名称，若提供则查找该屏幕对应的默认位置
+        """
+        frames_map = self.ui_settings.default_frames_by_screen
+        if not frames_map or not isinstance(frames_map, dict):
+            return None
+        if screen_name and screen_name in frames_map:
+            return frames_map[screen_name]
         return None
 
-    async def set_default_frame(self, frame: TerminalFrame) -> dict:
-        """设置默认窗口模板并持久化"""
+    async def set_default_frame(self, frame: TerminalFrame, screen_name: str) -> dict:
+        """设置指定屏幕的默认窗口模板并持久化"""
+        frames_map = dict(self.ui_settings.default_frames_by_screen or {})
+        frames_map[screen_name] = {"x": frame.x, "y": frame.y, "width": frame.width, "height": frame.height}
+
         self.ui_settings = replace(
             self.ui_settings,
-            default_frame_x=frame.x,
-            default_frame_y=frame.y,
-            default_frame_width=frame.width,
-            default_frame_height=frame.height,
+            default_frames_by_screen=frames_map,
         )
         self.settings.ui_settings = self.ui_settings
         save_ui_settings(self.settings.ui_settings_file, self.ui_settings)
 
         payload = {
             "type": "default-frame-updated",
+            "screenName": screen_name,
             "defaultFrame": frame.to_dict(),
         }
         await self._broadcast(payload)
         return payload
 
     async def apply_default_frame_to_all(self) -> dict:
-        """将默认位置应用到所有活跃终端"""
-        default_frame = self.get_default_frame()
-        if default_frame is None:
-            raise ValueError("尚未设置默认窗口模板")
+        """根据每个终端所在的屏幕，应用对应的默认位置"""
+        frames_map = self.ui_settings.default_frames_by_screen
+        if not frames_map:
+            raise ValueError("尚未设置任何屏幕的默认窗口模板")
 
-        frame = TerminalFrame(**default_frame)
         applied = 0
+        skipped = 0
         errors = []
 
         for record in self.records.values():
             if record.status == TerminalStatus.closed or record.hidden:
                 continue
             try:
+                current_frame = await self.backend.get_frame(record.handle)
+                if current_frame is None:
+                    skipped += 1
+                    continue
+                # 通过终端当前坐标确定所在屏幕名称
+                screen_name = get_screen_name_from_coordinates(current_frame.x, current_frame.y)
+                if not screen_name or screen_name not in frames_map:
+                    skipped += 1
+                    continue
+                frame_data = frames_map[screen_name]
+                frame = TerminalFrame(**frame_data)
                 await self.backend.set_frame(record.handle, frame)
                 record.frame = frame
                 applied += 1
@@ -761,7 +780,7 @@ class DashboardService:
                 errors.append({"terminalId": record.id, "error": str(e)})
 
         await self._broadcast(self.snapshot_event())
-        return {"applied": applied, "errors": errors, "frame": frame.to_dict()}
+        return {"applied": applied, "skipped": skipped, "errors": errors}
 
     async def apply_grid_layout(self, params: GridLayoutParams) -> dict:
         columns = max(1, params.columns)
@@ -900,6 +919,10 @@ class DashboardService:
                 record.updated_at = self._now()
                 record.is_live = False
                 await self._broadcast(self.record_event(terminal_id))
+        else:
+            # 流正常结束（非异常、非取消），说明会话已消失
+            if record.id in self.records and record.status != TerminalStatus.closed:
+                await self._mark_terminal_closed(record, reason="终端会话已结束")
 
     async def _mark_terminal_closed(self, record: TerminalRecord, reason: str | None = None) -> dict:
         record.status = TerminalStatus.closed
@@ -1057,10 +1080,22 @@ class DashboardService:
             return MockTerminalBackend()
 
     async def _watchdog_loop(self) -> None:
+        cleanup_counter = 0
         while True:
             await asyncio.sleep(5)
             alive = not hasattr(self.backend, 'is_alive') or self.backend.is_alive()
             print(f"[watchdog] iTerm2 alive={alive}, terminals={len(self.records)}", flush=True)
+            # 每 30 秒清理一次已关闭的终端记录
+            cleanup_counter += 1
+            if cleanup_counter >= 6:
+                cleanup_counter = 0
+                closed_ids = [rid for rid, r in self.records.items() if r.status == TerminalStatus.closed]
+                if closed_ids:
+                    print(f"[watchdog] 清理 {len(closed_ids)} 个已关闭的终端记录", flush=True)
+                    async with self._lock:
+                        for rid in closed_ids:
+                            self.records.pop(rid, None)
+                    await self._broadcast(self.snapshot_event())
             if alive:
                 continue
             active = [r for r in self.records.values() if r.status != TerminalStatus.closed]

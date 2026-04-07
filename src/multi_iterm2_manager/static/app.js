@@ -3,8 +3,6 @@ const state = {
   orderedTerminalIds: [],
   views: new Map(),
   layout: { count: 0, columns: 1, rows: 1 },
-  layoutMode: 2,                    // 持久化的布局列数（1=纵向, 2=两列, Infinity=横向）
-  nextLayoutMode: null,
   nextFitMode: false,
   gridTrackRatios: {},
   layoutTree: null,
@@ -44,7 +42,6 @@ function saveViewState() {
       layoutTree: state.layoutTree,
       hiddenTerminalIds: [...state.hiddenTerminalIds],
       mutedTerminalIds: [...state.mutedTerminalIds],
-      layoutMode: state.layoutMode === Infinity ? "horizontal" : state.layoutMode,
       selectedTag: state.selectedTag,
     };
     window.localStorage.setItem(VIEW_STATE_STORAGE_KEY, JSON.stringify(payload));
@@ -73,9 +70,6 @@ function loadViewState() {
     }
     if (Array.isArray(payload.mutedTerminalIds)) {
       state.mutedTerminalIds = new Set(payload.mutedTerminalIds);
-    }
-    if (payload.layoutMode != null) {
-      state.layoutMode = payload.layoutMode === "horizontal" ? Infinity : Number(payload.layoutMode);
     }
     if (payload.selectedTag) {
       state.selectedTag = payload.selectedTag;
@@ -138,9 +132,6 @@ const createDemoButton = document.getElementById("create-demo");
 const monitorModeButton = document.getElementById("monitor-mode");
 const refreshAllButton = document.getElementById("refresh-all");
 const closeAllButton = document.getElementById("close-all");
-const layoutVerticalBtn = document.getElementById("layout-vertical");
-const layoutHorizontalBtn = document.getElementById("layout-horizontal");
-const layoutTwoColBtn = document.getElementById("layout-two-col");
 const wallControls = document.getElementById("wall-controls");
 const wsStatus = document.getElementById("ws-status");
 const buildVersion = document.getElementById("build-version");
@@ -477,7 +468,7 @@ function mergeVisibleIds(nextVisibleIds, visibleIds) {
   state.orderedTerminalIds = nextOrderedIds;
 }
 
-function buildInitialLayoutTree(terminals, columns = Math.max(1, state.layout.columns || state.nextLayoutMode || 2)) {
+function buildInitialLayoutTree(terminals, columns = Math.max(1, state.layout.columns || 2)) {
   const items = terminals.filter((record) => record.status !== "closed");
   if (items.length === 0) return null;
   const normalizedColumns = Math.max(1, Math.min(columns, items.length));
@@ -1113,9 +1104,8 @@ function updateTerminalSnapshot(record, mount) {
 function inferLayout(terminals) {
   const count = terminals.filter((record) => record.status !== "closed").length;
   if (count <= 0) return { count: 0, columns: 1, rows: 1, fitMode: false };
-  const mode = state.nextLayoutMode ?? state.layoutMode ?? 2;
-  // mode === Infinity 表示横向布局，columns = count
-  const columns = mode === Infinity ? count : Math.max(1, Math.min(mode, count));
+  // 默认两列布局
+  const columns = Math.max(1, Math.min(2, count));
   const fitMode = Boolean(state.nextFitMode && count === 4 && columns === 2);
   return { count, columns, rows: Math.max(1, Math.ceil(count / columns)), fitMode };
 }
@@ -1137,7 +1127,6 @@ function applyLayout(_layoutFromServer = null) {
   } else {
     applyGridTrackStyles();
   }
-  state.nextLayoutMode = null;
   state.nextFitMode = false;
 }
 
@@ -2099,11 +2088,6 @@ function renderToolbarExtras(pageInfo) {
       <button id="reset-grid" class="ghost">重置网格比例</button>
     </div>
     <div class="wall-control-actions">
-      <button data-layout="1" class="secondary">每行 1 个</button>
-      <button data-layout="2" class="secondary">每行 2 个</button>
-      <button id="toggle-fit-mode" class="secondary">四终端铺满</button>
-    </div>
-    <div class="wall-control-actions">
       <button id="prev-page" class="ghost" ${shouldPaginateCurrentFilter() ? "" : "disabled"}>上一页</button>
       <button id="next-page" class="ghost" ${shouldPaginateCurrentFilter() ? "" : "disabled"}>下一页</button>
       <button id="focus-attention" class="secondary">接管下一个待处理</button>
@@ -2117,22 +2101,6 @@ function renderToolbarExtras(pageInfo) {
     state.layoutTree = null;
     clearSplitDropPreview();
     saveViewState();
-    refreshWall();
-  };
-
-  wallControls.querySelectorAll("[data-layout]").forEach((button) => {
-    button.onclick = () => {
-      state.layoutTree = null;
-      state.nextLayoutMode = Number(button.dataset.layout || 2);
-      state.nextFitMode = false;
-      refreshWall();
-    };
-  });
-
-  wallControls.querySelector("#toggle-fit-mode").onclick = () => {
-    state.layoutTree = null;
-    state.nextLayoutMode = 2;
-    state.nextFitMode = true;
     refreshWall();
   };
 
@@ -2535,37 +2503,6 @@ createDemoButton.onclick = async () => {
   } catch (error) {
     setMessage(error.message, true);
   }
-};
-
-document.getElementById("quick-layout-horizontal").onclick = () => {
-  layoutHorizontalBtn.click();
-};
-
-layoutVerticalBtn.onclick = () => {
-  state.layoutTree = null;
-  state.layoutMode = 1;
-  state.nextLayoutMode = 1;
-  state.nextFitMode = false;
-  refreshWall();
-  saveViewState();
-};
-
-layoutHorizontalBtn.onclick = () => {
-  state.layoutTree = null;
-  state.layoutMode = Infinity;
-  state.nextLayoutMode = Infinity;
-  state.nextFitMode = false;
-  refreshWall();
-  saveViewState();
-};
-
-layoutTwoColBtn.onclick = () => {
-  state.layoutTree = null;
-  state.layoutMode = 2;
-  state.nextLayoutMode = 2;
-  state.nextFitMode = false;
-  refreshWall();
-  saveViewState();
 };
 
 monitorModeButton.onclick = async () => {

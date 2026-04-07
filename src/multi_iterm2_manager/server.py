@@ -68,6 +68,7 @@ class DefaultFramePayload(BaseModel):
     y: float
     width: float = Field(gt=100)
     height: float = Field(gt=100)
+    screen_name: str | None = None
 
 
 class CreateTerminalPayload(BaseModel):
@@ -432,18 +433,30 @@ async def layout_grid(payload: GridLayoutPayload) -> dict:
 
 
 @app.get("/api/default-frame")
-async def get_default_frame() -> dict:
-    """获取默认窗口模板，若未设置则返回 null"""
-    return {"defaultFrame": service.get_default_frame()}
+async def get_default_frame(screen_name: str | None = None) -> dict:
+    """获取默认窗口模板，若未设置则返回 null。可传入 screen_name 查找特定屏幕的默认位置"""
+    return {
+        "defaultFrame": service.get_default_frame(screen_name),
+        "allFrames": service.ui_settings.default_frames_by_screen,
+    }
 
 
 @app.put("/api/default-frame")
 async def set_default_frame(payload: DefaultFramePayload) -> dict:
-    """设置默认窗口模板"""
+    """设置默认窗口模板（按屏幕名称存储）。未传 screen_name 时自动从坐标检测。"""
     try:
+        screen_name = payload.screen_name
+        if not screen_name:
+            from multi_iterm2_manager.display import get_screen_name_from_coordinates
+            screen_name = get_screen_name_from_coordinates(payload.x, payload.y)
+        if not screen_name:
+            raise ValueError("无法确定当前屏幕，请确保窗口在有效屏幕范围内")
         return await service.set_default_frame(
-            TerminalFrame(x=payload.x, y=payload.y, width=payload.width, height=payload.height)
+            TerminalFrame(x=payload.x, y=payload.y, width=payload.width, height=payload.height),
+            screen_name=screen_name,
         )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
