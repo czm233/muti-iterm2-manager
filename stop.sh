@@ -9,15 +9,31 @@ FULL_CLEANUP_FLAG="$ROOT_DIR/.run/full-cleanup"
 
 cd "$ROOT_DIR"
 
-# 完整停止：删除安全标志 + 创建 full-cleanup 标志，让 shutdown 执行完整清理
-rm -f "$SAFE_FLAG"
-mkdir -p "$ROOT_DIR/.run"
-touch "$FULL_CLEANUP_FLAG"
+# 检查是否需要清理终端（只有明确传入 --cleanup 参数才清理）
+DO_CLEANUP=false
+if [[ "${1:-}" == "--cleanup" ]]; then
+  DO_CLEANUP=true
+  echo "⚠️  将执行完整清理，关闭受管终端..."
+else
+  echo "停止服务（保留 iTerm2 终端窗口，如需清理请使用 ./stop.sh --cleanup）"
+fi
 
 if [[ -f "$PID_FILE" ]]; then
   pid="$(cat "$PID_FILE" 2>/dev/null || true)"
   if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-    echo "停止服务进程 $pid（将执行完整清理，关闭受管终端）。"
+    if [[ "$DO_CLEANUP" == "true" ]]; then
+      # 完整停止：创建 full-cleanup 标志
+      rm -f "$SAFE_FLAG"
+      mkdir -p "$ROOT_DIR/.run"
+      touch "$FULL_CLEANUP_FLAG"
+      echo "停止服务进程 $pid（将执行完整清理）。"
+    else
+      # 安全停止：创建 safe-restart 标志，不清理终端
+      mkdir -p "$ROOT_DIR/.run"
+      touch "$SAFE_FLAG"
+      rm -f "$FULL_CLEANUP_FLAG"
+      echo "停止服务进程 $pid（安全停止，不关闭终端）。"
+    fi
     kill "$pid" 2>/dev/null || true
     sleep 2
     if kill -0 "$pid" 2>/dev/null; then
@@ -31,7 +47,8 @@ fi
 lsof -ti :8765 | xargs kill 2>/dev/null || true
 sleep 1
 
-if [[ -d .venv ]]; then
+# 只有明确要求清理时才执行清理脚本
+if [[ "$DO_CLEANUP" == "true" ]] && [[ -d .venv ]]; then
   source .venv/bin/activate
   python - <<'PY'
 import asyncio
