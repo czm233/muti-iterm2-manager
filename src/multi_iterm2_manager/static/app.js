@@ -1740,7 +1740,6 @@ function bindCardActions(card, record) {
   if (applyDefaultFrameAllBtn) {
     applyDefaultFrameAllBtn.onclick = async (event) => {
       event.stopPropagation();
-      if (!confirm("确定将所有终端移动到默认位置吗？")) return;
       try {
         const result = await request("/api/default-frame/apply-all", { method: "POST" });
         setMessage(`已将 ${result.applied} 个终端对齐到默认位置`);
