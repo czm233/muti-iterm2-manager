@@ -67,7 +67,8 @@ def _get_display_name_via_coredisplay(display_id: int) -> str | None:
         info = objc.objc_object(c_void_p=ctypes.c_void_p(info_ptr))
         names = info.get("DisplayProductName", {})
         if names:
-            return names.get("en_US") or list(names.values())[0]
+            name = names.get("en_US") or list(names.values())[0]
+            return str(name)
     except Exception:
         pass
     return None
@@ -169,7 +170,7 @@ def get_all_screens() -> list[dict]:
                         if desc.get("NSScreenNumber") and int(desc["NSScreenNumber"]) == did:
                             localized = s.localizedName()
                             if localized:
-                                name = localized
+                                name = str(localized)
                             break
                 except Exception:
                     pass
@@ -219,7 +220,7 @@ def _get_all_screens_appkit() -> list[dict]:
         try:
             localized = screen.localizedName()
             if localized:
-                name = localized
+                name = str(localized)
         except Exception:
             pass
         result.append({
