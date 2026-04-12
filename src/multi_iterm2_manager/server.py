@@ -27,16 +27,21 @@ from multi_iterm2_manager.models import (
     TerminalLayout,
 )
 from multi_iterm2_manager.service import DashboardService
+from multi_iterm2_manager.app_monitor.routes import router as app_monitor_router, set_service
 
 
 class CachedStaticFiles(StaticFiles):
-    """对静态资源响应添加 Cache-Control 头"""
+    """对静态资源响应添加 Cache-Control 头（开发模式下不缓存 JS/CSS）"""
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         async def _send_with_cache(message: dict) -> None:
             if message["type"] == "http.response.start":
                 headers = list(message.get("headers", []))
-                headers.append((b"cache-control", b"max-age=86400"))
+                path = scope.get("path", "")
+                if path.endswith((".js", ".css", ".html")):
+                    headers.append((b"cache-control", b"no-cache, no-store, must-revalidate"))
+                else:
+                    headers.append((b"cache-control", b"max-age=86400"))
                 message["headers"] = headers
             await send(message)
 
@@ -54,6 +59,8 @@ settings = load_settings()
 service = DashboardService(settings)
 app = FastAPI(title="多 iTerm2 管理器", version=__version__)
 app.mount("/assets", CachedStaticFiles(directory=service.static_dir()), name="assets")
+set_service(service.app_monitor)
+app.include_router(app_monitor_router)
 
 
 class FramePayload(BaseModel):

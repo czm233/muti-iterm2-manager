@@ -16,6 +16,7 @@ from multi_iterm2_manager.backend.mock import MockTerminalBackend
 from multi_iterm2_manager.config import Settings, save_ui_settings
 from multi_iterm2_manager.display import build_maximized_frame, get_all_screens, get_screen_index_from_coordinates, get_screen_name_from_coordinates, suggest_monitor_grid
 from multi_iterm2_manager.models import CreateTerminalParams, GridLayoutParams, TerminalFrame, TerminalRecord, TerminalStatus, new_terminal_id
+from multi_iterm2_manager.app_monitor import AppMonitorService
 
 
 class DashboardService:
@@ -40,6 +41,8 @@ class DashboardService:
             psutil.cpu_percent()
         except ImportError:
             pass
+        # App 监控服务
+        self.app_monitor = AppMonitorService(broadcast_fn=self._broadcast)
 
     async def start(self) -> None:
         await self.backend.start()
@@ -80,8 +83,12 @@ class DashboardService:
                 await self.backend.start_focus_monitor()
             except Exception as exc:
                 print(f"[service] 焦点监控启动失败（不影响核心功能）: {exc}", flush=True)
+        # 启动 App 监控服务
+        await self.app_monitor.start()
 
     async def stop(self) -> None:
+        # 停止 App 监控服务
+        await self.app_monitor.stop()
         if self._watchdog_task is not None:
             self._watchdog_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -802,6 +809,7 @@ class DashboardService:
             "terminals": self.list_terminals(),
             "layout": self.monitor_layout(),
             "allTags": self.list_all_tags(),
+            "appMonitors": self.app_monitor.list_monitors(),
         }
 
     def record_event(self, terminal_id: str) -> dict:

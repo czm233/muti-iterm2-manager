@@ -104,6 +104,7 @@
             <div class="topbar-shortcuts">
               <button id="quick-create" class="shortcut-btn" title="创建新终端">新建</button>
               <button id="quick-adopt-all" class="shortcut-btn" title="扫描并接管所有 iTerm2 终端">一键接管</button>
+              <button id="app-monitor-btn" class="shortcut-btn" title="监控任意 App 窗口">App监控</button>
             </div>
 
             <div id="topbar-queue" class="topbar-queue"></div>
@@ -125,10 +126,27 @@
 
         <section class="monitor-stage">
           <main id="grid" class="monitor-wall"></main>
+          <div id="app-monitor-wall" class="app-monitor-wall"></div>
         </section>
       </div>
     </div>
 
+    <link rel="stylesheet" href="/assets/app-monitor.css" />
+
+    <dialog id="app-monitor-dialog" class="app-monitor-dialog">
+      <div class="app-monitor-dialog-header">
+        <h2>选择要监控的窗口</h2>
+        <button type="button" class="ghost" id="app-monitor-dialog-close">&times;</button>
+      </div>
+      <div class="app-monitor-dialog-body">
+        <div id="app-monitor-window-list" class="app-monitor-window-list"></div>
+        <div class="app-monitor-dialog-footer">
+          <label class="app-monitor-interval-label">
+            截图间隔：<input id="app-screenshot-interval" type="number" min="0.5" max="30" step="0.5" value="2" /> 秒
+          </label>
+        </div>
+      </div>
+    </dialog>
     <script src="/assets/vendor/xterm/xterm.min.js"></script>
     <script type="module" src="/assets/app.js"></script>
   </body>

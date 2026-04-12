@@ -30,6 +30,8 @@ const state = {
   queueDismissed: new Map(),       // 用户手动移除的终端: Map<id, status> — 状态变化后自动清除
   allTags: [],                     // 全局标签列表，从后端同步
   selectedTag: null,               // 当前选中的标签筛选
+  appMonitors: new Map(),          // App 监控数据: Map<appId, monitor>
+  orderedAppMonitorIds: [],        // App 监控有序 ID 列表
 };
 
 const VIEW_STATE_STORAGE_KEY = "mitm-monitor-view-state";
@@ -2228,11 +2230,12 @@ function refreshWall(layout = null) {
   applyLayout(layout);
   const pageInfo = getPagedTerminals();
   grid.innerHTML = "";
-  if (pageInfo.items.length === 0) {
+  let treeElement = null;
+  if (pageInfo.items.length === 0 && state.orderedAppMonitorIds.length === 0) {
     renderEmptyState();
   } else if (state.layoutTree && state.filter === "default") {
     syncLayoutTree();
-    const treeElement = renderLayoutNode(state.layoutTree, new Set(pageInfo.items.map((record) => record.id)));
+    treeElement = renderLayoutNode(state.layoutTree, new Set(pageInfo.items.map((record) => record.id)));
     if (treeElement) {
       grid.appendChild(treeElement);
     } else {
@@ -2243,6 +2246,15 @@ function refreshWall(layout = null) {
       grid.appendChild(renderTerminal(record));
     }
     renderGridResizers();
+  }
+  // App 监控卡片渲染到独立容器（不参与终端 grid 布局）
+  const appWall = document.getElementById("app-monitor-wall");
+  appWall.innerHTML = "";
+  for (const appId of state.orderedAppMonitorIds) {
+    const monitor = state.appMonitors.get(appId);
+    if (monitor) {
+      appWall.appendChild(renderAppCard(monitor));
+    }
   }
   renderToolbarExtras(pageInfo);
   syncFilterTabs();
@@ -2289,6 +2301,314 @@ function applySnapshot(terminals, layout = null, allTags = null) {
   }
   refreshWall(layout);
   if (window._refreshCaptureTerminalList) window._refreshCaptureTerminalList();
+}
+
+/** 处理 App 监控全量快照（从 snapshot 事件的 appMonitors 字段） */
+function applyAppMonitorSnapshot(monitors) {
+  state.appMonitors.clear();
+  state.orderedAppMonitorIds = [];
+  const items = Array.isArray(monitors) ? monitors : [];
+  for (const m of items) {
+    state.appMonitors.set(m.id, m);
+    state.orderedAppMonitorIds.push(m.id);
+  }
+}
+
+/* ---- App 监控 ---- */
+
+/** 打开 App 监控弹窗，加载可用窗口列表 */
+async function openAppMonitorDialog() {
+  const dialog = document.getElementById("app-monitor-dialog");
+  if (!dialog) return;
+  dialog.showModal();
+  const listEl = document.getElementById("app-monitor-window-list");
+  listEl.innerHTML = '<div style="color:var(--muted);font-size:0.84rem;padding:8px 0;">加载中...</div>';
+  try {
+    const data = await request("/api/app-monitor/windows");
+    const windows = dedupeAppMonitorWindows(data.items || []);
+    if (windows.length === 0) {
+      listEl.innerHTML = '<div style="color:var(--muted);font-size:0.84rem;padding:8px 0;">未发现可监控的窗口</div>';
+      return;
+    }
+    const monitoredMap = new Map(
+      [...state.appMonitors.values()].map(m => [getAppMonitorLogicalKey(m), m.id])
+    );
+    listEl.innerHTML = windows.map((w) => {
+      const appId = monitoredMap.get(getAppMonitorLogicalKey(w));
+      const isMonitored = !!appId;
+      return `
+        <div class="app-monitor-window-item${isMonitored ? " is-monitored" : ""}"
+             data-pid="${w.pid}" data-window-number="${w.windowNumber}"
+             data-app-name="${escapeHtml(w.appName || "")}" data-window-title="${escapeHtml(w.windowTitle || "")}"
+             data-bundle-id="${escapeHtml(w.bundleId || "")}" data-owner-name="${escapeHtml(w.ownerName || "")}"
+             data-app-id="${appId || ""}">
+          <span class="app-monitor-window-name">${escapeHtml(w.appName || w.bundleId || "未知")}</span>
+          <span class="app-monitor-window-title">${escapeHtml(w.windowTitle || "")}</span>
+          ${isMonitored
+            ? '<button class="app-monitor-remove-list-btn">取消监控</button>'
+            : '<button class="secondary app-monitor-add-btn">添加监控</button>'}
+        </div>`;
+    }).join("");
+  } catch (error) {
+    listEl.innerHTML = `<div style="color:var(--error);font-size:0.84rem;padding:8px 0;">加载失败：${escapeHtml(error.message)}</div>`;
+  }
+}
+
+// 事件委托：处理窗口列表的添加/取消按钮点击
+document.getElementById("app-monitor-window-list").addEventListener("click", async (e) => {
+  const addBtn = e.target.closest(".app-monitor-add-btn");
+  const removeBtn = e.target.closest(".app-monitor-remove-list-btn");
+  const item = e.target.closest(".app-monitor-window-item");
+  if (!item) return;
+
+  if (addBtn) {
+    addBtn.disabled = true;
+    addBtn.textContent = "添加中...";
+    try {
+      await addAppMonitor({
+        pid: Number(item.dataset.pid),
+        windowNumber: Number(item.dataset.windowNumber),
+        appName: item.dataset.appName,
+        windowTitle: item.dataset.windowTitle,
+        bundleId: item.dataset.bundleId,
+        ownerName: item.dataset.ownerName,
+      });
+      // 切换为取消按钮
+      const newBtn = document.createElement("button");
+      newBtn.className = "app-monitor-remove-list-btn";
+      newBtn.textContent = "取消监控";
+      const added = [...state.appMonitors.values()].find((m) => (
+        getAppMonitorLogicalKey(m) === getAppMonitorLogicalKey({
+          pid: Number(item.dataset.pid),
+          bundleId: item.dataset.bundleId,
+          ownerName: item.dataset.ownerName,
+          appName: item.dataset.appName,
+          windowTitle: item.dataset.windowTitle,
+        })
+      ));
+      if (added) newBtn.dataset.appId = added.id;
+      item.dataset.appId = added ? added.id : "";
+      item.classList.add("is-monitored");
+      addBtn.replaceWith(newBtn);
+    } catch (error) {
+      addBtn.disabled = false;
+      addBtn.textContent = "添加监控";
+      setMessage(error.message, true);
+    }
+    return;
+  }
+
+  if (removeBtn) {
+    removeBtn.disabled = true;
+    removeBtn.textContent = "移除中...";
+    const appId = item.dataset.appId;
+    const ok = await removeAppMonitor(appId);
+    if (ok) {
+      // 切换为添加按钮
+      const newBtn = document.createElement("button");
+      newBtn.className = "secondary app-monitor-add-btn";
+      newBtn.textContent = "添加监控";
+      removeBtn.replaceWith(newBtn);
+      item.classList.remove("is-monitored");
+      item.dataset.appId = "";
+    } else {
+      removeBtn.disabled = false;
+      removeBtn.textContent = "取消监控";
+    }
+  }
+});
+
+/** 关闭 App 监控弹窗 */
+function closeAppMonitorDialog() {
+  const dialog = document.getElementById("app-monitor-dialog");
+  if (dialog) dialog.close();
+}
+
+/** 添加 App 监控 */
+async function addAppMonitor(windowInfo) {
+  // 前端去重：同一逻辑窗口（同一进程同一标题）不重复添加
+  const logicalKey = getAppMonitorLogicalKey(windowInfo);
+  const dup = [...state.appMonitors.values()].find(
+    (m) => getAppMonitorLogicalKey(m) === logicalKey
+  );
+  if (dup) {
+    setMessage(`${windowInfo.appName} 已在监控列表中`);
+    return;
+  }
+  const res = await request("/api/app-monitor/monitors", {
+    method: "POST",
+    body: JSON.stringify(windowInfo),
+  });
+  if (res.item) {
+    state.appMonitors.set(res.item.id, res.item);
+    if (!state.orderedAppMonitorIds.includes(res.item.id)) {
+      state.orderedAppMonitorIds.push(res.item.id);
+    }
+    refreshWall();
+    setMessage(`已添加监控：${res.item.appName}`);
+  }
+}
+
+/** 移除 App 监控 */
+async function removeAppMonitor(appId) {
+  try {
+    await request(`/api/app-monitor/monitors/${appId}`, { method: "DELETE" });
+    state.appMonitors.delete(appId);
+    state.orderedAppMonitorIds = state.orderedAppMonitorIds.filter((id) => id !== appId);
+    refreshWall();
+    setMessage("已移除 App 监控");
+    return true;
+  } catch (error) {
+    setMessage(`移除失败：${error.message}`, true);
+    return false;
+  }
+}
+
+/** 唤醒（聚焦）App 窗口 */
+async function focusApp(appId) {
+  await request(`/api/app-monitor/monitors/${appId}/focus`, { method: "POST" });
+  setMessage("已唤醒 App 窗口");
+}
+
+/** 渲染 App 监控卡片 */
+function renderAppCard(monitor) {
+  let card = document.getElementById(`app-card-${monitor.id}`);
+  if (card) {
+    updateAppCard(monitor);
+    return card;
+  }
+
+  card = document.createElement("section");
+  card.id = `app-card-${monitor.id}`;
+  card.className = "wall-card app-card";
+  card.style.cssText = "width:320px;overflow:hidden;";
+  card.dataset.appId = monitor.id;
+
+  const statusClass = monitor.status === "active" ? "app-status-active"
+    : monitor.status === "error" ? "app-status-error"
+    : "app-status-gone";
+
+  card.innerHTML = `
+    <div class="wall-card-header">
+      <div class="wall-card-title-row">
+        <h2 class="wall-card-title">${escapeHtml(monitor.appName || monitor.bundleId || "App")}</h2>
+        <span class="app-monitor-status-badge ${statusClass}">${monitor.status === "active" ? "活跃" : monitor.status === "error" ? "异常" : "已退出"}</span>
+        <button type="button" class="app-card-remove-btn" title="移除监控">✕</button>
+      </div>
+      <div class="app-card-subtitle">${escapeHtml(monitor.windowTitle || "")}</div>
+    </div>
+    <div class="app-card-screenshot-area">
+      <img class="app-card-screenshot" alt="" />
+      <div class="app-card-focus-overlay">
+        <span>点击唤醒</span>
+      </div>
+    </div>
+    ${monitor.lastError ? `<div class="wall-card-error">错误：${escapeHtml(monitor.lastError)}</div>` : ""}
+  `;
+
+  // 更新截图
+  if (monitor.screenshotB64) {
+    const img = card.querySelector(".app-card-screenshot");
+    img.src = `data:image/jpeg;base64,${monitor.screenshotB64}`;
+  }
+
+  // 点击截图区域唤醒 App
+  const screenshotArea = card.querySelector(".app-card-screenshot-area");
+  screenshotArea.onclick = async (event) => {
+    event.stopPropagation();
+    document.querySelectorAll(".topbar-menu[open]").forEach((d) => d.removeAttribute("open"));
+    try {
+      await focusApp(monitor.id);
+    } catch (error) {
+      setMessage(error.message, true);
+    }
+  };
+
+  // 移除按钮
+  const removeBtn = card.querySelector(".app-card-remove-btn");
+  removeBtn.onclick = async (event) => {
+    event.stopPropagation();
+    try {
+      await removeAppMonitor(monitor.id);
+    } catch (error) {
+      setMessage(error.message, true);
+    }
+  };
+
+  return card;
+}
+
+/** 增量更新 App 卡片（截图 + 状态） */
+function updateAppCard(monitor) {
+  const card = document.getElementById(`app-card-${monitor.id}`);
+  if (!card) return;
+
+  // 更新状态 badge
+  const badge = card.querySelector(".app-monitor-status-badge");
+  if (badge) {
+    const statusClass = monitor.status === "active" ? "app-status-active"
+      : monitor.status === "error" ? "app-status-error"
+      : "app-status-gone";
+    badge.className = `app-monitor-status-badge ${statusClass}`;
+    badge.textContent = monitor.status === "active" ? "活跃" : monitor.status === "error" ? "异常" : "已退出";
+  }
+
+  // 更新错误信息
+  const errorEl = card.querySelector(".wall-card-error");
+  if (monitor.lastError) {
+    if (errorEl) {
+      errorEl.textContent = `错误：${monitor.lastError}`;
+      errorEl.hidden = false;
+    }
+  } else if (errorEl) {
+    errorEl.hidden = true;
+  }
+
+  // 更新截图（带淡入效果）
+  if (monitor.screenshotB64) {
+    const img = card.querySelector(".app-card-screenshot");
+    if (img) {
+      const newSrc = `data:image/jpeg;base64,${monitor.screenshotB64}`;
+      if (img.src !== newSrc) {
+        img.style.opacity = "0";
+        // 使用 onload 确保图片加载完成后再淡入
+        img.onload = () => { img.style.opacity = "1"; };
+        img.src = newSrc;
+      }
+    }
+  }
+}
+
+function getAppMonitorLogicalKey(item) {
+  const pid = Number(item?.pid || 0);
+  const scope = String(item?.bundleId || item?.ownerName || item?.appName || "").trim().toLowerCase();
+  const title = String(item?.windowTitle || "").trim();
+  return `${pid}::${scope}::${title}`;
+}
+
+function getAppMonitorFrameArea(frame) {
+  if (!frame || typeof frame !== "object") {
+    return 0;
+  }
+  return Number(frame.width || 0) * Number(frame.height || 0);
+}
+
+function dedupeAppMonitorWindows(windows) {
+  const grouped = new Map();
+  const order = [];
+  for (const item of Array.isArray(windows) ? windows : []) {
+    const key = getAppMonitorLogicalKey(item);
+    const existing = grouped.get(key);
+    if (!existing) {
+      grouped.set(key, item);
+      order.push(key);
+      continue;
+    }
+    if (getAppMonitorFrameArea(item.frame) > getAppMonitorFrameArea(existing.frame)) {
+      grouped.set(key, item);
+    }
+  }
+  return order.map((key) => grouped.get(key)).filter(Boolean);
 }
 
 async function loadUiSettings() {
@@ -2364,6 +2684,10 @@ function connectWebSocket() {
   socket.onmessage = (event) => {
     const payload = JSON.parse(event.data);
     if (payload.type === "snapshot") {
+      // 先恢复 App 监控状态，再调用 applySnapshot（内部会调用 refreshWall）
+      if (payload.appMonitors) {
+        applyAppMonitorSnapshot(payload.appMonitors);
+      }
       applySnapshot(payload.terminals || [], payload.layout || null, payload.allTags || null);
       return;
     }
@@ -2421,6 +2745,33 @@ function connectWebSocket() {
       }
       state._needFullRefresh = true;
       scheduleRender();
+    }
+    // App 监控增量事件：只更新对应的监控卡片，不触发全量渲染
+    if (payload.type === "app-monitor-updated" && payload.monitor) {
+      state.appMonitors.set(payload.monitor.id, payload.monitor);
+      if (!state.orderedAppMonitorIds.includes(payload.monitor.id)) {
+        state.orderedAppMonitorIds.push(payload.monitor.id);
+        // 新增的监控卡片需要全量渲染以插入 DOM
+        state._needFullRefresh = true;
+        scheduleRender();
+      } else {
+        // 已有的监控卡片，增量更新截图和状态
+        updateAppCard(payload.monitor);
+      }
+      return;
+    }
+    if (payload.type === "app-monitor-removed") {
+      state.appMonitors.delete(payload.appId);
+      state.orderedAppMonitorIds = state.orderedAppMonitorIds.filter(id => id !== payload.appId);
+      // 移除对应的 DOM 卡片，不触发全量渲染
+      const card = document.getElementById(`app-card-${payload.appId}`);
+      if (card) card.remove();
+      // 如果监控墙已空，显示空状态
+      const appWall = document.getElementById("app-monitor-wall");
+      if (appWall && appWall.children.length === 0 && state.orderedAppMonitorIds.length === 0) {
+        refreshWall();
+      }
+      return;
     }
   };
   socket.onerror = () => {
@@ -2493,6 +2844,13 @@ document.getElementById("quick-adopt-all").onclick = async () => {
     btn.disabled = false;
     btn.textContent = "一键接管";
   }
+};
+
+// 顶部栏 App 监控按钮
+document.getElementById("app-monitor-btn").onclick = () => openAppMonitorDialog();
+document.getElementById("app-monitor-dialog-close").onclick = () => closeAppMonitorDialog();
+document.getElementById("app-monitor-dialog").onclick = (e) => {
+  if (e.target === e.currentTarget) closeAppMonitorDialog();
 };
 
 createDemoButton.onclick = async () => {

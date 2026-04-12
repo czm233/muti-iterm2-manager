@@ -1,0 +1,98 @@
+/* App 监控卡片 - 独立 CSS 文件，避免旧浏览器缓存问题 */
+#app-monitor-wall:not(:empty) {
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  flex-shrink: 0;
+  gap: 8px;
+  padding: 8px;
+  overflow-x: auto;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(0, 0, 0, 0.3);
+}
+/* 覆盖 styles.css 中 .wall-card 和 .app-monitor-wall .wall-card.app-card 的样式 */
+.wall-card.app-card {
+  flex-shrink: 0;
+  width: 320px;
+  height: auto !important;
+  min-height: 0 !important;
+  display: block !important;
+  overflow: hidden;
+}
+.app-card-screenshot-area {
+  background: #000;
+  cursor: pointer;
+  position: relative;
+}
+.app-card-screenshot {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+.app-card-focus-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.4);
+  opacity: 0;
+  transition: opacity 0.15s;
+  pointer-events: none;
+  color: white;
+  font-size: 0.85rem;
+  font-weight: 500;
+}
+.app-card-screenshot-area:hover .app-card-focus-overlay {
+  opacity: 1;
+}
+.app-card .wall-card-header {
+  padding: 6px 10px;
+}
+.app-card .app-card-subtitle {
+  font-size: 0.7rem;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 2px;
+}
+.app-monitor-status-badge {
+  font-size: 0.6rem;
+  padding: 1px 6px;
+  border-radius: 8px;
+  flex-shrink: 0;
+}
+.app-monitor-status-badge.app-status-active {
+  background: rgba(0, 200, 83, 0.15);
+  color: #00c853;
+}
+.app-monitor-status-badge.app-status-error {
+  background: rgba(255, 82, 82, 0.15);
+  color: #ff5252;
+}
+.app-monitor-status-badge.app-status-gone {
+  background: rgba(158, 158, 158, 0.15);
+  color: #9e9e9e;
+}
+.app-card .app-card-remove-btn {
+  font-size: 0.9rem;
+  padding: 0 6px;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition: color 0.15s;
+  opacity: 0.5;
+  flex-shrink: 0;
+}
+.app-card .app-card-remove-btn:hover {
+  color: #ff5252;
+  opacity: 1;
+}
+.app-card .wall-card-error {
+  padding: 6px 10px;
+  font-size: 0.7rem;
+  color: #ff5252;
+  background: rgba(255, 82, 82, 0.05);
+}
