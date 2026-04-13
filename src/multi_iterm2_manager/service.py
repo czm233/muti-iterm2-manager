@@ -327,17 +327,37 @@ class DashboardService:
         self.settings.ui_settings = self.ui_settings
         save_ui_settings(self.settings.ui_settings_file, self.ui_settings)
 
+    def _resolve_preferred_screen(
+        self,
+        browser_x: float | None = None,
+        browser_y: float | None = None,
+    ) -> tuple[int, str | None]:
+        """解析当前应优先使用的屏幕。
+
+        规则：
+        1. 用户显式设置了 `target_screen` 时，始终优先该屏幕。
+        2. 仅当未设置目标屏幕时，才回退到浏览器坐标推断。
+        """
+        screens = self.get_screens()
+        target_index = self.ui_settings.target_screen
+        if 0 <= target_index < len(screens):
+            screen = screens[target_index]
+            return target_index, screen.get("name")
+
+        if browser_x is not None and browser_y is not None:
+            screen_index = get_screen_index_from_coordinates(browser_x, browser_y)
+            screen_name = get_screen_name_from_coordinates(browser_x, browser_y)
+            return screen_index, screen_name
+
+        return -1, None
+
     async def create_terminal(self, params: CreateTerminalParams) -> dict:
         final_name = (params.name or '').strip() or self._next_default_name()
 
-        # 优先使用浏览器坐标计算屏幕，其次使用全局 target_screen
-        screen_index = -1
-        screen_name = None
-        if params.browser_x is not None and params.browser_y is not None:
-            screen_index = get_screen_index_from_coordinates(params.browser_x, params.browser_y)
-            screen_name = get_screen_name_from_coordinates(params.browser_x, params.browser_y)
-        if screen_index < 0:
-            screen_index = self.ui_settings.target_screen
+        screen_index, screen_name = self._resolve_preferred_screen(
+            browser_x=params.browser_x,
+            browser_y=params.browser_y,
+        )
 
         # 优先级：1. 显式传入的 frame > 2. 默认窗口模板（按屏幕名称） > 3. build_maximized_frame
         target_frame = params.frame
@@ -413,37 +433,35 @@ class DashboardService:
         record = self._get_record(terminal_id)
         try:
             await self.backend.focus(record.handle)
-            # 如果传入了浏览器坐标，根据坐标计算屏幕并移动窗口
-            if browser_x is not None and browser_y is not None:
-                screen_index = get_screen_index_from_coordinates(browser_x, browser_y)
-                screen_name = get_screen_name_from_coordinates(browser_x, browser_y)
-                if screen_index >= 0:
-                    from multi_iterm2_manager.display import get_screen_bounds
-                    bounds = get_screen_bounds(screen_index)
-                    if bounds is not None:
-                        current_frame = await self.backend.get_frame(record.handle)
-                        if current_frame is not None:
-                            # 检查窗口是否已经在当前屏幕范围内，避免覆盖用户手动移动的位置
-                            in_screen = (bounds.x <= current_frame.x < bounds.x + bounds.width
-                                         and bounds.y <= current_frame.y < bounds.y + bounds.height)
-                            if not in_screen:
-                                # 优先使用用户设置的默认位置（按屏幕名称查找）
-                                default_frame = self.get_default_frame(screen_name)
-                                if default_frame is not None:
-                                    new_frame = TerminalFrame(**default_frame)
-                                else:
-                                    new_frame = TerminalFrame(
-                                        x=round(bounds.x + 18.0, 2),
-                                        y=round(bounds.y + 18.0, 2),
-                                        width=current_frame.width,
-                                        height=current_frame.height,
-                                    )
-                                await self.backend.set_frame(record.handle, new_frame)
-                                record.frame = new_frame
-                        # 让其他可见终端也跟随移动到同一屏幕
-                        await self._move_siblings_to_screen(record, bounds)
-            else:
-                await self._move_to_target_screen(record)
+            screen_index, screen_name = self._resolve_preferred_screen(
+                browser_x=browser_x,
+                browser_y=browser_y,
+            )
+            if screen_index >= 0:
+                from multi_iterm2_manager.display import get_screen_bounds
+                bounds = get_screen_bounds(screen_index)
+                if bounds is not None:
+                    current_frame = await self.backend.get_frame(record.handle)
+                    if current_frame is not None:
+                        # 检查窗口是否已经在目标屏幕范围内，避免覆盖用户手动移动的位置
+                        in_screen = (bounds.x <= current_frame.x < bounds.x + bounds.width
+                                     and bounds.y <= current_frame.y < bounds.y + bounds.height)
+                        if not in_screen:
+                            # 优先使用用户设置的默认位置（按屏幕名称查找）
+                            default_frame = self.get_default_frame(screen_name)
+                            if default_frame is not None:
+                                new_frame = TerminalFrame(**default_frame)
+                            else:
+                                new_frame = TerminalFrame(
+                                    x=round(bounds.x + 18.0, 2),
+                                    y=round(bounds.y + 18.0, 2),
+                                    width=current_frame.width,
+                                    height=current_frame.height,
+                                )
+                            await self.backend.set_frame(record.handle, new_frame)
+                            record.frame = new_frame
+                    # 让其他可见终端也跟随移动到同一屏幕
+                    await self._move_siblings_to_screen(record, bounds)
         except Exception as exc:
             if self._is_missing_terminal_error(exc):
                 return await self._mark_terminal_closed(record, reason="真实窗口已被手动关闭")
