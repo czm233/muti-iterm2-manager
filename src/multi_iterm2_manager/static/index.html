@@ -15,16 +15,10 @@
           <div class="topbar-row topbar-row--primary">
             <div class="topbar-brand">
               <h1 class="eyebrow">Monitor Wall</h1>
-              <span id="build-version" class="status-pill">{{BUILD_VERSION}}</span>
-              <span id="ws-status" class="status-pill status-connecting">连接中</span>
-              <span id="stat-cpu" class="status-pill stat-pill" title="CPU 使用率">CPU --%</span>
-              <span id="stat-mem" class="status-pill stat-pill" title="内存使用率">MEM --%</span>
-              <span id="stat-disk" class="status-pill stat-pill" title="磁盘使用率">DISK --%</span>
-              <span id="stat-disk-free" class="status-pill stat-pill" title="磁盘剩余空间">剩余 --G</span>
             </div>
 
             <details class="topbar-menu topbar-menu--wide">
-              <summary>菜单</summary>
+              <summary class="topbar-menu-trigger topbar-menu-trigger--menu">菜单</summary>
               <div class="topbar-menu-panel">
                 <div class="panel-title">创建新任务</div>
                 <form id="create-form" class="create-form topbar-form">
@@ -102,16 +96,12 @@
 
             <span class="topbar-divider"></span>
             <div class="topbar-shortcuts">
-              <button id="quick-create" class="shortcut-btn" title="创建新终端">新建</button>
-              <button id="quick-adopt-all" class="shortcut-btn" title="扫描并接管所有 iTerm2 终端">一键接管</button>
-              <button id="app-monitor-btn" class="shortcut-btn" title="监控任意 App 窗口">App监控</button>
+              <button id="quick-create" class="shortcut-btn shortcut-btn--new" title="创建新终端">新建</button>
+              <button id="quick-adopt-all" class="shortcut-btn shortcut-btn--adopt" title="扫描并接管所有 iTerm2 终端">一键接管</button>
+              <button id="app-monitor-btn" class="shortcut-btn shortcut-btn--app-monitor shortcut-btn--emphasis" title="监控任意 App 窗口">App监控</button>
             </div>
 
-            <div id="topbar-queue" class="topbar-queue"></div>
-            <span id="message" class="topbar-message"></span>
-          </div>
-
-          <div class="topbar-row topbar-row--secondary">
+            <div id="topbar-queue" class="topbar-queue" aria-label="空闲队列"></div>
             <nav id="topbar-filters" class="topbar-filters">
               <button class="filter-tab is-active" data-filter="default">默认</button>
               <button class="filter-tab filter-tab--attention" data-filter="attention">待处理<span id="filter-attention-badge" class="filter-badge" hidden></span></button>
@@ -129,6 +119,30 @@
           <div id="app-monitor-wall" class="app-monitor-wall"></div>
         </section>
       </div>
+
+      <footer class="statusbar" aria-label="系统状态栏">
+        <div class="statusbar-inner">
+          <span id="stat-cpu" class="status-pill stat-pill status-meter" title="CPU 使用率">
+            <span class="status-meter-label">CPU --%</span>
+            <span class="status-meter-track"><span class="status-meter-fill"></span></span>
+          </span>
+          <span id="stat-mem" class="status-pill stat-pill status-meter" title="内存使用率">
+            <span class="status-meter-label">MEM --%</span>
+            <span class="status-meter-track"><span class="status-meter-fill"></span></span>
+          </span>
+          <span id="stat-disk" class="status-pill stat-pill status-meter" title="磁盘使用率">
+            <span class="status-meter-label">DISK --%</span>
+            <span class="status-meter-track"><span class="status-meter-fill"></span></span>
+          </span>
+          <span id="stat-disk-free" class="status-pill stat-pill status-meter" title="磁盘剩余空间">
+            <span class="status-meter-label">剩余 --G</span>
+            <span class="status-meter-track"><span class="status-meter-fill"></span></span>
+          </span>
+          <span id="ws-status" class="status-pill status-connecting">连接中</span>
+          <span id="message" class="topbar-message statusbar-message"></span>
+          <span id="build-version" class="status-pill">{{BUILD_VERSION}}</span>
+        </div>
+      </footer>
     </div>
 
     <link rel="stylesheet" href="/assets/app-monitor.css" />

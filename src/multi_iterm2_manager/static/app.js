@@ -35,6 +35,7 @@ const state = {
 };
 
 const VIEW_STATE_STORAGE_KEY = "mitm-monitor-view-state";
+const MUTE_BELL_ICON_SRC = "/assets/icons/bell-glow.png";
 
 function saveViewState() {
   try {
@@ -78,6 +79,29 @@ function loadViewState() {
     }
   } catch {
   }
+}
+
+function getMuteButtonTitle(isMuted) {
+  return isMuted ? "取消静默" : "静默（不进入队列）";
+}
+
+function renderMuteButtonContent(isMuted) {
+  return `
+    <span class="wall-card-mute-icon-shell${isMuted ? " is-muted" : ""}" aria-hidden="true">
+      <img src="${MUTE_BELL_ICON_SRC}" alt="" class="wall-card-mute-icon" />
+      ${isMuted ? '<span class="wall-card-mute-slash"></span>' : ""}
+    </span>
+  `;
+}
+
+function syncMuteButton(button, isMuted) {
+  if (!button) {
+    return;
+  }
+  const title = getMuteButtonTitle(isMuted);
+  button.title = title;
+  button.setAttribute("aria-label", title);
+  button.innerHTML = renderMuteButtonContent(isMuted);
 }
 
 // ── 按标签独立保存布局 ──────────────────────────────────────────────────────
@@ -233,6 +257,21 @@ function setWebSocketStatus(status, detail = "") {
   } else {
     wsStatus.textContent = detail || "WebSocket 连接中";
   }
+
+  const fillMap = {
+    connected: "100%",
+    reconnecting: "58%",
+    disconnected: "18%",
+    connecting: "36%",
+  };
+  const colorMap = {
+    connected: "#55e36f",
+    reconnecting: "#f7c948",
+    disconnected: "#ff7d7d",
+    connecting: "#68d2ff",
+  };
+  wsStatus.style.setProperty("--statusbar-fill", fillMap[status] || "0%");
+  wsStatus.style.setProperty("--statusbar-fill-color", colorMap[status] || "#68d2ff");
 }
 
 function setMessage(text, isError = false) {
@@ -1540,6 +1579,7 @@ function initQueueFromSnapshot() {
   const doneItems = [];
   for (const [id, terminal] of state.terminals) {
     if (state.hiddenTerminalIds.has(id)) continue;
+    if (state.mutedTerminalIds.has(id)) continue;
     const name = terminal.name || id;
     if (ATTENTION_STATUSES.has(terminal.status)) {
       attentionItems.push({ id, name, status: terminal.status });
@@ -1683,6 +1723,7 @@ function bindCardActions(card, record) {
       const expanded = !detailsPanel.hidden;
       detailsPanel.hidden = expanded;
       detailsToggle.classList.toggle('is-active', !expanded);
+      card.classList.toggle("has-open-details", !expanded);
     };
   }
 
@@ -1804,8 +1845,7 @@ function bindCardActions(card, record) {
         setMessage(`已取消静默 ${record.name}`);
       }
       // 更新按钮显示
-      toggleMuteBtn.textContent = nowMuted ? "🔇" : "🔔";
-      toggleMuteBtn.title = nowMuted ? "取消静默" : "静默（不进入队列）";
+      syncMuteButton(toggleMuteBtn, nowMuted);
       saveViewState();
       renderQueue();
       // 同步到后端持久化
@@ -2013,7 +2053,7 @@ function renderTerminal(record) {
   if (detailsOpen) {
     updateTerminalSnapshot(record, card.querySelector(".wall-card-terminal"));
     updateCardMeta(card, record);
-    card.className = `wall-card status-${record.status}`;
+    card.className = `wall-card status-${record.status} has-open-details`;
     return card;
   }
 
@@ -2024,9 +2064,11 @@ function renderTerminal(record) {
         <button type="button" class="ghost wall-card-drag-handle" title="拖拽排序" aria-label="拖拽排序"><svg width="100%" height="100%" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M12 1l-3 3.5h6L12 1z"/><path d="M12 23l-3-3.5h6L12 23z"/><path d="M1 12l3.5-3v6L1 12z"/><path d="M23 12l-3.5-3v6L23 12z"/><rect x="11.25" y="4" width="1.5" height="16" rx=".75"/><rect x="4" y="11.25" width="16" height="1.5" rx=".75"/></svg></button>
         <h2 class="wall-card-title" ${state.editingTitleTerminalId === record.id ? 'hidden' : ''}>${escapeHtml(displayTitle(record))}</h2>
         <input class="wall-card-title-input" type="text" value="${escapeHtml(record.name)}" ${state.editingTitleTerminalId === record.id ? '' : 'hidden'} />
-        <button data-action="toggle-hide" class="ghost wall-card-hide-button" title="${state.hiddenTerminalIds.has(record.id) ? "取消隐藏" : "隐藏"}">${state.hiddenTerminalIds.has(record.id) ? "显" : "隐"}</button>
-        <button data-action="toggle-mute" class="ghost wall-card-mute-button" title="${state.mutedTerminalIds.has(record.id) ? "取消静默" : "静默（不进入队列）"}">${state.mutedTerminalIds.has(record.id) ? "🔇" : "🔔"}</button>
-        <button type="button" class="ghost wall-card-more-button" title="更多信息">⋯</button>
+        <div class="wall-card-action-group">
+          <button data-action="toggle-hide" class="ghost wall-card-hide-button" title="${state.hiddenTerminalIds.has(record.id) ? "取消隐藏" : "隐藏"}">${state.hiddenTerminalIds.has(record.id) ? "显" : "隐"}</button>
+          <button data-action="toggle-mute" class="ghost wall-card-mute-button" title="${getMuteButtonTitle(state.mutedTerminalIds.has(record.id))}" aria-label="${getMuteButtonTitle(state.mutedTerminalIds.has(record.id))}">${renderMuteButtonContent(state.mutedTerminalIds.has(record.id))}</button>
+          <button type="button" class="ghost wall-card-more-button" title="更多信息">⋯</button>
+        </div>
       </div>
       <div class="wall-card-details-panel" hidden>
         <div class="wall-card-topline">
@@ -2224,6 +2266,10 @@ function updateCardMeta(card, record) {
   } else if (errorEl) {
     errorEl.hidden = true;
   }
+  syncMuteButton(
+    card.querySelector("[data-action='toggle-mute']"),
+    state.mutedTerminalIds.has(record.id),
+  );
 }
 
 function refreshWall(layout = null) {
@@ -2277,6 +2323,8 @@ function applySnapshot(terminals, layout = null, allTags = null) {
   for (const record of terminals) {
     if (record.muted) {
       state.mutedTerminalIds.add(record.id);
+    } else {
+      state.mutedTerminalIds.delete(record.id);
     }
   }
   // 清理 hiddenTerminalIds 中不再存在的旧 ID
@@ -2653,6 +2701,13 @@ function connectWebSocket() {
     // 从后端同步隐藏状态（接管时恢复）
     if (payload.terminal.hidden) {
       state.hiddenTerminalIds.add(payload.terminal.id);
+      saveViewState();
+    }
+    if (payload.terminal.muted) {
+      state.mutedTerminalIds.add(payload.terminal.id);
+      saveViewState();
+    } else {
+      state.mutedTerminalIds.delete(payload.terminal.id);
       saveViewState();
     }
     // 同步全局标签列表
@@ -3432,7 +3487,9 @@ document.addEventListener("click", (e) => {
   document.querySelectorAll(".wall-card-details-panel:not([hidden])").forEach((panel) => {
     if (!panel.contains(e.target) && !panel.contains(mousedownTarget) && !e.target.closest(".wall-card-more-button")) {
       panel.hidden = true;
-      const btn = panel.closest(".wall-card")?.querySelector(".wall-card-more-button");
+      const card = panel.closest(".wall-card");
+      card?.classList.remove("has-open-details");
+      const btn = card?.querySelector(".wall-card-more-button");
       if (btn) btn.classList.remove("is-active");
     }
   });
@@ -3443,7 +3500,9 @@ document.addEventListener("keydown", (e) => {
     document.querySelectorAll(".topbar-menu[open]").forEach((d) => d.removeAttribute("open"));
     document.querySelectorAll(".wall-card-details-panel:not([hidden])").forEach((panel) => {
       panel.hidden = true;
-      const btn = panel.closest(".wall-card")?.querySelector(".wall-card-more-button");
+      const card = panel.closest(".wall-card");
+      card?.classList.remove("has-open-details");
+      const btn = card?.querySelector(".wall-card-more-button");
       if (btn) btn.classList.remove("is-active");
     });
   }
@@ -3471,18 +3530,30 @@ let _systemStatsTimer = null;
 async function fetchSystemStats() {
   try {
     const data = await request("/api/system-stats");
+    const diskFreePercent = data.disk_total_gb > 0
+      ? (data.disk_free_gb / data.disk_total_gb) * 100
+      : 0;
+    const diskFreePressure = Math.max(0, 100 - diskFreePercent);
 
-    statCpuEl.textContent = `CPU ${data.cpu_percent.toFixed(0)}%`;
-    statMemEl.textContent = `MEM ${data.memory_percent.toFixed(0)}%`;
-    statDiskEl.textContent = `DISK ${data.disk_percent.toFixed(0)}%`;
-    statDiskFreeEl.textContent = `剩余 ${data.disk_free_gb}G`;
+    setStatusbarLabel(statCpuEl, `CPU ${data.cpu_percent.toFixed(0)}%`);
+    setStatusbarLabel(statMemEl, `MEM ${data.memory_percent.toFixed(0)}%`);
+    setStatusbarLabel(statDiskEl, `占用 ${data.disk_percent.toFixed(0)}%`);
+    setStatusbarLabel(statDiskFreeEl, `剩余 ${data.disk_free_gb}G`);
 
     applyStatLevel(statCpuEl, getStatLevel(data.cpu_percent));
     applyStatLevel(statMemEl, getStatLevel(data.memory_percent));
     applyStatLevel(statDiskEl, getStatLevel(data.disk_percent));
-    // 磁盘剩余：< 10G 红色, 其他绿色
-    const diskFreeLevel = data.disk_free_gb < 10 ? "danger" : "normal";
+    // 剩余空间按“压力”显示：剩余越少，越接近 danger
+    const diskFreeLevel = getStatLevel(diskFreePressure);
     applyStatLevel(statDiskFreeEl, diskFreeLevel);
+    setStatusbarMetric(statCpuEl, data.cpu_percent, data.cpu_percent >= 85 ? "#ff7d7d" : data.cpu_percent >= 60 ? "#f7c948" : "#55e36f");
+    setStatusbarMetric(statMemEl, data.memory_percent, data.memory_percent >= 85 ? "#ff7d7d" : data.memory_percent >= 60 ? "#f7c948" : "#55e36f");
+    setStatusbarMetric(statDiskEl, data.disk_percent, data.disk_percent >= 85 ? "#ff7d7d" : data.disk_percent >= 60 ? "#f7c948" : "#55e36f");
+    setStatusbarMetric(
+      statDiskFreeEl,
+      diskFreePressure,
+      diskFreePressure >= 85 ? "#ff7d7d" : diskFreePressure >= 60 ? "#f7c948" : "#55e36f",
+    );
   } catch {
     // 接口不可用时静默忽略，保持 "--%" 显示
   }
@@ -3491,6 +3562,27 @@ async function fetchSystemStats() {
 function startSystemStatsPolling() {
   fetchSystemStats();
   _systemStatsTimer = setInterval(fetchSystemStats, 5000);
+}
+
+function setStatusbarMetric(el, percent, color) {
+  if (!el) {
+    return;
+  }
+  const normalized = Math.max(0, Math.min(100, Number(percent) || 0));
+  el.style.setProperty("--statusbar-fill-ratio", String(normalized / 100));
+  el.style.setProperty("--statusbar-fill-color", color);
+}
+
+function setStatusbarLabel(el, text) {
+  if (!el) {
+    return;
+  }
+  const label = el.querySelector(".status-meter-label");
+  if (label) {
+    label.textContent = text;
+  } else {
+    el.textContent = text;
+  }
 }
 
 loadInitialState().then(() => {
