@@ -142,6 +142,7 @@ class UiSettingsPayload(BaseModel):
     split_resizer_line_width_px: int = Field(default=2, ge=0, le=8)
     grid_resizer_hit_area_px: int = Field(default=16, ge=4, le=48)
     grid_resizer_line_width_px: int = Field(default=2, ge=0, le=8)
+    filter_tab_slide_duration_ms: int = Field(default=420, ge=50, le=5000)
 
 
 @app.on_event("startup")

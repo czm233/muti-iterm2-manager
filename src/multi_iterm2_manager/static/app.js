@@ -165,6 +165,7 @@ const dashboardLayout = document.querySelector(".dashboard-layout");
 const uiSettingsForm = document.getElementById("ui-settings-form");
 const uiSettingsResetButton = document.getElementById("ui-settings-reset");
 const uiSettingsPath = document.getElementById("ui-settings-path");
+const topbarFilters = document.getElementById("topbar-filters");
 const tagFilterTabs = document.getElementById("tag-filter-tabs");
 
 const DEFAULT_UI_SETTINGS = {
@@ -178,6 +179,7 @@ const DEFAULT_UI_SETTINGS = {
   split_resizer_line_width_px: 2,
   grid_resizer_hit_area_px: 16,
   grid_resizer_line_width_px: 2,
+  filter_tab_slide_duration_ms: 420,
 };
 
 const MIN_GRID_TRACK_RATIO = 0.18;
@@ -237,6 +239,7 @@ function applyUiSettings(raw, options = {}) {
   rootStyle.setProperty("--split-resizer-line-width-px", `${getUiSetting("split_resizer_line_width_px")}px`);
   rootStyle.setProperty("--grid-resizer-hit-area-px", `${getUiSetting("grid_resizer_hit_area_px")}px`);
   rootStyle.setProperty("--grid-resizer-line-width-px", `${getUiSetting("grid_resizer_line_width_px")}px`);
+  rootStyle.setProperty("--filter-tab-slide-duration-ms", `${getUiSetting("filter_tab_slide_duration_ms")}ms`);
   syncUiSettingsForm();
 }
 
@@ -1206,6 +1209,7 @@ function syncFilterTabs() {
   document.querySelectorAll("#topbar-filters .filter-tab").forEach((tab) => {
     tab.classList.toggle("is-active", tab.dataset.filter === state.filter);
   });
+  syncFilterTabSlider();
   // 单次遍历计算所有 badge 数量（先应用标签筛选）
   let attentionCount = 0;
   let hiddenCount = 0;
@@ -1254,6 +1258,41 @@ function syncFilterTabs() {
       runningBadge.textContent = newText;
     }
     runningBadge.hidden = runningCount === 0;
+  }
+}
+
+function ensureFilterTabSlider() {
+  if (!topbarFilters) {
+    return null;
+  }
+  let slider = topbarFilters.querySelector(".filter-tab-slider");
+  if (!slider) {
+    slider = document.createElement("span");
+    slider.className = "filter-tab-slider";
+    topbarFilters.prepend(slider);
+  }
+  return slider;
+}
+
+function syncFilterTabSlider() {
+  const slider = ensureFilterTabSlider();
+  if (!slider) {
+    return;
+  }
+  const activeTab = topbarFilters?.querySelector(".filter-tab.is-active");
+  if (!activeTab) {
+    slider.classList.remove("is-visible");
+    return;
+  }
+  slider.classList.add("is-visible");
+  const newWidth = `${activeTab.offsetWidth}px`;
+  const newTransform = `translateX(${activeTab.offsetLeft}px)`;
+  // 只在值真正变化时才更新样式，避免中断正在进行的 CSS transition
+  if (slider.style.width !== newWidth) {
+    slider.style.width = newWidth;
+  }
+  if (slider.style.transform !== newTransform) {
+    slider.style.transform = newTransform;
   }
 }
 
@@ -2794,9 +2833,17 @@ function connectWebSocket() {
       return;
     }
     if (payload.type === "ui-settings-updated") {
-      applyUiSettings(payload.settings || DEFAULT_UI_SETTINGS);
-      if (uiSettingsPath && payload.file) {
-        uiSettingsPath.textContent = `配置文件：${payload.file}`;
+      // 保存操作触发的广播不回填表单，避免服务器返回值不完整导致覆盖用户输入
+      if (window._uiSettingsSaving && window._uiSettingsSaving()) {
+        // 只更新文件路径，不回填表单
+        if (uiSettingsPath && payload.file) {
+          uiSettingsPath.textContent = `配置文件：${payload.file}`;
+        }
+      } else {
+        applyUiSettings(payload.settings || DEFAULT_UI_SETTINGS);
+        if (uiSettingsPath && payload.file) {
+          uiSettingsPath.textContent = `配置文件：${payload.file}`;
+        }
       }
       state._needFullRefresh = true;
       scheduleRender();
@@ -3050,6 +3097,8 @@ closeAllButton.onclick = async () => {
 if (uiSettingsForm) {
   // 自动保存：input 变更后防抖提交
   let _uiSaveTimer = null;
+  // 标记正在保存，防止 WebSocket 广播的 ui-settings-updated 覆盖刚保存的值
+  let _uiSaving = false;
   const autoSaveUiSettings = () => {
     clearTimeout(_uiSaveTimer);
     _uiSaveTimer = setTimeout(async () => {
@@ -3059,12 +3108,16 @@ if (uiSettingsForm) {
           return [key, Number(field?.value ?? DEFAULT_UI_SETTINGS[key])];
         })
       );
+      _uiSaving = true;
       try {
         const result = await request("/api/ui-settings", {
           method: "PUT",
           body: JSON.stringify(payload),
         });
-        applyUiSettings(result.settings || payload);
+        // 使用 payload（用户实际输入的值）而非 result.settings 更新 UI，
+        // 因为服务器返回值可能因版本差异等原因缺少部分字段，
+        // 导致 normalizeUiSettings 用默认值覆盖用户输入。
+        applyUiSettings(payload);
         if (uiSettingsPath && result.file) {
           uiSettingsPath.textContent = `配置文件：${result.file}`;
         }
@@ -3072,9 +3125,14 @@ if (uiSettingsForm) {
         setMessage("界面调优配置已保存");
       } catch (error) {
         setMessage(error.message, true);
+      } finally {
+        // 延迟重置标志，确保 WebSocket 广播到达时已经被正确忽略
+        setTimeout(() => { _uiSaving = false; }, 200);
       }
     }, 400);
   };
+  // 将 _uiSaving 暴露给 WebSocket 处理使用
+  window._uiSettingsSaving = () => _uiSaving;
   uiSettingsForm.addEventListener("input", autoSaveUiSettings);
   uiSettingsForm.addEventListener("change", autoSaveUiSettings);
 }
@@ -3449,6 +3507,9 @@ if (tuningDetails) {
 document.querySelectorAll("#topbar-filters .filter-tab").forEach((tab) => {
   tab.onclick = () => {
     const filter = tab.dataset.filter;
+    if (filter === state.filter) {
+      return;
+    }
     if (filter === "attention" && state.filter !== "attention") {
       // 进入"待处理"时对当前待处理终端做快照，避免处理后立即消失
       state.attentionSnapshot = new Set(
