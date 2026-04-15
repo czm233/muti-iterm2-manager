@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import asdict, dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,7 @@ from .models import ScreenLayoutConfig, TerminalLayout
 @dataclass
 class UiSettings:
     dashboard_padding_px: int = 4
+    monitor_stage_padding_px: int = 12
     dashboard_gap_px: int = 6
     monitor_grid_gap_px: int = 6
     wall_card_padding_px: int = 10
@@ -95,9 +97,12 @@ def load_ui_settings(path_value: str) -> UiSettings:
 def save_ui_settings(path_value: str, ui_settings: UiSettings) -> Path:
     path = _resolve_project_file(path_value)
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
+    # 保留文件中已有的非 ui 字段（如 screen_layouts），避免覆盖丢失
+    existing = _read_yaml_file(path) if path.exists() else {}
+    existing.update({
         "ui": {
             "dashboard_padding_px": ui_settings.dashboard_padding_px,
+            "monitor_stage_padding_px": ui_settings.monitor_stage_padding_px,
             "dashboard_gap_px": ui_settings.dashboard_gap_px,
             "monitor_grid_gap_px": ui_settings.monitor_grid_gap_px,
             "wall_card_padding_px": ui_settings.wall_card_padding_px,
@@ -114,9 +119,9 @@ def save_ui_settings(path_value: str, ui_settings: UiSettings) -> Path:
             # 默认窗口位置模板（按屏幕名称）
             "default_frames_by_screen": ui_settings.default_frames_by_screen,
         }
-    }
+    })
     path.write_text(
-        yaml.safe_dump(payload, allow_unicode=True, sort_keys=False),
+        yaml.safe_dump(existing, allow_unicode=True, sort_keys=False),
         encoding="utf-8",
     )
     return path
@@ -150,70 +155,148 @@ def _terminal_layout_from_dict(terminal_id: str, data: dict[str, Any]) -> Termin
     )
 
 
-def _screen_layout_from_dict(fingerprint: str, data: dict[str, Any]) -> ScreenLayoutConfig:
-    """从字典创建 ScreenLayoutConfig 对象"""
+def _screen_layout_from_dict(layout_key: str, data: dict[str, Any]) -> ScreenLayoutConfig:
+    """从字典创建 ScreenLayoutConfig 对象
+
+    layout_key 是布局存储的键（屏幕名称）。
+    兼容旧数据：如果数据中有 screenFingerprint 字段但没有 screenName，则使用 layout_key。
+    """
     terminals: dict[str, TerminalLayout] = {}
     terminals_data = data.get("terminals", {})
     for tid, tdata in terminals_data.items():
         terminals[tid] = _terminal_layout_from_dict(tid, tdata)
 
+    # 兼容旧数据：旧版用 screenFingerprint，新版用 screenName
+    screen_name = data.get("screenName", data.get("screenFingerprint", layout_key))
+
     return ScreenLayoutConfig(
-        screen_fingerprint=fingerprint,
+        screen_name=screen_name,
         config_name=data.get("configName", data.get("config_name", "")),
         created_at=data.get("createdAt", data.get("created_at", "")),
         terminals=terminals,
+        is_preset=data.get("isPreset", False),
+        is_default=data.get("isDefault", False),
+        layout_id=data.get("layoutId", ""),
     )
 
 
-def get_screen_layouts(path_value: str = "ui-settings.yaml") -> dict[str, ScreenLayoutConfig]:
-    """获取所有屏幕布局配置
+def _migrate_screen_layouts(payload: dict, path: Path) -> bool:
+    """将旧格式的屏幕布局迁移为新的嵌套结构
+
+    旧格式: {screen_name: {configName, terminals, ...}}
+    新格式: {screen_name: {layouts: {__preset__: {..., isPreset: True, isDefault: True}}}}
+
+    Args:
+        payload: YAML 文件的完整内容
+        path: 文件路径，迁移成功后写回
+
+    Returns:
+        是否发生了迁移
+    """
+    layouts_data = payload.get("screen_layouts", {})
+    if not layouts_data or not isinstance(layouts_data, dict):
+        return False
+
+    migrated = False
+    for screen_name, screen_data in layouts_data.items():
+        if not isinstance(screen_data, dict):
+            continue
+        # 旧格式：有 terminals 但没有 layouts 键
+        if "terminals" in screen_data and "layouts" not in screen_data:
+            layouts_data[screen_name] = {
+                "layouts": {
+                    "__preset__": {
+                        **screen_data,
+                        "isPreset": True,
+                        "isDefault": True,
+                    }
+                }
+            }
+            migrated = True
+
+    if migrated:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            yaml.safe_dump(payload, allow_unicode=True, sort_keys=False),
+            encoding="utf-8",
+        )
+
+    return migrated
+
+
+def get_screen_layouts(path_value: str = "ui-settings.yaml") -> dict[str, dict[str, ScreenLayoutConfig]]:
+    """获取所有屏幕布局配置（嵌套结构）
+
+    加载时自动检测并迁移旧格式数据。
 
     Args:
         path_value: 配置文件路径，默认为 ui-settings.yaml
 
     Returns:
-        指纹 -> ScreenLayoutConfig 的字典
+        外层 key 为屏幕名称，内层 key 为 layout_id（如 __preset__、user_xxxx），
+        内层 value 为 ScreenLayoutConfig 对象。
+        示例: {"H27T13": {"__preset__": ScreenLayoutConfig(...), "user_a1b2": ScreenLayoutConfig(...)}}
     """
     path = _resolve_project_file(path_value)
     payload = _read_yaml_file(path)
 
-    # 兼容两种结构：直接的 screen_layouts 字段，或嵌套在 ui 下的
+    # 自动迁移旧格式
+    _migrate_screen_layouts(payload, path)
+
     layouts_data = payload.get("screen_layouts", {})
     if not layouts_data:
-        ui_data = payload.get("ui", {})
-        layouts_data = ui_data.get("screen_layouts", {})
+        layouts_data = payload.get("ui", {}).get("screen_layouts", {})
 
-    result: dict[str, ScreenLayoutConfig] = {}
-    for fingerprint, data in layouts_data.items():
-        if isinstance(data, dict):
-            result[fingerprint] = _screen_layout_from_dict(fingerprint, data)
+    result: dict[str, dict[str, ScreenLayoutConfig]] = {}
+    for screen_name, screen_data in layouts_data.items():
+        if not isinstance(screen_data, dict):
+            continue
+        # 新格式：screen_data 内有 layouts 字典
+        inner_layouts = screen_data.get("layouts", {})
+        if isinstance(inner_layouts, dict):
+            screen_layouts: dict[str, ScreenLayoutConfig] = {}
+            for layout_id, layout_data in inner_layouts.items():
+                if isinstance(layout_data, dict):
+                    layout = _screen_layout_from_dict(screen_name, layout_data)
+                    layout.layout_id = layout_id
+                    screen_layouts[layout_id] = layout
+            if screen_layouts:
+                result[screen_name] = screen_layouts
 
     return result
 
 
-def get_screen_layout(fingerprint: str, path_value: str = "ui-settings.yaml") -> ScreenLayoutConfig | None:
-    """获取指定指纹的屏幕布局配置
+def get_screen_layout(
+    screen_name: str,
+    layout_id: str = "__preset__",
+    path_value: str = "ui-settings.yaml",
+) -> ScreenLayoutConfig | None:
+    """获取指定屏幕的指定布局配置
 
     Args:
-        fingerprint: 屏幕配置指纹 (8位)
+        screen_name: 屏幕名称
+        layout_id: 布局 ID，默认为 __preset__
         path_value: 配置文件路径，默认为 ui-settings.yaml
 
     Returns:
         ScreenLayoutConfig 或 None（如果不存在）
     """
-    layouts = get_screen_layouts(path_value)
-    return layouts.get(fingerprint)
+    all_layouts = get_screen_layouts(path_value)
+    screen_layouts = all_layouts.get(screen_name, {})
+    return screen_layouts.get(layout_id)
 
 
 def save_screen_layout(
-    fingerprint: str,
+    screen_name: str,
+    layout_id: str,
     layout: ScreenLayoutConfig,
-    path_value: str = "ui-settings.yaml"
+    path_value: str = "ui-settings.yaml",
 ) -> Path:
-    """保存屏幕布局配置
+    """保存屏幕布局配置到新的嵌套结构
 
     Args:
-        fingerprint: 屏幕配置指纹 (8位)
+        screen_name: 屏幕名称
+        layout_id: 布局 ID（如 __preset__、user_xxxx）
         layout: 屏幕布局配置对象
         path_value: 配置文件路径，默认为 ui-settings.yaml
 
@@ -226,15 +309,23 @@ def save_screen_layout(
     # 读取现有配置
     payload = _read_yaml_file(path)
 
+    # 自动迁移旧格式
+    _migrate_screen_layouts(payload, path)
+
     # 确保 screen_layouts 字段存在
     if "screen_layouts" not in payload:
         payload["screen_layouts"] = {}
 
-    # 保存布局（使用简化的键名格式，方便阅读）
+    # 确保屏幕级别的嵌套结构存在
+    screen_entry = payload["screen_layouts"].setdefault(screen_name, {})
+    if "layouts" not in screen_entry or not isinstance(screen_entry.get("layouts"), dict):
+        screen_entry["layouts"] = {}
+
+    # 保存布局（序列化并清理冗余字段）
     layout_dict = layout.to_dict()
-    # 移除冗余的 screenFingerprint 字段（因为键已经是 fingerprint）
+    layout_dict.pop("screenName", None)
     layout_dict.pop("screenFingerprint", None)
-    payload["screen_layouts"][fingerprint] = layout_dict
+    payload["screen_layouts"][screen_name]["layouts"][layout_id] = layout_dict
 
     # 写入文件
     path.write_text(
@@ -245,11 +336,19 @@ def save_screen_layout(
     return path
 
 
-def delete_screen_layout(fingerprint: str, path_value: str = "ui-settings.yaml") -> bool:
-    """删除屏幕布局配置
+def delete_screen_layout(
+    screen_name: str,
+    layout_id: str,
+    path_value: str = "ui-settings.yaml",
+) -> bool:
+    """删除指定屏幕的指定布局
+
+    不能删除屏幕的最后一个布局。如果删除的是默认布局，
+    会自动将剩余布局中的第一个标记为默认。
 
     Args:
-        fingerprint: 屏幕配置指纹 (8位)
+        screen_name: 屏幕名称
+        layout_id: 布局 ID
         path_value: 配置文件路径，默认为 ui-settings.yaml
 
     Returns:
@@ -258,14 +357,33 @@ def delete_screen_layout(fingerprint: str, path_value: str = "ui-settings.yaml")
     path = _resolve_project_file(path_value)
     payload = _read_yaml_file(path)
 
-    layouts = payload.get("screen_layouts", {})
-    if fingerprint not in layouts:
+    screen_entry = payload.get("screen_layouts", {}).get(screen_name, {})
+    inner_layouts = screen_entry.get("layouts", {})
+
+    if layout_id not in inner_layouts:
         return False
 
-    del layouts[fingerprint]
+    # 不能删除最后一个布局
+    if len(inner_layouts) <= 1:
+        return False
 
-    # 如果布局为空，删除整个字段
-    if not layouts:
+    # 检查被删的布局是否是默认的
+    deleted_is_default = inner_layouts[layout_id].get("isDefault", False)
+
+    del inner_layouts[layout_id]
+
+    # 如果删除的是默认布局，自动将剩余的第一个设为新默认
+    if deleted_is_default and inner_layouts:
+        first_remaining = next(iter(inner_layouts.values()), None)
+        if first_remaining is not None:
+            first_remaining["isDefault"] = True
+
+    # 清理空结构
+    if not inner_layouts:
+        del screen_entry["layouts"]
+    if not screen_entry:
+        del payload["screen_layouts"][screen_name]
+    if not payload["screen_layouts"]:
         del payload["screen_layouts"]
 
     # 写入文件
@@ -277,10 +395,109 @@ def delete_screen_layout(fingerprint: str, path_value: str = "ui-settings.yaml")
     return True
 
 
-def get_layout_for_current_screens(path_value: str = "ui-settings.yaml") -> ScreenLayoutConfig | None:
-    """获取当前屏幕配置对应的布局
+def set_default_layout(
+    screen_name: str,
+    layout_id: str,
+    path_value: str = "ui-settings.yaml",
+) -> bool:
+    """将指定布局设为该屏幕的默认布局
 
-    自动获取当前屏幕指纹并查找匹配的布局配置。
+    Args:
+        screen_name: 屏幕名称
+        layout_id: 要设为默认的布局 ID
+        path_value: 配置文件路径，默认为 ui-settings.yaml
+
+    Returns:
+        是否设置成功（找不到指定布局时返回 False）
+    """
+    path = _resolve_project_file(path_value)
+    payload = _read_yaml_file(path)
+
+    screen_entry = payload.get("screen_layouts", {}).get(screen_name, {})
+    inner_layouts = screen_entry.get("layouts", {})
+
+    if layout_id not in inner_layouts:
+        return False
+
+    # 将该屏幕所有布局的 isDefault 设为 False
+    for lid in inner_layouts:
+        if isinstance(inner_layouts[lid], dict):
+            inner_layouts[lid]["isDefault"] = False
+
+    # 将指定布局设为默认
+    inner_layouts[layout_id]["isDefault"] = True
+
+    # 写入文件
+    path.write_text(
+        yaml.safe_dump(payload, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+
+    return True
+
+
+def get_default_layout_for_screen(
+    screen_name: str,
+    path_value: str = "ui-settings.yaml",
+) -> ScreenLayoutConfig | None:
+    """获取指定屏幕的默认布局
+
+    优先返回 isDefault=True 的布局，如果没有默认的，返回 __preset__ 布局。
+
+    Args:
+        screen_name: 屏幕名称
+        path_value: 配置文件路径，默认为 ui-settings.yaml
+
+    Returns:
+        默认的 ScreenLayoutConfig 或 None
+    """
+    all_layouts = get_screen_layouts(path_value)
+    screen_layouts = all_layouts.get(screen_name, {})
+
+    # 优先查找 isDefault=True 的布局
+    for layout_id, layout in screen_layouts.items():
+        if layout.is_default:
+            return layout
+
+    # 没有默认的，返回 __preset__ 布局
+    return screen_layouts.get("__preset__")
+
+
+def ensure_preset_layout(screen_name: str, path_value: str = "ui-settings.yaml") -> bool:
+    """确保指定屏幕至少有一个布局，如果没有则创建系统预设
+
+    Args:
+        screen_name: 屏幕名称
+        path_value: 配置文件路径，默认为 ui-settings.yaml
+
+    Returns:
+        True 表示新创建了 preset，False 表示已存在不需要创建
+    """
+    all_layouts = get_screen_layouts(path_value)
+    screen_layouts = all_layouts.get(screen_name, {})
+
+    # 已有布局（任何布局），不需要创建
+    if screen_layouts:
+        return False
+
+    # 屏幕没有任何布局，创建预设
+    preset = ScreenLayoutConfig(
+        screen_name=screen_name,
+        config_name="系统预设",
+        is_preset=True,
+        is_default=True,
+        created_at=datetime.now().isoformat(timespec="seconds"),
+        terminals={},
+    )
+
+    save_screen_layout(screen_name, "__preset__", preset, path_value)
+    return True
+
+
+def get_layout_for_current_screens(path_value: str = "ui-settings.yaml") -> ScreenLayoutConfig | None:
+    """获取当前屏幕配置对应的默认布局
+
+    自动获取当前主屏幕名称并查找匹配的默认布局。
 
     Args:
         path_value: 配置文件路径，默认为 ui-settings.yaml
@@ -288,7 +505,7 @@ def get_layout_for_current_screens(path_value: str = "ui-settings.yaml") -> Scre
     Returns:
         ScreenLayoutConfig 或 None（如果当前屏幕配置没有保存的布局）
     """
-    from .display import generate_screen_fingerprint
+    from .display import get_current_screen_config
 
-    fingerprint = generate_screen_fingerprint()
-    return get_screen_layout(fingerprint, path_value)
+    config = get_current_screen_config()
+    return get_default_layout_for_screen(config.primary_screen_name, path_value)

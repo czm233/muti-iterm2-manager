@@ -637,6 +637,7 @@ class DashboardService:
     async def adopt_terminal(self, session_id: str, name: str | None = None) -> dict:
         explicit_name = (name or '').strip() if name else None
         handle = await self.backend.adopt(session_id, explicit_name)
+        restored_managed_terminal = handle.adopted_id is not None
         # 优先使用显式传入的名字，其次使用从 iTerm2 读取的原始名字，最后回退到默认名
         final_name = explicit_name or (handle.adopted_name or '').strip() or self._next_default_name()
         # 把最终名字写回 iTerm2 自定义变量，确保下次重启/接管时不会丢失
@@ -660,8 +661,8 @@ class DashboardService:
             pass
         async with self._lock:
             self.records[record.id] = record
-        # 对齐窗口大小到其他可见终端
-        if not record.hidden:
+        # 仅对首次接管的外部终端做兄弟窗口对齐；安全重启恢复的托管终端保留原布局。
+        if not record.hidden and not restored_managed_terminal:
             await self._align_frame_to_siblings(record)
         await self.refresh_terminal(record.id)
         self._start_monitor(record.id)

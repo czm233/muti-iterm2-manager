@@ -170,6 +170,7 @@ const tagFilterTabs = document.getElementById("tag-filter-tabs");
 
 const DEFAULT_UI_SETTINGS = {
   dashboard_padding_px: 4,
+  monitor_stage_padding_px: 12,
   dashboard_gap_px: 6,
   monitor_grid_gap_px: 6,
   wall_card_padding_px: 10,
@@ -230,6 +231,7 @@ function applyUiSettings(raw, options = {}) {
   }
   const rootStyle = document.documentElement.style;
   rootStyle.setProperty("--dashboard-padding-px", `${getUiSetting("dashboard_padding_px")}px`);
+  rootStyle.setProperty("--monitor-stage-padding-px", `${getUiSetting("monitor_stage_padding_px")}px`);
   rootStyle.setProperty("--dashboard-gap-px", `${getUiSetting("dashboard_gap_px")}px`);
   rootStyle.setProperty("--monitor-grid-gap-px", `${getUiSetting("monitor_grid_gap_px")}px`);
   rootStyle.setProperty("--wall-card-padding-px", `${getUiSetting("wall_card_padding_px")}px`);
@@ -3220,7 +3222,9 @@ function injectScreenSelector() {
         localStorage.setItem("defaultScreenName", screenName);
       }
       updateDefaultScreenHint();
-      setMessage("屏幕设置已保存");
+      setMessage("已切换屏幕并应用默认布局");
+      // 后端切换屏幕后已自动应用默认布局，刷新布局列表
+      await loadScreenConfigs();
     } catch (error) {
       setMessage(error.message, true);
     }
@@ -3272,13 +3276,6 @@ async function loadScreenSelector() {
         if (option.textContent === defaultName) {
           select.value = option.value;
           matched = true;
-          // 自动应用到后端（确保每次刷新都同步）
-          if (currentTarget !== Number(option.value)) {
-            await request("/api/screens/target", {
-              method: "PUT",
-              body: JSON.stringify({ target_screen: Number(option.value) }),
-            });
-          }
           break;
         }
       }
@@ -3300,6 +3297,13 @@ async function loadScreenSelector() {
 injectScreenSelector();
 
 // --- 屏幕配置管理 UI ---
+
+let __activeLayoutScreenName = "";
+let __activeLayoutId = "";
+
+function getActiveLayoutKey() {
+  return `${__activeLayoutScreenName}::${__activeLayoutId}`;
+}
 
 /**
  * 在调优面板中动态注入屏幕配置管理 UI
@@ -3326,14 +3330,15 @@ function injectScreenConfigPanel() {
   container.innerHTML = `
     <div id="screen-config-current" style="margin-bottom:10px;padding:8px 10px;background:rgba(15,23,42,0.5);border-radius:8px;font-size:0.84rem;">
       <div style="color:var(--muted);">当前屏幕配置：<span id="current-screen-info" style="color:var(--text);">加载中...</span></div>
-      <div style="color:var(--muted);margin-top:4px;">配置指纹：<span id="current-fingerprint" style="font-family:monospace;color:var(--accent);">--</span></div>
+      <div style="color:var(--muted);margin-top:4px;">屏幕名称：<span id="current-screen-name" style="font-family:monospace;color:var(--accent);">--</span></div>
     </div>
     <div style="margin-bottom:8px;color:var(--muted);font-weight:700;font-size:0.84rem;">已保存的布局</div>
     <div id="screen-config-list" style="display:flex;flex-direction:column;gap:6px;max-height:180px;overflow-y:auto;">
       <div style="color:var(--muted);font-size:0.82rem;padding:4px 0;">暂无保存的布局</div>
     </div>
-    <div style="margin-top:10px;">
-      <button id="save-screen-config" class="secondary" style="width:100%;">💾 保存当前布局</button>
+    <div style="margin-top:10px;display:flex;gap:8px;">
+      <button id="save-screen-config" class="secondary" style="flex:1;">💾 保存为新布局</button>
+      <button id="update-screen-config" class="secondary" style="flex:1;display:none;">✏️ 更新当前布局</button>
     </div>
   `;
 
@@ -3341,26 +3346,58 @@ function injectScreenConfigPanel() {
   tuningPanel.appendChild(title);
   tuningPanel.appendChild(container);
 
-  // 保存按钮点击事件
+  // 暴露给全局，方便 loadScreenConfigs 中的 apply 按钮设置
+  window.__setActiveLayout = (screenName, layoutId) => {
+    __activeLayoutScreenName = screenName;
+    __activeLayoutId = layoutId;
+    const updateBtn = document.getElementById("update-screen-config");
+    if (updateBtn) updateBtn.style.display = layoutId ? "block" : "none";
+  };
+
+  // 保存为新布局
   const saveBtn = document.getElementById("save-screen-config");
   if (saveBtn) {
     saveBtn.addEventListener("click", async () => {
-      const name = prompt("请输入配置名称（可选，留空则自动生成）");
-      if (name === null) return; // 用户点击取消
+      const name = prompt("请输入布局名称（可选，留空则自动生成）");
+      if (name === null) return;
       try {
         saveBtn.disabled = true;
         saveBtn.textContent = "⏳ 保存中...";
-        await request("/api/screen-configs/save", {
+        const result = await request("/api/screen-configs/save", {
           method: "POST",
           body: JSON.stringify({ config_name: name || "" }),
         });
+        // 保存后自动设为当前激活布局
+        if (window.__setActiveLayout) window.__setActiveLayout(result.screenName, result.layoutId);
         setMessage("布局已保存");
         await loadScreenConfigs();
       } catch (error) {
         setMessage("保存失败: " + error.message, true);
       } finally {
         saveBtn.disabled = false;
-        saveBtn.textContent = "💾 保存当前布局";
+        saveBtn.textContent = "💾 保存为新布局";
+      }
+    });
+  }
+
+  // 更新当前布局
+  const updateBtn = document.getElementById("update-screen-config");
+  if (updateBtn) {
+    updateBtn.addEventListener("click", async () => {
+      if (!__activeLayoutId || !__activeLayoutScreenName) return;
+      try {
+        updateBtn.disabled = true;
+        updateBtn.textContent = "⏳ 更新中...";
+        await request(`/api/screen-configs/${encodeURIComponent(__activeLayoutScreenName)}/${encodeURIComponent(__activeLayoutId)}`, {
+          method: "PUT",
+        });
+        setMessage("布局已更新");
+        await loadScreenConfigs();
+      } catch (error) {
+        setMessage("更新失败: " + error.message, true);
+      } finally {
+        updateBtn.disabled = false;
+        updateBtn.textContent = "✏️ 更新当前布局";
       }
     });
   }
@@ -3368,34 +3405,56 @@ function injectScreenConfigPanel() {
 
 /**
  * 加载屏幕配置数据并更新 UI
+ * 适配新的嵌套数据结构：savedLayouts[screenName].layouts[layoutId]
  */
 async function loadScreenConfigs() {
   const currentInfoEl = document.getElementById("current-screen-info");
-  const fingerprintEl = document.getElementById("current-fingerprint");
+  const screenNameEl = document.getElementById("current-screen-name");
   const listEl = document.getElementById("screen-config-list");
   const statusEl = document.getElementById("screen-config-status");
 
-  if (!currentInfoEl || !fingerprintEl || !listEl) return;
+  if (!currentInfoEl || !screenNameEl || !listEl) return;
 
   try {
     const data = await request("/api/screen-configs");
     const current = data.current || {};
     const savedLayouts = data.savedLayouts || {};
 
-    // 更新当前配置信息
+    // 更新当前配置信息：使用目标弹出屏幕名称
     const primaryScreen = current.primaryScreen || "未知";
     const screenCount = (current.screens || []).length;
     const screenType = screenCount === 1 ? "单屏" : `${screenCount} 屏`;
-    currentInfoEl.textContent = `${primaryScreen} (${screenType})`;
+    const targetScreenName = data.targetScreenName || primaryScreen;
+    currentInfoEl.textContent = `${targetScreenName} (${screenType})`;
 
-    // 更新指纹
-    const fingerprint = current.fingerprint || "--";
-    fingerprintEl.textContent = fingerprint.length > 8 ? fingerprint.substring(0, 8) : fingerprint;
+    // 更新屏幕名称显示
+    screenNameEl.textContent = targetScreenName;
 
-    // 检查当前配置是否已保存
-    const hasLayout = savedLayouts[current.fingerprint];
+    // 获取目标屏幕对应的布局列表
+    const screenLayouts = savedLayouts[targetScreenName];
+    const layouts = screenLayouts ? screenLayouts.layouts || {} : {};
+    const entries = Object.entries(layouts);
+    const defaultEntry = entries.find(([, l]) => l.isDefault);
+    const activeLayoutExists = entries.some(([layoutId]) => getActiveLayoutKey() === `${targetScreenName}::${layoutId}`);
+
+    // 首次加载或激活布局已失效时，回退到默认布局。
+    if (window.__setActiveLayout && (__activeLayoutScreenName !== targetScreenName || !activeLayoutExists)) {
+      if (defaultEntry) {
+        const [lid, ldata] = defaultEntry;
+        if (!ldata.isPreset) {
+          window.__setActiveLayout(targetScreenName, lid);
+        } else {
+          window.__setActiveLayout("", ""); // 预设布局，隐藏更新按钮
+        }
+      } else {
+        window.__setActiveLayout("", "");
+      }
+    }
+
+    // 检查当前屏幕是否已保存布局
+    const hasLayouts = Object.keys(layouts).length > 0;
     if (statusEl) {
-      if (hasLayout) {
+      if (hasLayouts) {
         statusEl.textContent = "✓";
         statusEl.style.color = "var(--done)";
       } else {
@@ -3405,15 +3464,23 @@ async function loadScreenConfigs() {
     }
 
     // 渲染已保存的布局列表
-    const entries = Object.entries(savedLayouts);
     if (entries.length === 0) {
       listEl.innerHTML = '<div style="color:var(--muted);font-size:0.82rem;padding:4px 0;">暂无保存的布局</div>';
     } else {
-      listEl.innerHTML = entries.map(([fp, layout]) => {
-        const name = layout.configName || fp.substring(0, 8);
-        const isCurrent = fp === current.fingerprint;
+      const screenName = targetScreenName;
+      listEl.innerHTML = entries.map(([layoutId, layout]) => {
+        const name = layout.configName || layoutId;
+        const isPreset = layout.isPreset === true;
+        const isDefault = layout.isDefault === true;
+        const isCurrent = getActiveLayoutKey() === `${screenName}::${layoutId}`;
+        const icons = [];
+        if (isDefault) icons.push("⭐");
+        if (isPreset) icons.push("🔧");
+        if (!isPreset && !isDefault) icons.push("📺");
+        const iconStr = icons.join(" ");
+
         return `
-          <div class="screen-config-item${isCurrent ? " is-current" : ""}" data-fingerprint="${fp}" style="
+          <div class="screen-config-item${isCurrent ? " is-current" : ""}" data-screen-name="${escapeHtml(screenName)}" data-layout-id="${escapeHtml(layoutId)}" style="
             display:flex;
             align-items:center;
             justify-content:space-between;
@@ -3425,14 +3492,17 @@ async function loadScreenConfigs() {
           ">
             <div style="flex:1;min-width:0;overflow:hidden;">
               <div style="font-size:0.84rem;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
-                ${isCurrent ? '<span style="color:var(--done);">✓</span> ' : '📺 '}
-                ${escapeHtml(name)}
+                ${iconStr} ${escapeHtml(name)}
               </div>
-              <div style="font-size:0.72rem;color:var(--muted);font-family:monospace;">${fp.substring(0, 8)}</div>
+              <div style="font-size:0.72rem;color:var(--muted);font-family:monospace;">${escapeHtml(layoutId)}</div>
             </div>
             <div style="display:flex;gap:4px;flex-shrink:0;">
-              <button class="screen-config-apply" data-fingerprint="${fp}" style="padding:4px 8px;font-size:0.76rem;background:var(--accent);color:#fff;border:none;border-radius:4px;cursor:pointer;" title="应用此布局">应用</button>
-              <button class="screen-config-delete danger" data-fingerprint="${fp}" style="padding:4px 8px;font-size:0.76rem;" title="删除此布局">删除</button>
+              ${isCurrent
+                ? '<span style="padding:4px 8px;font-size:0.76rem;color:var(--done);background:rgba(56,211,159,0.1);border-radius:4px;">当前使用</span>'
+                : `<button class="screen-config-apply" data-screen-name="${escapeHtml(screenName)}" data-layout-id="${escapeHtml(layoutId)}" style="padding:4px 8px;font-size:0.76rem;background:var(--accent);color:#fff;border:none;border-radius:4px;cursor:pointer;" title="应用此布局">应用</button>`
+              }
+              ${entries.length > 1 && !isDefault ? `<button class="screen-config-delete danger" data-screen-name="${escapeHtml(screenName)}" data-layout-id="${escapeHtml(layoutId)}" style="padding:4px 8px;font-size:0.76rem;" title="删除此布局">删除</button>` : ""}
+              <button class="screen-config-set-default${isDefault ? " is-active" : ""}" data-screen-name="${escapeHtml(screenName)}" data-layout-id="${escapeHtml(layoutId)}" style="padding:4px 8px;font-size:0.76rem;border-radius:4px;cursor:pointer;" title="设为默认布局"${isDefault ? " disabled" : ""}>⭐ 设为默认</button>
             </div>
           </div>
         `;
@@ -3441,11 +3511,15 @@ async function loadScreenConfigs() {
       // 绑定应用按钮事件
       listEl.querySelectorAll(".screen-config-apply").forEach((btn) => {
         btn.addEventListener("click", async () => {
-          const fp = btn.dataset.fingerprint;
+          const sName = btn.dataset.screenName;
+          const lId = btn.dataset.layoutId;
           try {
             btn.disabled = true;
             btn.textContent = "应用中...";
-            const result = await request(`/api/screen-configs/${fp}/apply`, { method: "POST" });
+            const result = await request(`/api/screen-configs/${encodeURIComponent(sName)}/${encodeURIComponent(lId)}/apply`, { method: "POST" });
+            // 设置为当前激活布局
+            if (window.__setActiveLayout) window.__setActiveLayout(sName, lId);
+            await loadScreenConfigs();
             setMessage(`已应用布局，${result.applied} 个终端位置已更新`);
           } catch (error) {
             setMessage("应用布局失败: " + error.message, true);
@@ -3459,10 +3533,14 @@ async function loadScreenConfigs() {
       // 绑定删除按钮事件
       listEl.querySelectorAll(".screen-config-delete").forEach((btn) => {
         btn.addEventListener("click", async () => {
-          const fp = btn.dataset.fingerprint;
+          const sName = btn.dataset.screenName;
+          const lId = btn.dataset.layoutId;
           if (!confirm("确定要删除此布局配置吗？")) return;
           try {
-            await request(`/api/screen-configs/${fp}`, { method: "DELETE" });
+            await request(`/api/screen-configs/${encodeURIComponent(sName)}/${encodeURIComponent(lId)}`, { method: "DELETE" });
+            if (getActiveLayoutKey() === `${sName}::${lId}` && window.__setActiveLayout) {
+              window.__setActiveLayout("", "");
+            }
             setMessage("布局已删除");
             await loadScreenConfigs();
           } catch (error) {
@@ -3470,11 +3548,28 @@ async function loadScreenConfigs() {
           }
         });
       });
+
+      // 绑定设为默认按钮事件
+      listEl.querySelectorAll(".screen-config-set-default").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const sName = btn.dataset.screenName;
+          const lId = btn.dataset.layoutId;
+          try {
+            btn.disabled = true;
+            await request(`/api/screen-configs/${encodeURIComponent(sName)}/${encodeURIComponent(lId)}/set-default`, { method: "POST" });
+            setMessage("已设为默认布局");
+            await loadScreenConfigs();
+          } catch (error) {
+            setMessage("设为默认失败: " + error.message, true);
+            btn.disabled = false;
+          }
+        });
+      });
     }
   } catch (error) {
     console.warn("加载屏幕配置失败:", error.message);
     currentInfoEl.textContent = "加载失败";
-    fingerprintEl.textContent = "--";
+    screenNameEl.textContent = "--";
   }
 }
 

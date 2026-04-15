@@ -11,6 +11,7 @@
   --warn: #f7c948;
   --error: #ff7d7d;
   --dashboard-padding-px: 4px;
+  --monitor-stage-padding-px: 12px;
   --dashboard-gap-px: 6px;
   --monitor-grid-gap-px: 6px;
   --wall-card-padding-px: 10px;
@@ -132,6 +133,7 @@ input {
   min-height: 0;
   display: flex;
   flex-direction: column;
+  padding: var(--monitor-stage-padding-px);
   overflow: hidden;
 }
 
@@ -2124,6 +2126,24 @@ body.is-resizing-split * {
   font-size: 0.76rem;
   border-radius: 6px;
   min-width: auto;
+}
+
+.screen-config-set-default {
+  background: rgba(148, 163, 184, 0.06);
+  color: var(--muted);
+  box-shadow: none;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+}
+
+.screen-config-set-default:hover:not(:disabled) {
+  background: rgba(104, 210, 255, 0.12);
+  color: var(--accent);
+  border-color: rgba(104, 210, 255, 0.25);
+}
+
+.screen-config-set-default:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 /* ========== App 监控弹窗 ========== */

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
+from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
@@ -13,10 +14,13 @@ from multi_iterm2_manager import __version__
 from multi_iterm2_manager.config import (
     UiSettings,
     delete_screen_layout,
+    ensure_preset_layout,
+    get_default_layout_for_screen,
     get_screen_layout,
     get_screen_layouts,
     load_settings,
     save_screen_layout,
+    set_default_layout,
 )
 from multi_iterm2_manager.display import get_current_screen_config
 from multi_iterm2_manager.models import (
@@ -61,6 +65,86 @@ app = FastAPI(title="多 iTerm2 管理器", version=__version__)
 app.mount("/assets", CachedStaticFiles(directory=service.static_dir()), name="assets")
 set_service(service.app_monitor)
 app.include_router(app_monitor_router)
+
+
+async def _apply_screen_layout(
+    screen_name: str,
+    layout: ScreenLayoutConfig | None,
+    *,
+    persist_default: bool = False,
+) -> dict:
+    """将指定屏幕布局应用到当前活跃终端。"""
+    if not layout:
+        return {
+            "screenName": screen_name,
+            "layoutId": "",
+            "applied": 0,
+            "notFound": [],
+            "errors": [],
+        }
+
+    applied = 0
+    not_found: list[str] = []
+    errors: list[dict[str, str]] = []
+
+    if layout.is_preset and not layout.terminals:
+        from .display import build_preset_frame
+
+        frame_data = build_preset_frame(screen_name)
+        if not frame_data:
+            raise RuntimeError(f"无法获取屏幕 {screen_name} 的信息")
+        frame = TerminalFrame(**frame_data)
+        for record in service.records.values():
+            if record.status.value != "closed":
+                try:
+                    await service.set_frame(record.id, frame)
+                    applied += 1
+                except Exception as exc:
+                    errors.append({"terminal_id": record.id, "error": str(exc)})
+    else:
+        for terminal_id, terminal_layout in layout.terminals.items():
+            record = service.records.get(terminal_id)
+            if not record:
+                not_found.append(terminal_id)
+                continue
+            try:
+                frame = TerminalFrame(
+                    x=terminal_layout.x,
+                    y=terminal_layout.y,
+                    width=terminal_layout.width,
+                    height=terminal_layout.height,
+                )
+                await service.set_frame(terminal_id, frame)
+                applied += 1
+            except Exception as exc:
+                errors.append({"terminal_id": terminal_id, "error": str(exc)})
+
+    if persist_default and layout.layout_id:
+        set_default_layout(screen_name, layout.layout_id)
+
+    return {
+        "screenName": screen_name,
+        "layoutId": layout.layout_id,
+        "applied": applied,
+        "notFound": not_found,
+        "errors": errors,
+    }
+
+
+async def _apply_target_screen_default_layout(target_screen: int | None = None) -> dict | None:
+    """对当前目标屏幕补应用一次默认布局，覆盖重启恢复时的错位窗口。"""
+    screens = service.get_screens()
+    target_index = service.get_target_screen() if target_screen is None else target_screen
+    if target_index < 0 or target_index >= len(screens):
+        return None
+
+    screen_name = screens[target_index]["name"]
+    ensure_preset_layout(screen_name)
+    default_layout = get_default_layout_for_screen(screen_name)
+    if not default_layout:
+        return None
+
+    return await _apply_screen_layout(screen_name, default_layout, persist_default=False)
 
 
 class FramePayload(BaseModel):
@@ -132,6 +216,7 @@ class SetTagsPayload(BaseModel):
 
 class UiSettingsPayload(BaseModel):
     dashboard_padding_px: int = Field(default=4, ge=0, le=48)
+    monitor_stage_padding_px: int = Field(default=12, ge=0, le=64)
     dashboard_gap_px: int = Field(default=6, ge=0, le=48)
     monitor_grid_gap_px: int = Field(default=6, ge=0, le=48)
     wall_card_padding_px: int = Field(default=10, ge=0, le=48)
@@ -148,6 +233,10 @@ class UiSettingsPayload(BaseModel):
 @app.on_event("startup")
 async def on_startup() -> None:
     await service.start()
+    try:
+        await _apply_target_screen_default_layout()
+    except Exception as exc:
+        print(f"[startup] 应用默认屏幕布局失败: {exc}", flush=True)
 
 
 @app.on_event("shutdown")
@@ -194,11 +283,17 @@ class TargetScreenPayload(BaseModel):
 
 @app.put("/api/screens/target")
 async def set_target_screen(payload: TargetScreenPayload) -> dict:
-    """设置目标屏幕"""
+    """设置目标屏幕，并自动应用该屏幕的默认布局"""
     screens = service.get_screens()
     if payload.target_screen >= len(screens):
         raise HTTPException(status_code=400, detail=f"屏幕索引超出范围，当前共 {len(screens)} 个屏幕")
     service.set_target_screen(payload.target_screen)
+
+    if payload.target_screen < 0:
+        # -1 表示不指定当前屏幕，只保存配置，不触发布局应用。
+        return {"targetScreen": service.get_target_screen()}
+
+    await _apply_target_screen_default_layout(payload.target_screen)
     return {"targetScreen": service.get_target_screen()}
 
 
@@ -485,11 +580,34 @@ async def apply_default_frame_to_all() -> dict:
 
 @app.get("/api/screen-configs")
 async def get_screen_configs() -> dict:
-    """获取所有屏幕配置和当前屏幕信息"""
-    from datetime import datetime
+    """获取所有屏幕配置和当前屏幕信息（嵌套布局结构）"""
+    from .display import get_all_screens
 
-    layouts = get_screen_layouts()
     current_config = get_current_screen_config()
+
+    # 获取目标弹出屏幕的名称
+    screens = get_all_screens()
+    target_index = service.get_target_screen()
+    target_screen_name = None
+    if 0 <= target_index < len(screens):
+        target_screen_name = screens[target_index].get("name")
+
+    # 确保所有检测到的屏幕都有预设布局
+    for screen in screens:
+        ensure_preset_layout(screen["name"])
+
+    layout_groups = get_screen_layouts()
+
+    # 返回嵌套结构：screen_name -> { screenName, layouts: { layout_id -> layout_dict } }
+    saved_layouts = {}
+    for screen_name, screen_layouts in layout_groups.items():
+        saved_layouts[screen_name] = {
+            "screenName": screen_name,
+            "layouts": {
+                layout_id: layout.to_dict()
+                for layout_id, layout in screen_layouts.items()
+            },
+        }
 
     return {
         "current": {
@@ -498,7 +616,8 @@ async def get_screen_configs() -> dict:
             "primaryScreen": current_config.primary_screen_name,
             "screens": [s.to_dict() for s in current_config.screens],
         },
-        "savedLayouts": {fp: layout.to_dict() for fp, layout in layouts.items()},
+        "targetScreenName": target_screen_name,
+        "savedLayouts": saved_layouts,
     }
 
 
@@ -506,92 +625,135 @@ class SaveLayoutPayload(BaseModel):
     config_name: str | None = None
 
 
+async def _collect_live_terminal_layouts() -> dict[str, TerminalLayout]:
+    """实时读取活跃终端窗口位置，避免使用过期的内存 frame。"""
+    terminals: dict[str, TerminalLayout] = {}
+    for record in service.records.values():
+        if record.status.value == "closed":
+            continue
+        try:
+            live_frame = await service.backend.get_frame(record.handle)
+        except Exception:
+            live_frame = None
+        if live_frame is None:
+            live_frame = record.frame
+        if live_frame is None:
+            continue
+        record.frame = live_frame
+        terminals[record.id] = TerminalLayout(
+            terminal_id=record.id,
+            x=int(live_frame.x),
+            y=int(live_frame.y),
+            width=int(live_frame.width),
+            height=int(live_frame.height),
+        )
+    return terminals
+
+
 @app.post("/api/screen-configs/save")
 async def save_current_layout(payload: SaveLayoutPayload | None = None) -> dict:
-    """保存当前终端布局到当前屏幕配置"""
+    """保存当前终端布局为新布局（生成唯一 layout_id）"""
     from datetime import datetime
 
     current_config = get_current_screen_config()
 
-    # 获取当前所有活跃终端的位置
-    terminals: dict[str, TerminalLayout] = {}
-    for record in service.records.values():
-        if record.status.value != "closed" and record.frame:
-            terminals[record.id] = TerminalLayout(
-                terminal_id=record.id,
-                x=int(record.frame.x),
-                y=int(record.frame.y),
-                width=int(record.frame.width),
-                height=int(record.frame.height),
-            )
+    # 获取当前所有活跃终端的实时位置
+    terminals = await _collect_live_terminal_layouts()
 
-    # 创建布局配置
-    config_name = payload.config_name if payload and payload.config_name else f"配置 {current_config.fingerprint[:4]}"
+    # 使用目标弹出屏幕名称作为 key
+    screens = service.get_screens()
+    target_index = service.get_target_screen()
+    screen_name = screens[target_index]["name"] if 0 <= target_index < len(screens) else current_config.primary_screen_name
+    config_name = payload.config_name if payload and payload.config_name else f"{screen_name} 布局"
+
+    # 检查同名布局
+    existing_layouts = get_screen_layouts()
+    screen_group = existing_layouts.get(screen_name, {})
+    for lid, l in screen_group.items():
+        if l.config_name == config_name:
+            raise HTTPException(status_code=409, detail=f"该屏幕已有名为「{config_name}」的布局，请使用其他名称")
+
+    layout_id = f"user_{uuid4().hex[:8]}"
     layout = ScreenLayoutConfig(
-        screen_fingerprint=current_config.fingerprint,
+        screen_name=screen_name,
         config_name=config_name,
         created_at=datetime.now().isoformat(timespec="seconds"),
         terminals=terminals,
+        layout_id=layout_id,
     )
 
-    # 保存到配置文件
-    save_screen_layout(current_config.fingerprint, layout)
+    # 保存到配置文件，使用屏幕名称和 layout_id
+    save_screen_layout(screen_name, layout_id, layout)
 
     return {
         "success": True,
-        "fingerprint": current_config.fingerprint,
+        "screenName": screen_name,
+        "layoutId": layout_id,
         "terminalCount": len(terminals),
         "layout": layout.to_dict(),
     }
 
 
-@app.delete("/api/screen-configs/{fingerprint}")
-async def delete_screen_config(fingerprint: str) -> dict:
-    """删除指定的屏幕配置"""
-    success = delete_screen_layout(fingerprint)
-    if not success:
-        raise HTTPException(status_code=404, detail=f"配置 {fingerprint} 不存在")
-    return {"success": True, "fingerprint": fingerprint}
+@app.put("/api/screen-configs/{screen_name}/{layout_id}")
+async def update_screen_layout(screen_name: str, layout_id: str) -> dict:
+    """更新已有布局的终端位置（保持名称等不变）"""
+    existing = get_screen_layout(screen_name, layout_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="布局不存在")
 
+    # 获取当前所有活跃终端的实时位置
+    terminals = await _collect_live_terminal_layouts()
 
-@app.post("/api/screen-configs/{fingerprint}/apply")
-async def apply_screen_config(fingerprint: str) -> dict:
-    """应用指定的屏幕配置，将保存的位置应用到终端窗口"""
-    from .models import TerminalFrame
-
-    layout = get_screen_layout(fingerprint)
-    if not layout:
-        raise HTTPException(status_code=404, detail=f"配置 {fingerprint} 不存在")
-
-    applied = 0
-    not_found = []
-    errors = []
-
-    for terminal_id, terminal_layout in layout.terminals.items():
-        record = service.records.get(terminal_id)
-        if not record:
-            not_found.append(terminal_id)
-            continue
-
-        try:
-            frame = TerminalFrame(
-                x=terminal_layout.x,
-                y=terminal_layout.y,
-                width=terminal_layout.width,
-                height=terminal_layout.height,
-            )
-            await service.set_frame(terminal_id, frame)
-            applied += 1
-        except Exception as e:
-            errors.append({"terminal_id": terminal_id, "error": str(e)})
+    # 更新布局（保留原名称、默认状态等）
+    existing.terminals = terminals
+    save_screen_layout(screen_name, layout_id, existing)
 
     return {
         "success": True,
-        "fingerprint": fingerprint,
-        "applied": applied,
-        "notFound": not_found,
-        "errors": errors,
+        "screenName": screen_name,
+        "layoutId": layout_id,
+        "terminalCount": len(terminals),
     }
+
+
+@app.delete("/api/screen-configs/{screen_name}/{layout_id}")
+async def delete_screen_config(screen_name: str, layout_id: str) -> dict:
+    """删除指定屏幕的指定布局"""
+    success = delete_screen_layout(screen_name, layout_id)
+    if not success:
+        raise HTTPException(status_code=404, detail=f"布局 {screen_name}/{layout_id} 不存在或无法删除")
+    return {"success": True, "screenName": screen_name, "layoutId": layout_id}
+
+
+@app.post("/api/screen-configs/{screen_name}/{layout_id}/apply")
+async def apply_screen_config(screen_name: str, layout_id: str) -> dict:
+    """应用指定屏幕的指定布局，将保存的位置应用到终端窗口"""
+    layout = get_screen_layout(screen_name, layout_id)
+    if not layout:
+        raise HTTPException(status_code=404, detail=f"布局 {screen_name}/{layout_id} 不存在")
+
+    try:
+        result = await _apply_screen_layout(screen_name, layout, persist_default=True)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return {
+        "success": True,
+        "screenName": result["screenName"],
+        "layoutId": result["layoutId"],
+        "applied": result["applied"],
+        "notFound": result["notFound"],
+        "errors": result["errors"],
+    }
+
+
+@app.post("/api/screen-configs/{screen_name}/{layout_id}/set-default")
+async def set_default_layout_api(screen_name: str, layout_id: str) -> dict:
+    """将指定布局设为该屏幕的默认布局"""
+    success = set_default_layout(screen_name, layout_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="布局不存在")
+    return {"success": True, "screenName": screen_name, "layoutId": layout_id}
 
 
 @app.websocket("/ws")

@@ -420,3 +420,30 @@ def get_current_screen_config() -> ScreenConfig:
         screens=screens,
         created_at=datetime.now().isoformat(timespec="seconds"),
     )
+
+
+def build_preset_frame(screen_name: str) -> dict | None:
+    """根据屏幕名称构建预设窗口区域（屏幕中央 80%）。
+
+    Args:
+        screen_name: 屏幕名称，用于匹配 get_all_screens() 返回的屏幕
+
+    Returns:
+        包含 x, y, width, height 的字典，未找到屏幕时返回 None
+    """
+    screens = get_all_screens()
+    matched = next((s for s in screens if s["name"] == screen_name), None)
+    if matched is None:
+        return None
+
+    sx = matched["x"]
+    sy = matched["y"]
+    sw = matched["width"]
+    sh = matched["height"]
+
+    return {
+        "x": round(sx + sw * 0.10),
+        "y": round(sy + sh * 0.10),
+        "width": round(sw * 0.80),
+        "height": round(sh * 0.80),
+    }

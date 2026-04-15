@@ -72,17 +72,23 @@ class TerminalLayout:
 @dataclass
 class ScreenLayoutConfig:
     """完整的屏幕布局配置"""
-    screen_fingerprint: str = ""  # 关联的屏幕配置指纹
+    screen_name: str = ""  # 关联的屏幕名称（主屏幕名称）
     config_name: str = ""
     created_at: str = ""
     terminals: dict[str, TerminalLayout] = field(default_factory=dict)
+    is_preset: bool = False  # 是否为系统预设布局
+    is_default: bool = False  # 是否为该屏幕的默认布局
+    layout_id: str = ""  # 布局在屏幕组内的唯一ID
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "screenFingerprint": self.screen_fingerprint,
+            "screenName": self.screen_name,
             "configName": self.config_name,
             "createdAt": self.created_at,
             "terminals": {k: v.to_dict() for k, v in self.terminals.items()},
+            "isPreset": self.is_preset,
+            "isDefault": self.is_default,
+            "layoutId": self.layout_id,
         }
 
 
