@@ -1,5 +1,6 @@
 ui:
   dashboard_padding_px: 4
+  monitor_stage_padding_px: 12
   dashboard_gap_px: 6
   monitor_grid_gap_px: 6
   wall_card_padding_px: 10
@@ -14,41 +15,106 @@ ui:
   target_screen: 1
   default_frames_by_screen:
     Mi Monitor:
-      x: 1711.0
-      y: -205.0
-      width: 2524.0
-      height: 1125.0
+      x: 1713.0
+      y: -177.0
+      width: 2547.0
+      height: 1091.0
     H27T13:
-      x: 0.0
-      y: 124.0
-      width: 2524.0
-      height: 1125.0
+      x: 1.0
+      y: 191.0
+      width: 2555.0
+      height: 1057.0
 screen_layouts:
-  470bcf6b:
-    configName: 公司-双屏幕
-    createdAt: '2026-04-14T17:39:46'
-    terminals:
-      task-f32d9fca:
-        terminalId: task-f32d9fca
-        x: 1711
-        y: -205
-        width: 2524
-        height: 1125
-      task-bae75e74:
-        terminalId: task-bae75e74
-        x: 1711
-        y: -205
-        width: 2524
-        height: 1125
-      task-77827b4f:
-        terminalId: task-77827b4f
-        x: 1711
-        y: -205
-        width: 2524
-        height: 1125
-      task-eba029fa:
-        terminalId: task-eba029fa
-        x: 1711
-        y: -205
-        width: 2524
-        height: 1125
+  H27T13:
+    layouts:
+      user_5c20a19b:
+        configName: 家
+        createdAt: '2026-04-15T05:06:18'
+        terminals:
+          task-f32d9fca:
+            terminalId: task-f32d9fca
+            x: 1
+            y: 191
+            width: 2555
+            height: 1057
+          task-bae75e74:
+            terminalId: task-bae75e74
+            x: 1
+            y: 191
+            width: 2555
+            height: 1057
+          task-77827b4f:
+            terminalId: task-77827b4f
+            x: 1
+            y: 191
+            width: 2555
+            height: 1057
+          task-eba029fa:
+            terminalId: task-eba029fa
+            x: 1
+            y: 191
+            width: 2555
+            height: 1057
+          task-d20db943:
+            terminalId: task-d20db943
+            x: 1
+            y: 191
+            width: 2555
+            height: 1057
+        isPreset: false
+        isDefault: true
+        layoutId: user_5c20a19b
+  Color LCD:
+    layouts:
+      __preset__:
+        configName: 系统预设
+        createdAt: '2026-04-15T04:19:54'
+        terminals: {}
+        isPreset: true
+        isDefault: true
+        layoutId: ''
+  Mi Monitor:
+    layouts:
+      user_7283040c:
+        configName: 公司
+        createdAt: '2026-04-15T09:37:47'
+        terminals:
+          task-f32d9fca:
+            terminalId: task-f32d9fca
+            x: 1713
+            y: -177
+            width: 2547
+            height: 1091
+          task-bae75e74:
+            terminalId: task-bae75e74
+            x: 1713
+            y: -177
+            width: 2547
+            height: 1091
+          task-77827b4f:
+            terminalId: task-77827b4f
+            x: 1713
+            y: -177
+            width: 2547
+            height: 1091
+          task-d20db943:
+            terminalId: task-d20db943
+            x: 1713
+            y: -177
+            width: 2547
+            height: 1091
+          task-b3e82234:
+            terminalId: task-b3e82234
+            x: 1713
+            y: -177
+            width: 2547
+            height: 1091
+          task-7a9a14ec:
+            terminalId: task-7a9a14ec
+            x: 1713
+            y: -177
+            width: 2547
+            height: 1091
+        isPreset: false
+        isDefault: true
+        layoutId: user_7283040c

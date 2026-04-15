@@ -5,3 +5,9 @@ __pycache__/
 .DS_Store
 src/*.egg-info/
 src/multi_iterm2_manager.egg-info/
+
+# Local agent/debug artifacts
+.claude/settings.local.json
+.claude/commands/
+.playwright-mcp/
+test-results/
