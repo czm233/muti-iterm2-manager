@@ -765,7 +765,6 @@ input {
 
 .statusbar #build-version {
   color: rgba(231, 235, 243, 0.85);
-  margin-left: auto;
   flex-shrink: 0;
 }
 
