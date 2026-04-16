@@ -1946,6 +1946,7 @@ body.is-resizing-split * {
 
 .statusbar #ws-status {
   color: #70e1b4;
+  margin-left: auto;
 }
 
 .topbar-queue:not(:empty) {
