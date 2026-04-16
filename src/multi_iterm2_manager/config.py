@@ -13,9 +13,9 @@ from .models import ScreenLayoutConfig, TerminalLayout
 
 @dataclass
 class UiSettings:
-    dashboard_padding_px: int = 4
+    dashboard_padding_px: int = 0
     monitor_stage_padding_px: int = 12
-    dashboard_gap_px: int = 6
+    dashboard_gap_px: int = 5
     monitor_grid_gap_px: int = 6
     wall_card_padding_px: int = 10
     wall_card_border_radius_px: int = 22

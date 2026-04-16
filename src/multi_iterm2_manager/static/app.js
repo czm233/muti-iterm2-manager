@@ -169,9 +169,9 @@ const topbarFilters = document.getElementById("topbar-filters");
 const tagFilterTabs = document.getElementById("tag-filter-tabs");
 
 const DEFAULT_UI_SETTINGS = {
-  dashboard_padding_px: 4,
+  dashboard_padding_px: 0,
   monitor_stage_padding_px: 12,
-  dashboard_gap_px: 6,
+  dashboard_gap_px: 5,
   monitor_grid_gap_px: 6,
   wall_card_padding_px: 10,
   wall_card_border_width_px: 1,
@@ -3757,8 +3757,8 @@ async function fetchSystemStats() {
 
     setStatusbarLabel(statCpuEl, `CPU ${data.cpu_percent.toFixed(0)}%`);
     setStatusbarLabel(statMemEl, `MEM ${data.memory_percent.toFixed(0)}%`);
-    setStatusbarLabel(statDiskEl, `占用 ${data.disk_percent.toFixed(0)}%`);
-    setStatusbarLabel(statDiskFreeEl, `剩余 ${data.disk_free_gb}G`);
+    setStatusbarLabel(statDiskEl, `DISK ${data.disk_percent.toFixed(0)}%`);
+    setStatusbarLabel(statDiskFreeEl, `FREE ${data.disk_free_gb}G`);
 
     applyStatLevel(statCpuEl, getStatLevel(data.cpu_percent));
     applyStatLevel(statMemEl, getStatLevel(data.memory_percent));

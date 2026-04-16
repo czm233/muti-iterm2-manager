@@ -215,9 +215,9 @@ class SetTagsPayload(BaseModel):
 
 
 class UiSettingsPayload(BaseModel):
-    dashboard_padding_px: int = Field(default=4, ge=0, le=48)
+    dashboard_padding_px: int = Field(default=0, ge=0, le=48)
     monitor_stage_padding_px: int = Field(default=12, ge=0, le=64)
-    dashboard_gap_px: int = Field(default=6, ge=0, le=48)
+    dashboard_gap_px: int = Field(default=5, ge=0, le=48)
     monitor_grid_gap_px: int = Field(default=6, ge=0, le=48)
     wall_card_padding_px: int = Field(default=10, ge=0, le=48)
     wall_card_border_radius_px: int = Field(default=22, ge=0, le=48)

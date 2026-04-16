@@ -10,9 +10,9 @@
   --done: #38d39f;
   --warn: #f7c948;
   --error: #ff7d7d;
-  --dashboard-padding-px: 4px;
+  --dashboard-padding-px: 0px;
   --monitor-stage-padding-px: 12px;
-  --dashboard-gap-px: 6px;
+  --dashboard-gap-px: 5px;
   --monitor-grid-gap-px: 6px;
   --wall-card-padding-px: 10px;
   --wall-card-radius-px: 0px;
@@ -119,7 +119,7 @@ input {
   max-width: 100vw;
   margin: 0 auto;
   padding: var(--dashboard-padding-px);
-  padding-bottom: calc(var(--dashboard-padding-px) + var(--statusbar-height));
+  padding-bottom: calc(var(--dashboard-padding-px) + var(--statusbar-height) + var(--dashboard-gap-px));
   height: 100%;
   overflow-x: hidden;
   background: #000;
@@ -130,7 +130,7 @@ input {
   flex-direction: column;
   gap: var(--dashboard-gap-px);
   align-items: stretch;
-  height: calc(100vh - (var(--dashboard-padding-px) * 2) - var(--statusbar-height));
+  height: calc(100vh - (var(--dashboard-padding-px) * 2) - var(--statusbar-height) - var(--dashboard-gap-px));
   overflow: hidden;
 }
 
@@ -140,7 +140,7 @@ input {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  padding: var(--monitor-stage-padding-px);
+  padding: 0 var(--monitor-stage-padding-px);
   overflow: hidden;
 }
 
@@ -174,7 +174,7 @@ input {
 
 .topbar {
   position: sticky;
-  top: 4px;
+  top: 0;
   z-index: 30;
   background: #000;
   border-color: var(--topbar-border);
@@ -196,7 +196,7 @@ input {
   flex-wrap: nowrap;
   align-items: center;
   gap: 8px 12px;
-  padding: 4px 10px;
+  padding: 0 12px;
   min-height: 34px;
 }
 
@@ -293,7 +293,7 @@ input {
   align-items: center;
   justify-content: flex-start;
   gap: 12px;
-  padding: 0 10px;
+  padding: 0 12px;
   overflow-x: auto;
   overflow-y: hidden;
   scrollbar-width: none;
@@ -718,19 +718,21 @@ input {
 
 .statusbar .status-meter {
   display: inline-flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 5px;
-  min-width: 96px;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
 }
 
 .statusbar .status-meter-label {
   display: block;
   line-height: 1;
+  white-space: nowrap;
 }
 
 .statusbar .status-meter-track {
   display: block;
+  flex-shrink: 0;
   width: 84px;
   height: 8px;
   box-sizing: border-box;
@@ -1558,7 +1560,8 @@ button.is-active {
 
 @media (max-width: 780px) {
   .page {
-    padding: 6px;
+    padding: 0;
+    padding-bottom: calc(var(--statusbar-height) + var(--dashboard-gap-px));
   }
 
   .ui-settings-form {
