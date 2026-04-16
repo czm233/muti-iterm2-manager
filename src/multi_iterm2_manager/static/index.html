@@ -134,6 +134,7 @@
 
       <footer class="statusbar" aria-label="系统状态栏">
         <div class="statusbar-inner">
+          <span id="ws-status" class="status-pill status-connecting">连接中</span>
           <span id="stat-cpu" class="status-pill stat-pill status-meter" title="CPU 使用率">
             <span class="status-meter-label">CPU --%</span>
             <span class="status-meter-track"><span class="status-meter-fill"></span></span>
@@ -150,7 +151,6 @@
             <span class="status-meter-label">剩余 --G</span>
             <span class="status-meter-track"><span class="status-meter-fill"></span></span>
           </span>
-          <span id="ws-status" class="status-pill status-connecting">连接中</span>
           <span id="message" class="topbar-message statusbar-message"></span>
           <span id="build-version" class="status-pill">{{BUILD_VERSION}}</span>
         </div>
