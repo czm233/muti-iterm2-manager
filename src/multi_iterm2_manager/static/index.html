@@ -17,106 +17,122 @@
               <h1 class="eyebrow">Monitor Wall</h1>
             </div>
 
-            <details class="topbar-menu topbar-menu--wide">
-              <summary class="topbar-menu-trigger topbar-menu-trigger--menu">菜单</summary>
-              <div class="topbar-menu-panel">
-                <div class="panel-title">创建新任务</div>
-                <form id="create-form" class="create-form topbar-form">
-                  <input id="name" name="name" type="text" placeholder="任务名称，例如：Claude 任务 A（可留空）" />
-                  <div class="topbar-menu-actions">
-                    <button type="submit" class="primary">启动并纳入监控</button>
-                    <button type="button" id="create-demo" class="secondary">创建示例任务</button>
-                  </div>
-                </form>
-                <div class="panel-divider"></div>
-                <div class="panel-title-row">
-                  <div class="panel-title">接管已有终端</div>
-                  <button id="adopt-all-sessions" class="secondary" style="font-size:0.8rem;padding:2px 8px;">一键接管</button>
+            <div class="topbar-menu topbar-menu--wide">
+              <button
+                type="button"
+                class="topbar-menu-trigger topbar-menu-trigger--menu"
+                aria-expanded="false"
+                aria-controls="topbar-menu-panel"
+              >菜单</button>
+              <div class="topbar-menu-shell">
+                <div id="topbar-menu-panel" class="topbar-menu-panel" role="region" aria-label="顶部菜单" aria-hidden="true">
+                  <section class="topbar-menu-section topbar-menu-section--create">
+                    <div class="panel-title">创建新任务</div>
+                    <form id="create-form" class="create-form topbar-form">
+                      <input id="name" name="name" type="text" placeholder="任务名称，例如：Claude 任务 A（可留空）" />
+                      <div class="topbar-menu-actions">
+                        <button type="submit" class="primary">启动并纳入监控</button>
+                        <button type="button" id="create-demo" class="secondary">创建示例任务</button>
+                      </div>
+                    </form>
+                  </section>
+
+                  <section class="topbar-menu-section topbar-menu-section--adopt">
+                    <div class="panel-title-row">
+                      <div class="panel-title">接管已有终端</div>
+                      <button id="adopt-all-sessions" class="secondary" style="font-size:0.8rem;padding:2px 8px;">一键接管</button>
+                    </div>
+                    <div id="adopt-session-list" class="adopt-session-list">
+                      <button id="scan-sessions" class="secondary">扫描可用终端</button>
+                    </div>
+                  </section>
+
+                  <section class="topbar-menu-section topbar-menu-section--actions">
+                    <div class="panel-title">操作</div>
+                    <div class="topbar-menu-actions">
+                      <button id="monitor-mode" class="secondary">收起所有</button>
+                      <button id="refresh-all" class="secondary">刷新全部</button>
+                      <button id="close-all" class="danger">关闭全部</button>
+                    </div>
+                  </section>
+
+                  <section class="topbar-menu-section topbar-menu-section--tuning">
+                    <div class="panel-title">界面调优</div>
+                    <form id="ui-settings-form" class="topbar-form ui-settings-form">
+                      <label>
+                        <span>页面边距</span>
+                        <input name="dashboard_padding_px" type="number" min="0" max="48" step="1" />
+                      </label>
+                      <label>
+                        <span>监控区边距</span>
+                        <input name="monitor_stage_padding_px" type="number" min="0" max="64" step="1" />
+                      </label>
+                      <label>
+                        <span>区域间距</span>
+                        <input name="dashboard_gap_px" type="number" min="0" max="48" step="1" />
+                      </label>
+                      <label>
+                        <span>终端间距</span>
+                        <input name="monitor_grid_gap_px" type="number" min="0" max="48" step="1" />
+                      </label>
+                      <label>
+                        <span>终端外边框</span>
+                        <input name="wall_card_border_width_px" type="number" min="0" max="8" step="0.5" />
+                      </label>
+                      <label>
+                        <span>终端内边框</span>
+                        <input name="wall_card_terminal_border_width_px" type="number" min="0" max="8" step="0.5" />
+                      </label>
+                      <label>
+                        <span>终端内边距</span>
+                        <input name="wall_card_padding_px" type="number" min="0" max="48" step="1" />
+                      </label>
+                      <label>
+                        <span>分割透明边宽</span>
+                        <input name="split_resizer_hit_area_px" type="number" min="4" max="48" step="1" />
+                      </label>
+                      <label>
+                        <span>分割线宽</span>
+                        <input name="split_resizer_line_width_px" type="number" min="0" max="8" step="1" />
+                      </label>
+                      <label>
+                        <span>网格拖拽边宽</span>
+                        <input name="grid_resizer_hit_area_px" type="number" min="4" max="48" step="1" />
+                      </label>
+                      <label>
+                        <span>网格线宽</span>
+                        <input name="grid_resizer_line_width_px" type="number" min="0" max="8" step="1" />
+                      </label>
+                      <label>
+                        <span>筛选滑动速度</span>
+                        <input name="filter_tab_slide_duration_ms" type="number" min="50" max="5000" step="10" />
+                      </label>
+                      <label>
+                        <span>终端字体大小</span>
+                        <input name="terminal_font_size_px" type="number" min="6" max="24" step="1" />
+                      </label>
+                      <label>
+                        <span>状态栏字体大小</span>
+                        <input name="statusbar_font_size_px" type="number" min="10" max="18" step="1" />
+                      </label>
+                      <label>
+                        <span>状态条宽度</span>
+                        <input name="statusbar_meter_width_px" type="number" min="48" max="160" step="1" />
+                      </label>
+                      <label>
+                        <span>状态条高度</span>
+                        <input name="statusbar_meter_height_px" type="number" min="6" max="14" step="1" />
+                      </label>
+                      <div class="topbar-menu-actions" style="align-items:center;">
+                        <button type="button" id="ui-settings-reset" class="ghost">恢复默认</button>
+                        <div id="ui-settings-path" class="wall-page-text" style="margin:0;"></div>
+                      </div>
+                    </form>
+                    <div id="topbar-menu-tuning-extra" class="topbar-menu-tuning-extra"></div>
+                  </section>
                 </div>
-                <div id="adopt-session-list" class="adopt-session-list">
-                  <button id="scan-sessions" class="secondary">扫描可用终端</button>
-                </div>
-                <div class="panel-divider"></div>
-                <div class="panel-title">操作</div>
-                <div class="topbar-menu-actions">
-                  <button id="monitor-mode" class="secondary">收起所有</button>
-                  <button id="refresh-all" class="secondary">刷新全部</button>
-                  <button id="close-all" class="danger">关闭全部</button>
-                </div>
-                <div class="panel-divider"></div>
-                <div class="panel-title">界面调优</div>
-                <form id="ui-settings-form" class="topbar-form ui-settings-form">
-                  <label>
-                    <span>页面边距</span>
-                    <input name="dashboard_padding_px" type="number" min="0" max="48" step="1" />
-                  </label>
-                  <label>
-                    <span>监控区边距</span>
-                    <input name="monitor_stage_padding_px" type="number" min="0" max="64" step="1" />
-                  </label>
-                  <label>
-                    <span>区域间距</span>
-                    <input name="dashboard_gap_px" type="number" min="0" max="48" step="1" />
-                  </label>
-                  <label>
-                    <span>终端间距</span>
-                    <input name="monitor_grid_gap_px" type="number" min="0" max="48" step="1" />
-                  </label>
-                  <label>
-                    <span>终端外边框</span>
-                    <input name="wall_card_border_width_px" type="number" min="0" max="8" step="0.5" />
-                  </label>
-                  <label>
-                    <span>终端内边框</span>
-                    <input name="wall_card_terminal_border_width_px" type="number" min="0" max="8" step="0.5" />
-                  </label>
-                  <label>
-                    <span>终端内边距</span>
-                    <input name="wall_card_padding_px" type="number" min="0" max="48" step="1" />
-                  </label>
-                  <label>
-                    <span>分割透明边宽</span>
-                    <input name="split_resizer_hit_area_px" type="number" min="4" max="48" step="1" />
-                  </label>
-                  <label>
-                    <span>分割线宽</span>
-                    <input name="split_resizer_line_width_px" type="number" min="0" max="8" step="1" />
-                  </label>
-                  <label>
-                    <span>网格拖拽边宽</span>
-                    <input name="grid_resizer_hit_area_px" type="number" min="4" max="48" step="1" />
-                  </label>
-                  <label>
-                    <span>网格线宽</span>
-                    <input name="grid_resizer_line_width_px" type="number" min="0" max="8" step="1" />
-                  </label>
-                  <label>
-                    <span>筛选滑动速度</span>
-                    <input name="filter_tab_slide_duration_ms" type="number" min="50" max="5000" step="10" />
-                  </label>
-                  <label>
-                    <span>终端字体大小</span>
-                    <input name="terminal_font_size_px" type="number" min="6" max="24" step="1" />
-                  </label>
-                  <label>
-                    <span>状态栏字体大小</span>
-                    <input name="statusbar_font_size_px" type="number" min="10" max="18" step="1" />
-                  </label>
-                  <label>
-                    <span>状态条宽度</span>
-                    <input name="statusbar_meter_width_px" type="number" min="48" max="160" step="1" />
-                  </label>
-                  <label>
-                    <span>状态条高度</span>
-                    <input name="statusbar_meter_height_px" type="number" min="6" max="14" step="1" />
-                  </label>
-                  <div class="topbar-menu-actions" style="align-items:center;">
-                    <button type="button" id="ui-settings-reset" class="ghost">恢复默认</button>
-                    <div id="ui-settings-path" class="wall-page-text" style="margin:0;"></div>
-                  </div>
-                </form>
               </div>
-            </details>
+            </div>
 
             <span class="topbar-divider"></span>
             <div class="topbar-shortcuts">

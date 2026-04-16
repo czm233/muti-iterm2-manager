@@ -167,6 +167,88 @@ const uiSettingsResetButton = document.getElementById("ui-settings-reset");
 const uiSettingsPath = document.getElementById("ui-settings-path");
 const topbarFilters = document.getElementById("topbar-filters");
 const tagFilterTabs = document.getElementById("tag-filter-tabs");
+function getTopbarMenus() {
+  return [...document.querySelectorAll(".topbar-menu")];
+}
+
+function getTopbarMenuTrigger(menu) {
+  return menu?.querySelector(".topbar-menu-trigger");
+}
+
+function getTopbarMenuPanel(menu) {
+  const trigger = getTopbarMenuTrigger(menu);
+  const panelId = trigger?.getAttribute("aria-controls");
+  if (panelId) {
+    return document.getElementById(panelId);
+  }
+  return menu?.querySelector(".topbar-menu-panel");
+}
+
+function updateTopbarMenuExpandedState(menu, expanded) {
+  const trigger = getTopbarMenuTrigger(menu);
+  if (trigger) {
+    trigger.setAttribute("aria-expanded", expanded ? "true" : "false");
+  }
+
+  const panel = getTopbarMenuPanel(menu);
+  if (panel) {
+    panel.setAttribute("aria-hidden", expanded ? "false" : "true");
+  }
+}
+
+function closeTopbarMenu(menu) {
+  if (!menu || !menu.classList.contains("is-open")) {
+    return;
+  }
+
+  menu.classList.remove("is-open");
+  updateTopbarMenuExpandedState(menu, false);
+}
+
+function closeAllTopbarMenus(exceptMenu = null) {
+  getTopbarMenus().forEach((menu) => {
+    if (menu !== exceptMenu) {
+      closeTopbarMenu(menu);
+    }
+  });
+}
+
+function openTopbarMenu(menu) {
+  if (!menu) {
+    return;
+  }
+
+  closeAllTopbarMenus(menu);
+  menu.classList.add("is-open");
+  updateTopbarMenuExpandedState(menu, true);
+
+  if (menu.classList.contains("topbar-menu--wide")) {
+    loadScreenSelector();
+    loadScreenConfigs();
+  }
+}
+
+function initTopbarMenus() {
+  getTopbarMenus().forEach((menu) => {
+    const trigger = getTopbarMenuTrigger(menu);
+    if (!trigger) {
+      return;
+    }
+
+    updateTopbarMenuExpandedState(menu, menu.classList.contains("is-open"));
+    trigger.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+
+      if (menu.classList.contains("is-open")) {
+        closeTopbarMenu(menu);
+        return;
+      }
+
+      openTopbarMenu(menu);
+    });
+  });
+}
 
 const DEFAULT_UI_SETTINGS = {
   dashboard_padding_px: 0,
@@ -1551,6 +1633,14 @@ async function focusTerminal(id, name) {
 /* ---- 顶部队列 ---- */
 const ATTENTION_STATUSES = new Set(["waiting", "error"]);
 
+function syncQueueCardHighlights() {
+  const queuedStatusById = new Map(state.queue.map((item) => [item.id, item.status]));
+  document.querySelectorAll(".wall-card[data-terminal-id]").forEach((card) => {
+    const queuedStatus = queuedStatusById.get(card.dataset.terminalId);
+    card.classList.toggle("wall-card--queued-done", queuedStatus === "done");
+  });
+}
+
 function updateQueue(terminalId, oldStatus, newStatus) {
   // 隐藏的终端不入队
   if (state.hiddenTerminalIds.has(terminalId)) {
@@ -1623,7 +1713,10 @@ function renderQueue() {
   if (!container) return;
   // 生成当前队列的指纹，无变化则跳过
   const key = state.queue.map(q => `${q.id}:${q.name}:${q.status}`).join("|");
-  if (key === _lastQueueKey) return;
+  if (key === _lastQueueKey) {
+    syncQueueCardHighlights();
+    return;
+  }
   _lastQueueKey = key;
   container.innerHTML = "";
   for (const item of state.queue) {
@@ -1643,6 +1736,7 @@ function renderQueue() {
     };
     container.appendChild(pill);
   }
+  syncQueueCardHighlights();
 }
 
 function initQueueFromSnapshot() {
@@ -1801,7 +1895,7 @@ function bindCardActions(card, record) {
 
   terminalArea.onclick = async (event) => {
     // 点击终端区域时主动关闭所有已展开的顶部菜单（因 stopPropagation 会阻止冒泡）
-    document.querySelectorAll(".topbar-menu[open]").forEach((d) => d.removeAttribute("open"));
+    closeAllTopbarMenus();
     event.stopPropagation();
     if (state.activeCardDrag || state.draggedTerminalId) return;
     if (record.status === "closed") return;
@@ -2112,6 +2206,7 @@ function renderTerminal(record) {
     card.id = `card-${record.id}`;
     card.className = "wall-card";
   }
+  card.dataset.terminalId = record.id;
 
   // 正在编辑此卡片标题时，跳过全卡 innerHTML 替换
   // 否则 DOM 重建会销毁聚焦中的 input，触发 blur → finishRename，打断用户输入
@@ -2675,7 +2770,7 @@ function renderAppCard(monitor) {
   const screenshotArea = card.querySelector(".app-card-screenshot-area");
   screenshotArea.onclick = async (event) => {
     event.stopPropagation();
-    document.querySelectorAll(".topbar-menu[open]").forEach((d) => d.removeAttribute("open"));
+    closeAllTopbarMenus();
     try {
       await focusApp(monitor.id);
     } catch (error) {
@@ -3235,7 +3330,8 @@ if (uiSettingsResetButton) {
  * 在调优面板中动态注入屏幕选择 UI
  */
 function injectScreenSelector() {
-  const tuningPanel = document.querySelector(".topbar-menu--wide > .topbar-menu-panel");
+  const tuningPanel = document.getElementById("topbar-menu-tuning-extra")
+    || document.querySelector(".topbar-menu--wide .topbar-menu-panel");
   if (!tuningPanel) return;
 
   // 创建分隔线
@@ -3257,15 +3353,7 @@ function injectScreenSelector() {
   form.style.gridTemplateColumns = "1fr"; // 单列布局
   form.innerHTML = `
     <label>
-      <select id="target-screen-select" style="
-        background: var(--surface);
-        color: var(--fg);
-        border: 1px solid var(--border);
-        border-radius: 6px;
-        padding: 6px 8px;
-        font-size: 0.92rem;
-        width: 100%;
-      ">
+      <select id="target-screen-select">
         <option value="-1">不指定（当前屏幕）</option>
       </select>
     </label>
@@ -3379,7 +3467,8 @@ function getActiveLayoutKey() {
  * 在调优面板中动态注入屏幕配置管理 UI
  */
 function injectScreenConfigPanel() {
-  const tuningPanel = document.querySelector(".topbar-menu--wide > .topbar-menu-panel");
+  const tuningPanel = document.getElementById("topbar-menu-tuning-extra")
+    || document.querySelector(".topbar-menu--wide .topbar-menu-panel");
   if (!tuningPanel) return;
 
   // 创建分隔线
@@ -3645,6 +3734,7 @@ async function loadScreenConfigs() {
 
 // 初始化屏幕配置管理 UI
 injectScreenConfigPanel();
+initTopbarMenus();
 
 // 刷新屏幕列表按钮
 const refreshScreenBtn = document.getElementById("refresh-screen-list");
@@ -3654,17 +3744,6 @@ if (refreshScreenBtn) {
     refreshScreenBtn.style.transition = "transform 0.4s";
     await loadScreenSelector();
     setTimeout(() => { refreshScreenBtn.style.transform = ""; refreshScreenBtn.style.transition = ""; }, 400);
-  });
-}
-
-// 监听调优面板展开事件，实时刷新屏幕列表（支持热插拔外接屏幕）
-const tuningDetails = document.querySelector("details.topbar-menu--wide");
-if (tuningDetails) {
-  tuningDetails.addEventListener("toggle", () => {
-    if (tuningDetails.open) {
-      loadScreenSelector();
-      loadScreenConfigs();
-    }
   });
 }
 
@@ -3707,8 +3786,10 @@ document.addEventListener("mousedown", (e) => {
 
 // 点击外部或按 Esc 关闭顶部菜单和卡片详情面板
 document.addEventListener("click", (e) => {
-  document.querySelectorAll(".topbar-menu[open]").forEach((d) => {
-    if (!d.contains(e.target) && !d.contains(mousedownTarget)) d.removeAttribute("open");
+  getTopbarMenus().forEach((menu) => {
+    if (!menu.contains(e.target) && !menu.contains(mousedownTarget)) {
+      closeTopbarMenu(menu);
+    }
   });
   document.querySelectorAll(".wall-card-details-panel:not([hidden])").forEach((panel) => {
     if (!panel.contains(e.target) && !panel.contains(mousedownTarget) && !e.target.closest(".wall-card-more-button")) {
@@ -3723,7 +3804,7 @@ document.addEventListener("click", (e) => {
 
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
-    document.querySelectorAll(".topbar-menu[open]").forEach((d) => d.removeAttribute("open"));
+    closeAllTopbarMenus();
     document.querySelectorAll(".wall-card-details-panel:not([hidden])").forEach((panel) => {
       panel.hidden = true;
       const card = panel.closest(".wall-card");
