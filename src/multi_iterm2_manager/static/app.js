@@ -180,6 +180,9 @@ const DEFAULT_UI_SETTINGS = {
   split_resizer_line_width_px: 2,
   grid_resizer_hit_area_px: 16,
   grid_resizer_line_width_px: 2,
+  statusbar_font_size_px: 13,
+  statusbar_meter_width_px: 90,
+  statusbar_meter_height_px: 10,
   filter_tab_slide_duration_ms: 420,
   terminal_font_size_px: 10,
 };
@@ -242,6 +245,9 @@ function applyUiSettings(raw, options = {}) {
   rootStyle.setProperty("--split-resizer-line-width-px", `${getUiSetting("split_resizer_line_width_px")}px`);
   rootStyle.setProperty("--grid-resizer-hit-area-px", `${getUiSetting("grid_resizer_hit_area_px")}px`);
   rootStyle.setProperty("--grid-resizer-line-width-px", `${getUiSetting("grid_resizer_line_width_px")}px`);
+  rootStyle.setProperty("--statusbar-font-size-px", `${getUiSetting("statusbar_font_size_px")}px`);
+  rootStyle.setProperty("--statusbar-meter-width-px", `${getUiSetting("statusbar_meter_width_px")}px`);
+  rootStyle.setProperty("--statusbar-meter-height-px", `${getUiSetting("statusbar_meter_height_px")}px`);
   rootStyle.setProperty("--filter-tab-slide-duration-ms", `${getUiSetting("filter_tab_slide_duration_ms")}ms`);
   rootStyle.setProperty("--terminal-font-size-px", `${getUiSetting("terminal_font_size_px")}px`);
   syncUiSettingsForm();

@@ -25,6 +25,9 @@ class UiSettings:
     split_resizer_line_width_px: int = 2
     grid_resizer_hit_area_px: int = 16
     grid_resizer_line_width_px: int = 2
+    statusbar_font_size_px: int = 13
+    statusbar_meter_width_px: int = 90
+    statusbar_meter_height_px: int = 10
     filter_tab_slide_duration_ms: int = 420
     terminal_font_size_px: int = 10
     # 屏幕设置
@@ -114,6 +117,9 @@ def save_ui_settings(path_value: str, ui_settings: UiSettings) -> Path:
             "split_resizer_line_width_px": ui_settings.split_resizer_line_width_px,
             "grid_resizer_hit_area_px": ui_settings.grid_resizer_hit_area_px,
             "grid_resizer_line_width_px": ui_settings.grid_resizer_line_width_px,
+            "statusbar_font_size_px": ui_settings.statusbar_font_size_px,
+            "statusbar_meter_width_px": ui_settings.statusbar_meter_width_px,
+            "statusbar_meter_height_px": ui_settings.statusbar_meter_height_px,
             "filter_tab_slide_duration_ms": ui_settings.filter_tab_slide_duration_ms,
             "terminal_font_size_px": ui_settings.terminal_font_size_px,
             # 屏幕设置

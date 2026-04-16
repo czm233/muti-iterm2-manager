@@ -33,7 +33,10 @@
   --split-resizer-line-width-px: 2px;
   --grid-resizer-hit-area-px: 16px;
   --grid-resizer-line-width-px: 2px;
-  --statusbar-height: 38px;
+  --statusbar-height: 32px;
+  --statusbar-font-size-px: 13px;
+  --statusbar-meter-width-px: 90px;
+  --statusbar-meter-height-px: 10px;
   --filter-tab-slide-duration-ms: 420ms;
   --terminal-font-size-px: 10px;
   --topbar-bg: linear-gradient(180deg, rgba(11, 18, 31, 0.98), rgba(9, 15, 28, 0.96));
@@ -211,6 +214,9 @@ input {
 
 .topbar-row--primary {
   gap: 10px;
+  padding-top: 12px;
+  padding-bottom: 12px;
+  min-height: 58px;
 }
 
 .topbar-brand {
@@ -705,14 +711,14 @@ input {
 }
 
 .statusbar .status-pill {
-  min-height: 26px;
+  min-height: max(24px, calc(var(--statusbar-meter-height-px) + 16px));
   padding: 0;
   border: none;
   background: transparent;
   box-shadow: none;
-  align-items: flex-start;
+  align-items: center;
   color: rgba(231, 235, 243, 0.72);
-  font-size: 0.78rem;
+  font-size: var(--statusbar-font-size-px);
   letter-spacing: 0.01em;
 }
 
@@ -733,8 +739,8 @@ input {
 .statusbar .status-meter-track {
   display: block;
   flex-shrink: 0;
-  width: 84px;
-  height: 8px;
+  width: var(--statusbar-meter-width-px);
+  height: var(--statusbar-meter-height-px);
   box-sizing: border-box;
   border-radius: 999px;
   border: 1px dashed rgba(238, 244, 252, 0.48);

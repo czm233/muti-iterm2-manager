@@ -227,6 +227,9 @@ class UiSettingsPayload(BaseModel):
     split_resizer_line_width_px: int = Field(default=2, ge=0, le=8)
     grid_resizer_hit_area_px: int = Field(default=16, ge=4, le=48)
     grid_resizer_line_width_px: int = Field(default=2, ge=0, le=8)
+    statusbar_font_size_px: int = Field(default=13, ge=10, le=18)
+    statusbar_meter_width_px: int = Field(default=90, ge=48, le=160)
+    statusbar_meter_height_px: int = Field(default=10, ge=6, le=14)
     filter_tab_slide_duration_ms: int = Field(default=420, ge=50, le=5000)
     terminal_font_size_px: int = Field(default=10, ge=6, le=24)
 
