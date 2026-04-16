@@ -765,7 +765,6 @@ input {
 
 .statusbar #build-version {
   color: rgba(231, 235, 243, 0.85);
-  margin-left: auto;
   flex-shrink: 0;
 }
 
@@ -1946,7 +1945,14 @@ body.is-resizing-split * {
 
 .statusbar #ws-status {
   color: #70e1b4;
+}
+
+.statusbar-right-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   margin-left: auto;
+  flex-shrink: 0;
 }
 
 .topbar-queue:not(:empty) {
