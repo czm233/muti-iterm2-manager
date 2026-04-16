@@ -2389,13 +2389,6 @@ body.is-resizing-split * {
   }
 }
 
-/* ========== P3: 状态栏指标分隔 ========== */
-.statusbar-inner > .status-pill + .status-pill {
-  margin-left: 4px;
-  padding-left: 16px;
-  border-left: 1px solid rgba(148, 163, 184, 0.22);
-}
-
 /* ========== P3: 编程字体优化 ========== */
 .wall-card-terminal pre,
 .wall-card-terminal .terminal-mirror {
