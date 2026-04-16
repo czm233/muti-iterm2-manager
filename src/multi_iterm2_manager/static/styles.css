@@ -76,10 +76,16 @@ button {
   border: 0;
   border-radius: 14px;
   padding: 0.74rem 0.96rem;
+  background: transparent;
+  color: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+button.primary {
   background: linear-gradient(135deg, #1db9ff, #6d86ff);
   color: white;
   font-weight: 700;
-  cursor: pointer;
   box-shadow: 0 12px 30px rgba(15, 70, 122, 0.28);
 }
 
@@ -1167,13 +1173,15 @@ button.wall-card-hide-button {
 }
 
 button.wall-card-mute-button {
-  width: 18px;
-  height: 18px;
+  width: 24px;
+  height: 24px;
+  padding: 3px;
 }
 
 button.wall-card-more-button {
-  width: 18px;
-  height: 18px;
+  width: 24px;
+  height: 24px;
+  padding: 3px;
   font-size: 0.8rem;
 }
 
@@ -1374,7 +1382,7 @@ button.wall-card-mute-button.is-active {
   overflow: visible;
   line-height: 1.15;
   font-size: var(--terminal-font-size-px);
-  font-family: "SF Mono", Menlo, Monaco, Consolas, monospace;
+  font-family: "JetBrains Mono", "Fira Code", "SF Mono", Menlo, Monaco, Consolas, monospace;
   letter-spacing: -0.01em;
   font-variant-ligatures: none;
   tab-size: 2;
@@ -1469,6 +1477,39 @@ button.wall-card-mute-button.is-active {
   text-align: center;
   color: var(--muted);
   background: rgba(9, 16, 29, 0.5);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  animation: empty-fade-in 0.4s ease-out;
+}
+
+.empty-state-icon {
+  margin-bottom: 4px;
+  opacity: 0.7;
+}
+
+.empty-state h2 {
+  margin: 0;
+  font-size: 1.2rem;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.empty-state p {
+  margin: 0;
+  max-width: 420px;
+  line-height: 1.6;
+}
+
+.empty-state strong {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+@keyframes empty-fade-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 
 .marker-alert {
@@ -1940,7 +1981,7 @@ body.is-resizing-split * {
   border-color: rgba(148, 163, 184, 0.14);
   border-left-color: var(--warn);
   background: rgba(247, 201, 72, 0.08);
-  animation: queue-pill-glow 2s ease-in-out infinite;
+  animation: queue-pill-glow 2s ease-in-out 3;
 }
 
 .queue-pill--attention:hover {
@@ -2333,3 +2374,37 @@ body.is-resizing-split * {
   display: none;
 }
 /* App 监控样式已迁移到 app-monitor.css */
+
+/* ========== P0: prefers-reduced-motion ========== */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+  .filter-tab-slider {
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* ========== P3: 状态栏指标分隔 ========== */
+.statusbar .status-pill + .status-pill {
+  position: relative;
+}
+.statusbar .status-pill + .status-pill::before {
+  content: "";
+  position: absolute;
+  left: -6px;
+  top: 3px;
+  bottom: 3px;
+  width: 1px;
+  background: rgba(148, 163, 184, 0.18);
+}
+
+/* ========== P3: 编程字体优化 ========== */
+.wall-card-terminal pre,
+.wall-card-terminal .terminal-mirror {
+  font-family: "JetBrains Mono", "Fira Code", "SF Mono", Menlo, Monaco, Consolas, monospace;
+}

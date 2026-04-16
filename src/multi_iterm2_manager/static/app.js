@@ -2185,8 +2185,16 @@ function renderTerminal(record) {
 function renderEmptyState() {
   grid.innerHTML = `
     <section class="empty-state">
+      <svg class="empty-state-icon" width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="rgba(148,163,184,0.3)" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="2" y="3" width="20" height="14" rx="2"/>
+        <line x1="8" y1="21" x2="16" y2="21"/>
+        <line x1="12" y1="17" x2="12" y2="21"/>
+        <polyline points="7 8 10 11 7 14"/>
+        <line x1="13" y1="14" x2="17" y2="14"/>
+      </svg>
       <h2>还没有监控任务</h2>
-      <p>启动 1 个任务时显示单屏，2 个任务自动左右布局，3-4 个自动四宫格，5-6 个自动 2×3。</p>
+      <p>点击顶部菜单 <strong>菜单 → 启动并纳入监控</strong> 或快捷键 <strong>新建</strong> 创建第一个终端。</p>
+      <p>2 个任务自动左右布局，3-4 个四宫格，5-6 个 2x3。</p>
     </section>
   `;
 }
