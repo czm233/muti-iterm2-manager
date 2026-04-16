@@ -26,6 +26,7 @@ class UiSettings:
     grid_resizer_hit_area_px: int = 16
     grid_resizer_line_width_px: int = 2
     filter_tab_slide_duration_ms: int = 420
+    terminal_font_size_px: int = 10
     # 屏幕设置
     target_screen: int = -1  # -1 表示"跟随当前/不指定"，0 表示屏幕1，1 表示屏幕2...
     # 默认窗口位置模板（按屏幕名称存储，键是屏幕名称，值是 {"x":..., "y":..., "width":..., "height":...}）
@@ -114,6 +115,7 @@ def save_ui_settings(path_value: str, ui_settings: UiSettings) -> Path:
             "grid_resizer_hit_area_px": ui_settings.grid_resizer_hit_area_px,
             "grid_resizer_line_width_px": ui_settings.grid_resizer_line_width_px,
             "filter_tab_slide_duration_ms": ui_settings.filter_tab_slide_duration_ms,
+            "terminal_font_size_px": ui_settings.terminal_font_size_px,
             # 屏幕设置
             "target_screen": ui_settings.target_screen,
             # 默认窗口位置模板（按屏幕名称）

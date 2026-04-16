@@ -228,6 +228,7 @@ class UiSettingsPayload(BaseModel):
     grid_resizer_hit_area_px: int = Field(default=16, ge=4, le=48)
     grid_resizer_line_width_px: int = Field(default=2, ge=0, le=8)
     filter_tab_slide_duration_ms: int = Field(default=420, ge=50, le=5000)
+    terminal_font_size_px: int = Field(default=10, ge=6, le=24)
 
 
 @app.on_event("startup")

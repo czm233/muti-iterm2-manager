@@ -181,6 +181,7 @@ const DEFAULT_UI_SETTINGS = {
   grid_resizer_hit_area_px: 16,
   grid_resizer_line_width_px: 2,
   filter_tab_slide_duration_ms: 420,
+  terminal_font_size_px: 10,
 };
 
 const MIN_GRID_TRACK_RATIO = 0.18;
@@ -242,6 +243,7 @@ function applyUiSettings(raw, options = {}) {
   rootStyle.setProperty("--grid-resizer-hit-area-px", `${getUiSetting("grid_resizer_hit_area_px")}px`);
   rootStyle.setProperty("--grid-resizer-line-width-px", `${getUiSetting("grid_resizer_line_width_px")}px`);
   rootStyle.setProperty("--filter-tab-slide-duration-ms", `${getUiSetting("filter_tab_slide_duration_ms")}ms`);
+  rootStyle.setProperty("--terminal-font-size-px", `${getUiSetting("terminal_font_size_px")}px`);
   syncUiSettingsForm();
 }
 
