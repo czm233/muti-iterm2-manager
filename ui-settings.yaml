@@ -12,6 +12,7 @@ ui:
   grid_resizer_hit_area_px: 16
   grid_resizer_line_width_px: 2
   filter_tab_slide_duration_ms: 1000
+  terminal_font_size_px: 14
   target_screen: 1
   default_frames_by_screen:
     Mi Monitor:
