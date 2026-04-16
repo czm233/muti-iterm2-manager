@@ -9,7 +9,7 @@ import time
 from typing import Any
 
 from multi_iterm2_manager.display import build_maximized_frame
-from multi_iterm2_manager.models import CreateTerminalParams, TerminalFrame, TerminalHandle
+from multi_iterm2_manager.models import CreateTerminalParams, TerminalFrame, TerminalHandle, TerminalRuntimeInfo
 
 try:
     import AppKit  # type: ignore
@@ -552,6 +552,50 @@ class ITerm2Backend:
             return await self._run_with_reconnect(_inner)
         except Exception:
             return None
+
+    async def get_runtime_info(self, handle: TerminalHandle) -> TerminalRuntimeInfo:
+        """获取终端当前前台程序信息。"""
+        async def _inner():
+            session = await self._get_session(handle.session_id)
+
+            async def _get_var(name: str):
+                try:
+                    return await session.async_get_variable(name)
+                except Exception:
+                    return None
+
+            def _as_str(value: object) -> str | None:
+                if value is None:
+                    return None
+                if isinstance(value, str):
+                    normalized = value.strip()
+                    return normalized or None
+                normalized = str(value).strip()
+                return normalized or None
+
+            def _as_int(value: object) -> int | None:
+                if value is None or isinstance(value, bool):
+                    return None
+                if isinstance(value, int):
+                    return value
+                try:
+                    return int(str(value).strip())
+                except Exception:
+                    return None
+
+            return TerminalRuntimeInfo(
+                job_name=_as_str(await _get_var("jobName")),
+                command_line=_as_str(await _get_var("commandLine")),
+                job_pid=_as_int(await _get_var("jobPid")),
+                process_title=_as_str(await _get_var("processTitle")),
+                tty=_as_str(await _get_var("tty")),
+                session_pid=_as_int(await _get_var("pid")),
+            )
+
+        try:
+            return await self._run_with_reconnect(_inner)
+        except Exception:
+            return TerminalRuntimeInfo()
 
     async def set_hidden(self, handle: TerminalHandle, hidden: bool) -> None:
         """将隐藏状态写入 iTerm2 session 变量，重启后可恢复"""

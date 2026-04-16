@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from datetime import datetime
 from itertools import count
 
 from multi_iterm2_manager.display import build_maximized_frame
-from multi_iterm2_manager.models import CreateTerminalParams, TerminalFrame, TerminalHandle
+from multi_iterm2_manager.models import CreateTerminalParams, TerminalFrame, TerminalHandle, TerminalRuntimeInfo
 
 
 class MockTerminalBackend:
@@ -129,6 +130,17 @@ class MockTerminalBackend:
 
     async def get_cwd(self, handle: TerminalHandle) -> str | None:
         return None
+
+    async def get_runtime_info(self, handle: TerminalHandle) -> TerminalRuntimeInfo:
+        item = self._items.get(handle.session_id, {})
+        command = str(item.get("command", "") or "").strip()
+        if not command:
+            return TerminalRuntimeInfo()
+        executable = os.path.basename(command.split()[0])
+        return TerminalRuntimeInfo(
+            job_name=executable or None,
+            command_line=command,
+        )
 
     async def set_hidden(self, handle: TerminalHandle, hidden: bool) -> None:
         pass

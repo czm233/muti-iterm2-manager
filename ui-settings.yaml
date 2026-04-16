@@ -115,6 +115,12 @@ screen_layouts:
             y: -177
             width: 2547
             height: 1091
+          task-cdc32f2e:
+            terminalId: task-cdc32f2e
+            x: 1713
+            y: -177
+            width: 2547
+            height: 1091
         isPreset: false
         isDefault: true
         layoutId: user_7283040c

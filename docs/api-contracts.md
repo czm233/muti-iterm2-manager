@@ -53,6 +53,13 @@
       "screenHtml": "<pre>...</pre>",
       "frame": {"x": 10, "y": 10, "width": 1200, "height": 700},
       "markers": [],
+      "program": {
+        "key": "claude-code",
+        "label": "Claude Code",
+        "source": "direct",
+        "pid": 12345,
+        "commandLine": "claude"
+      },
       "updatedAt": "2026-03-09T16:00:00",
       "isLive": true,
       "lastError": null
@@ -268,6 +275,7 @@
 | `screenHtml` | string | HTML 镜像 |
 | `frame` | object \/ null | 窗口位置尺寸 |
 | `markers` | string[] | 命中的规则标记 |
+| `program` | object | 当前识别到的前台程序信息 |
 | `updatedAt` | string | 更新时间 |
 | `isLive` | boolean | 是否来自流式更新 |
 | `lastError` | string \/ null | 最近错误 |

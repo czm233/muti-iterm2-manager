@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from multi_iterm2_manager.models import CreateTerminalParams, TerminalFrame, TerminalHandle
+from multi_iterm2_manager.models import CreateTerminalParams, TerminalFrame, TerminalHandle, TerminalRuntimeInfo
 
 
 class TerminalBackend(Protocol):
@@ -41,3 +41,7 @@ class TerminalBackend(Protocol):
     async def set_frame(self, handle: TerminalHandle, frame: TerminalFrame) -> None: ...
 
     async def get_frame(self, handle: TerminalHandle) -> TerminalFrame | None: ...
+
+    async def get_cwd(self, handle: TerminalHandle) -> str | None: ...
+
+    async def get_runtime_info(self, handle: TerminalHandle) -> TerminalRuntimeInfo: ...

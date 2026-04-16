@@ -105,6 +105,34 @@ class TerminalStatus(str, Enum):
 
 
 @dataclass
+class TerminalRuntimeInfo:
+    job_name: str | None = None
+    command_line: str | None = None
+    job_pid: int | None = None
+    process_title: str | None = None
+    tty: str | None = None
+    session_pid: int | None = None
+
+
+@dataclass
+class TerminalProgramInfo:
+    key: str = "unknown"
+    label: str = "Unknown"
+    source: str = "none"
+    pid: int | None = None
+    command_line: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "key": self.key,
+            "label": self.label,
+            "source": self.source,
+            "pid": self.pid,
+            "commandLine": self.command_line,
+        }
+
+
+@dataclass
 class TerminalFrame:
     x: float
     y: float
@@ -152,6 +180,7 @@ class TerminalRecord:
     hidden: bool = False
     muted: bool = False  # 静默状态，不进入通知队列
     tags: list[str] = field(default_factory=list)  # 终端标签列表
+    program: TerminalProgramInfo = field(default_factory=TerminalProgramInfo)
     content_hash: str = ""
     content_stable_since: float = 0.0
 
@@ -177,6 +206,7 @@ class TerminalRecord:
             "hidden": self.hidden,
             "muted": self.muted,
             "tags": self.tags,
+            "program": self.program.to_dict(),
         }
 
 

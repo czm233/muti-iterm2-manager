@@ -1111,6 +1111,27 @@ button.wall-card-drag-handle:focus-visible {
   text-overflow: ellipsis;
 }
 
+.wall-card-program-chip {
+  display: inline-flex;
+  align-items: center;
+  max-width: 110px;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  background: rgba(148, 163, 184, 0.08);
+  color: rgba(232, 239, 248, 0.82);
+  font-size: 0.66rem;
+  line-height: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex-shrink: 0;
+}
+
+.wall-card-program-chip[hidden] {
+  display: none;
+}
+
 .monitor-wall[data-columns="1"][data-rows="1"] .wall-card-title {
   font-size: 0.92rem;
 }
@@ -1279,6 +1300,24 @@ button.wall-card-mute-button.is-active {
 .wall-card-details-panel .marker {
   padding: 0.2rem 0.5rem;
   font-size: 0.72rem;
+}
+
+.badge-program,
+.wall-card-program-chip.program-shell {
+  background: rgba(148, 163, 184, 0.08);
+  border-color: rgba(148, 163, 184, 0.16);
+}
+
+.badge-program.program-claude-code,
+.wall-card-program-chip.program-claude-code {
+  background: rgba(105, 197, 255, 0.14);
+  border-color: rgba(105, 197, 255, 0.28);
+}
+
+.badge-program.program-codex,
+.wall-card-program-chip.program-codex {
+  background: rgba(86, 226, 173, 0.14);
+  border-color: rgba(86, 226, 173, 0.28);
 }
 
 .wall-card-details-panel .wall-card-meta,

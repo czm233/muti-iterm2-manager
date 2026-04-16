@@ -17,6 +17,7 @@ from multi_iterm2_manager.config import Settings, save_ui_settings
 from multi_iterm2_manager.display import build_maximized_frame, get_all_screens, get_screen_index_from_coordinates, get_screen_name_from_coordinates, suggest_monitor_grid
 from multi_iterm2_manager.models import CreateTerminalParams, GridLayoutParams, TerminalFrame, TerminalRecord, TerminalStatus, new_terminal_id
 from multi_iterm2_manager.app_monitor import AppMonitorService
+from multi_iterm2_manager.program_detection import detect_terminal_program
 
 
 class DashboardService:
@@ -697,6 +698,7 @@ class DashboardService:
         cwd = await self.backend.get_cwd(record.handle)
         if cwd is not None:
             record.cwd = cwd
+        await self._refresh_runtime_metadata(record)
         await self._broadcast(self.record_event(terminal_id))
         return record.to_dict()
 
@@ -881,6 +883,7 @@ class DashboardService:
             async for text, screen_html in self.backend.stream_screen(record.handle):
                 old_hash = record.content_hash
                 old_status = record.status
+                old_program = record.program
                 self._apply_screen_text(record, text, screen_html, is_live=True)
 
                 status_changed = record.status != old_status
@@ -891,9 +894,12 @@ class DashboardService:
                     cwd = await self.backend.get_cwd(record.handle)
                     if cwd is not None:
                         record.cwd = cwd
+                    await self._refresh_runtime_metadata(record)
 
-                # 状态变了但内容没变（超时规则触发），立即广播不限速
-                if status_changed and not content_changed:
+                program_changed = record.program != old_program
+
+                # 状态或识别结果变了但内容没变，立即广播不限速
+                if (status_changed or program_changed) and not content_changed:
                     if pending_broadcast is not None and not pending_broadcast.done():
                         pending_broadcast.cancel()
                         pending_broadcast = None
@@ -901,8 +907,8 @@ class DashboardService:
                     await self._broadcast(self.record_event(terminal_id))
                     continue
 
-                # 内容和状态都没变，跳过广播
-                if not content_changed:
+                # 内容、状态、识别结果都没变，跳过广播
+                if not content_changed and not program_changed:
                     continue
 
                 now = time.time()
@@ -1177,3 +1183,7 @@ class DashboardService:
 
     def _now(self) -> str:
         return datetime.now().isoformat(timespec="seconds")
+
+    async def _refresh_runtime_metadata(self, record: TerminalRecord) -> None:
+        runtime_info = await self.backend.get_runtime_info(record.handle)
+        record.program = detect_terminal_program(runtime_info, record.screen_text)

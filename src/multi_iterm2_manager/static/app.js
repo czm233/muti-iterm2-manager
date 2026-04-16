@@ -1120,6 +1120,29 @@ function displayTitle(record) {
   return `${name} · ${folder}`;
 }
 
+function getProgramInfo(record) {
+  return record.program || { key: "unknown", label: "Unknown", source: "none", commandLine: "" };
+}
+
+function programSourceLabel(source) {
+  if (source === "direct") return "直接识别";
+  if (source === "process-tree") return "进程链";
+  if (source === "screen-heuristic") return "屏幕特征";
+  if (source === "fallback") return "回退";
+  return "未知";
+}
+
+function shouldShowProgramChip(record) {
+  return getProgramInfo(record).key !== "unknown";
+}
+
+function truncateProgramCommand(commandLine, maxLength = 72) {
+  if (!commandLine || commandLine.length <= maxLength) {
+    return commandLine || "";
+  }
+  return `${commandLine.slice(0, maxLength - 1)}…`;
+}
+
 // screenHtml 大小上限（100KB），超过时截断，防止极端情况内存暴涨
 const SCREEN_HTML_MAX_SIZE = 100 * 1024;
 
@@ -2105,6 +2128,7 @@ function renderTerminal(record) {
         <button type="button" class="ghost wall-card-drag-handle" title="拖拽排序" aria-label="拖拽排序"><svg width="100%" height="100%" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M12 1l-3 3.5h6L12 1z"/><path d="M12 23l-3-3.5h6L12 23z"/><path d="M1 12l3.5-3v6L1 12z"/><path d="M23 12l-3.5-3v6L23 12z"/><rect x="11.25" y="4" width="1.5" height="16" rx=".75"/><rect x="4" y="11.25" width="16" height="1.5" rx=".75"/></svg></button>
         <h2 class="wall-card-title" ${state.editingTitleTerminalId === record.id ? 'hidden' : ''}>${escapeHtml(displayTitle(record))}</h2>
         <input class="wall-card-title-input" type="text" value="${escapeHtml(record.name)}" ${state.editingTitleTerminalId === record.id ? '' : 'hidden'} />
+        <span class="wall-card-program-chip" hidden></span>
         <div class="wall-card-action-group">
           <button data-action="toggle-hide" class="ghost wall-card-hide-button" title="${state.hiddenTerminalIds.has(record.id) ? "取消隐藏" : "隐藏"}">${state.hiddenTerminalIds.has(record.id) ? "显" : "隐"}</button>
           <button data-action="toggle-mute" class="ghost wall-card-mute-button" title="${getMuteButtonTitle(state.mutedTerminalIds.has(record.id))}" aria-label="${getMuteButtonTitle(state.mutedTerminalIds.has(record.id))}">${renderMuteButtonContent(state.mutedTerminalIds.has(record.id))}</button>
@@ -2114,7 +2138,9 @@ function renderTerminal(record) {
       <div class="wall-card-details-panel" hidden>
         <div class="wall-card-topline">
           <span class="badge status-${record.status}">${statusLabel(record.status)}</span>
+          <span class="badge badge-program wall-card-program-badge"></span>
         </div>
+        <div class="wall-card-meta wall-card-program-meta"></div>
         <div class="wall-card-tools">
           <button data-action="refresh" class="secondary">刷新</button>
           <button data-action="monitor-mode" class="secondary">回监控模式</button>
@@ -2147,6 +2173,7 @@ function renderTerminal(record) {
   `;
 
   updateTerminalSnapshot(record, card.querySelector(".wall-card-terminal"));
+  updateCardMeta(card, record);
   bindCardActions(card, record);
   restoreInputFocus(card, record);
 
@@ -2286,14 +2313,41 @@ function incrementalUpdate(layout = null, changedIds) {
 function updateCardMeta(card, record) {
   // 正在编辑标题时跳过
   if (state.editingTitleTerminalId === record.id) return;
+  const program = getProgramInfo(record);
   // 更新标题
   const title = card.querySelector(".wall-card-title");
   if (title) title.textContent = displayTitle(record);
+  const chip = card.querySelector(".wall-card-program-chip");
+  if (chip) {
+    chip.className = `wall-card-program-chip program-${program.key}`;
+    chip.textContent = program.label;
+    chip.hidden = !shouldShowProgramChip(record);
+  }
   // 更新状态 badge
   const badge = card.querySelector(".badge");
   if (badge) {
     badge.className = `badge status-${record.status}`;
     badge.textContent = statusLabel(record.status);
+  }
+  const programBadge = card.querySelector(".wall-card-program-badge");
+  if (programBadge) {
+    programBadge.className = `badge badge-program wall-card-program-badge program-${program.key}`;
+    programBadge.textContent = program.label;
+  }
+  const programMeta = card.querySelector(".wall-card-program-meta");
+  if (programMeta) {
+    const commandLine = truncateProgramCommand(program.commandLine);
+    const metaParts = [
+      `程序：${program.label}`,
+      `来源：${programSourceLabel(program.source)}`,
+    ];
+    if (commandLine) {
+      metaParts.push(`命令：${commandLine}`);
+      programMeta.title = program.commandLine || "";
+    } else {
+      programMeta.removeAttribute("title");
+    }
+    programMeta.textContent = metaParts.join(" · ");
   }
   // 更新时间戳（已移除）
   // 更新摘要（已移除）
