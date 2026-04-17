@@ -20,7 +20,6 @@ class UiSettings:
     wall_card_padding_px: int = 10
     wall_card_border_radius_px: int = 22
     wall_card_border_width_px: float = 1.0
-    wall_card_terminal_border_width_px: float = 1.0
     split_resizer_hit_area_px: int = 14
     split_resizer_line_width_px: int = 2
     grid_resizer_hit_area_px: int = 16
@@ -32,6 +31,8 @@ class UiSettings:
     terminal_font_size_px: int = 10
     # 屏幕设置
     target_screen: int = -1  # -1 表示"跟随当前/不指定"，0 表示屏幕1，1 表示屏幕2...
+    target_screen_id: int | None = None  # 稳定的显示器 ID，优先于 target_screen
+    target_screen_name: str | None = None  # 最后一次选择时的屏幕名称，作为 ID 缺失时的兜底
     # 默认窗口位置模板（按屏幕名称存储，键是屏幕名称，值是 {"x":..., "y":..., "width":..., "height":...}）
     default_frames_by_screen: dict | None = None
 
@@ -112,7 +113,6 @@ def save_ui_settings(path_value: str, ui_settings: UiSettings) -> Path:
             "wall_card_padding_px": ui_settings.wall_card_padding_px,
             "wall_card_border_radius_px": ui_settings.wall_card_border_radius_px,
             "wall_card_border_width_px": ui_settings.wall_card_border_width_px,
-            "wall_card_terminal_border_width_px": ui_settings.wall_card_terminal_border_width_px,
             "split_resizer_hit_area_px": ui_settings.split_resizer_hit_area_px,
             "split_resizer_line_width_px": ui_settings.split_resizer_line_width_px,
             "grid_resizer_hit_area_px": ui_settings.grid_resizer_hit_area_px,
@@ -124,6 +124,8 @@ def save_ui_settings(path_value: str, ui_settings: UiSettings) -> Path:
             "terminal_font_size_px": ui_settings.terminal_font_size_px,
             # 屏幕设置
             "target_screen": ui_settings.target_screen,
+            "target_screen_id": ui_settings.target_screen_id,
+            "target_screen_name": ui_settings.target_screen_name,
             # 默认窗口位置模板（按屏幕名称）
             "default_frames_by_screen": ui_settings.default_frames_by_screen,
         }
@@ -467,8 +469,18 @@ def get_default_layout_for_screen(
         if layout.is_default:
             return layout
 
-    # 没有默认的，返回 __preset__ 布局
-    return screen_layouts.get("__preset__")
+    if screen_layouts:
+        return screen_layouts.get("__preset__")
+
+    alias_screen_name = _find_matching_saved_screen_name(screen_name, all_layouts)
+    if alias_screen_name:
+        aliased_layouts = all_layouts.get(alias_screen_name, {})
+        for layout in aliased_layouts.values():
+            if layout.is_default:
+                return layout
+        return aliased_layouts.get("__preset__")
+
+    return None
 
 
 def ensure_preset_layout(screen_name: str, path_value: str = "ui-settings.yaml") -> bool:
@@ -517,3 +529,37 @@ def get_layout_for_current_screens(path_value: str = "ui-settings.yaml") -> Scre
 
     config = get_current_screen_config()
     return get_default_layout_for_screen(config.primary_screen_name, path_value)
+
+
+def _find_matching_saved_screen_name(
+    screen_name: str,
+    all_layouts: dict[str, dict[str, ScreenLayoutConfig]],
+) -> str | None:
+    """在屏幕名称漂移时，根据已保存布局坐标为当前屏幕寻找别名。"""
+    if not screen_name:
+        return None
+
+    from .display import get_screen_by_name, get_all_screens, is_point_on_screen
+
+    screens = get_all_screens()
+    target_screen = get_screen_by_name(screen_name, screens)
+    if target_screen is None:
+        return None
+
+    best_name: str | None = None
+    best_score = -1
+    for saved_screen_name, saved_layouts in all_layouts.items():
+        if saved_screen_name == screen_name:
+            continue
+        score = 0
+        total = 0
+        for layout in saved_layouts.values():
+            for terminal in layout.terminals.values():
+                total += 1
+                if is_point_on_screen(target_screen, terminal.x, terminal.y):
+                    score += 1
+        if total > 0 and score > best_score:
+            best_name = saved_screen_name
+            best_score = score
+
+    return best_name if best_score > 0 else None

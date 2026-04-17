@@ -54,6 +54,19 @@ _CODEX_SCREEN_PATTERNS = (
     re.compile(r"openai[\s\-_]?codex", re.IGNORECASE),
 )
 
+_CODEX_WORKING_SCREEN_PATTERN = re.compile(
+    r"\bWorking\s*\([^\n)]*esc\s+to\s+interrupt\)",
+    re.IGNORECASE,
+)
+_CODEX_MODEL_SCREEN_PATTERN = re.compile(
+    r"\bgpt-\d+(?:\.\d+)*(?:-[a-z0-9]+)?\b[^\n]*\b(?:low|medium|high|xhigh)\b",
+    re.IGNORECASE,
+)
+_CODEX_CONTEXT_SCREEN_PATTERN = re.compile(
+    r"\bContext\s+\d+%\s+left\b",
+    re.IGNORECASE,
+)
+
 
 def detect_terminal_program(runtime_info: TerminalRuntimeInfo, screen_text: str) -> TerminalProgramInfo:
     direct_match = _match_product_values(
@@ -187,9 +200,23 @@ def _detect_from_screen(screen_text: str) -> TerminalProgramInfo | None:
     window = text[-3000:]
     if any(pattern.search(window) for pattern in _CLAUDE_SCREEN_PATTERNS):
         return TerminalProgramInfo(key="claude-code", label="Claude Code", source="screen-heuristic")
-    if any(pattern.search(window) for pattern in _CODEX_SCREEN_PATTERNS):
+    if _looks_like_codex_screen(window):
         return TerminalProgramInfo(key="codex", label="Codex", source="screen-heuristic")
     return None
+
+
+def _looks_like_codex_screen(text: str) -> bool:
+    if any(pattern.search(text) for pattern in _CODEX_SCREEN_PATTERNS):
+        return True
+
+    score = 0
+    if _CODEX_WORKING_SCREEN_PATTERN.search(text):
+        score += 2
+    if _CODEX_MODEL_SCREEN_PATTERN.search(text):
+        score += 1
+    if _CODEX_CONTEXT_SCREEN_PATTERN.search(text):
+        score += 1
+    return score >= 2
 
 
 def _looks_like_shell(runtime_info: TerminalRuntimeInfo) -> bool:

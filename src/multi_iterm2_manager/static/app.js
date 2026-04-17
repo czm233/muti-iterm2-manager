@@ -35,7 +35,35 @@ const state = {
 };
 
 const VIEW_STATE_STORAGE_KEY = "mitm-monitor-view-state";
-const MUTE_BELL_ICON_SRC = "/assets/icons/bell-glow.png";
+const AGENT_PROGRAM_KEYS = new Set(["claude-code", "codex"]);
+
+function isAgentProgram(program) {
+  if (!program || typeof program !== "object") return false;
+  if (program.isAgent === true) return true;
+  return AGENT_PROGRAM_KEYS.has(program.key);
+}
+
+function syncAgentCardClass(card, record) {
+  if (!card) return;
+  card.classList.toggle("wall-card--non-agent", !isAgentProgram(record?.program));
+}
+
+function shouldTrackTerminalStatus(record) {
+  return Boolean(record) && isAgentProgram(record.program);
+}
+
+function isTerminalHidden(recordOrId) {
+  const terminalId = typeof recordOrId === "string" ? recordOrId : recordOrId?.id;
+  return Boolean(terminalId) && state.hiddenTerminalIds.has(terminalId);
+}
+
+function getHideButtonLabel(recordOrId) {
+  return isTerminalHidden(recordOrId) ? "取消隐藏" : "隐藏";
+}
+
+function getHideButtonTitle(recordOrId) {
+  return getHideButtonLabel(recordOrId);
+}
 
 function saveViewState() {
   try {
@@ -81,27 +109,32 @@ function loadViewState() {
   }
 }
 
-function getMuteButtonTitle(isMuted) {
+function syncHideButton(button, recordOrId) {
+  if (!button) {
+    return;
+  }
+  const label = getHideButtonLabel(recordOrId);
+  button.textContent = label;
+  button.title = label;
+  button.setAttribute("aria-label", label);
+}
+
+function getMuteButtonLabel(isMuted) {
   return isMuted ? "取消静默" : "静默（不进入队列）";
 }
 
-function renderMuteButtonContent(isMuted) {
-  return `
-    <span class="wall-card-mute-icon-shell${isMuted ? " is-muted" : ""}" aria-hidden="true">
-      <img src="${MUTE_BELL_ICON_SRC}" alt="" class="wall-card-mute-icon" />
-      ${isMuted ? '<span class="wall-card-mute-slash"></span>' : ""}
-    </span>
-  `;
+function getMuteButtonTitle(isMuted) {
+  return getMuteButtonLabel(isMuted);
 }
 
 function syncMuteButton(button, isMuted) {
   if (!button) {
     return;
   }
-  const title = getMuteButtonTitle(isMuted);
-  button.title = title;
-  button.setAttribute("aria-label", title);
-  button.innerHTML = renderMuteButtonContent(isMuted);
+  const label = getMuteButtonLabel(isMuted);
+  button.title = label;
+  button.setAttribute("aria-label", label);
+  button.textContent = label;
 }
 
 // ── 按标签独立保存布局 ──────────────────────────────────────────────────────
@@ -257,7 +290,6 @@ const DEFAULT_UI_SETTINGS = {
   monitor_grid_gap_px: 6,
   wall_card_padding_px: 10,
   wall_card_border_width_px: 1,
-  wall_card_terminal_border_width_px: 1,
   split_resizer_hit_area_px: 14,
   split_resizer_line_width_px: 2,
   grid_resizer_hit_area_px: 16,
@@ -322,7 +354,6 @@ function applyUiSettings(raw, options = {}) {
   rootStyle.setProperty("--monitor-grid-gap-px", `${getUiSetting("monitor_grid_gap_px")}px`);
   rootStyle.setProperty("--wall-card-padding-px", `${getUiSetting("wall_card_padding_px")}px`);
   rootStyle.setProperty("--wall-card-border-width-px", `${getUiSetting("wall_card_border_width_px")}px`);
-  rootStyle.setProperty("--wall-card-terminal-border-width-px", `${getUiSetting("wall_card_terminal_border_width_px")}px`);
   rootStyle.setProperty("--split-resizer-hit-area-px", `${getUiSetting("split_resizer_hit_area_px")}px`);
   rootStyle.setProperty("--split-resizer-line-width-px", `${getUiSetting("split_resizer_line_width_px")}px`);
   rootStyle.setProperty("--grid-resizer-hit-area-px", `${getUiSetting("grid_resizer_hit_area_px")}px`);
@@ -1302,14 +1333,14 @@ function getFilteredTerminals() {
   }
   if (state.filter === "all") return pool.filter((record) => record.status !== "closed");
   if (state.filter === "hidden") return pool.filter((record) => state.hiddenTerminalIds.has(record.id));
-  if (state.filter === "done") return pool.filter((record) => record.status === "done" && !state.hiddenTerminalIds.has(record.id));
-  if (state.filter === "running") return pool.filter((record) => record.status === "running" && !state.hiddenTerminalIds.has(record.id));
+  if (state.filter === "done") return pool.filter((record) => shouldTrackTerminalStatus(record) && record.status === "done" && !state.hiddenTerminalIds.has(record.id));
+  if (state.filter === "running") return pool.filter((record) => shouldTrackTerminalStatus(record) && record.status === "running" && !state.hiddenTerminalIds.has(record.id));
   if (state.filter === "attention") {
     // 进入"待处理"时会生成快照，快照期间不随状态变化自动删除终端
     if (state.attentionSnapshot) {
-      return pool.filter((record) => state.attentionSnapshot.has(record.id));
+      return pool.filter((record) => shouldTrackTerminalStatus(record) && state.attentionSnapshot.has(record.id));
     }
-    return pool.filter((record) => ["error", "waiting"].includes(record.status) && !state.hiddenTerminalIds.has(record.id));
+    return pool.filter((record) => shouldTrackTerminalStatus(record) && ["error", "waiting"].includes(record.status) && !state.hiddenTerminalIds.has(record.id));
   }
   // default：不显示已隐藏和已关闭的终端
   return pool.filter((record) => record.status !== "closed" && !state.hiddenTerminalIds.has(record.id));
@@ -1338,6 +1369,7 @@ function syncFilterTabs() {
     if (state.selectedTag && state.selectedTag !== "__untagged__" && !(Array.isArray(r.tags) && r.tags.includes(state.selectedTag))) continue;
     const isHidden = state.hiddenTerminalIds.has(r.id);
     if (isHidden) { hiddenCount++; continue; }
+    if (!shouldTrackTerminalStatus(r)) continue;
     if (r.status === "error" || r.status === "waiting") attentionCount++;
     else if (r.status === "done") doneCount++;
     else if (r.status === "running") runningCount++;
@@ -1501,7 +1533,8 @@ function getPagedTerminals() {
 }
 
 function getNextAttentionTerminal() {
-  return [...state.terminals.values()].find((record) => record.status === "error") || [...state.terminals.values()].find((record) => record.status === "waiting");
+  return [...state.terminals.values()].find((record) => shouldTrackTerminalStatus(record) && record.status === "error")
+    || [...state.terminals.values()].find((record) => shouldTrackTerminalStatus(record) && record.status === "waiting");
 }
 
 
@@ -1599,6 +1632,7 @@ function renderStats() {
   const counts = { running: 0, done: 0, waiting: 0, error: 0, closed: 0, idle: 0 };
   for (const record of state.terminals.values()) {
     if (state.hiddenTerminalIds.has(record.id)) continue;
+    if (!shouldTrackTerminalStatus(record)) continue;
     counts[record.status] = (counts[record.status] || 0) + 1;
   }
   const page = getPagedTerminals();
@@ -1668,19 +1702,7 @@ function updateQueue(terminalId, oldStatus, newStatus) {
   if (!terminal) return;
   const name = terminal.name || terminalId;
   const inQueue = state.queue.findIndex((q) => q.id === terminalId);
-
-  // running → done：追加到队列末尾
-  if (oldStatus === "running" && newStatus === "done") {
-    if (inQueue === -1) {
-      state.queue.push({ id: terminalId, name, status: newStatus });
-    } else {
-      state.queue[inQueue].status = newStatus;
-    }
-    return;
-  }
-
-  // done → running：从队列移除
-  if (oldStatus === "done" && newStatus === "running") {
+  if (!shouldTrackTerminalStatus(terminal)) {
     if (inQueue !== -1) state.queue.splice(inQueue, 1);
     return;
   }
@@ -1692,17 +1714,24 @@ function updateQueue(terminalId, oldStatus, newStatus) {
     return;
   }
 
-  // waiting/error → 其他非 attention 状态：从队列移除
+  // waiting/error 解决后直接移出队列，避免把已处理异常再次当成 done 提醒
   if (ATTENTION_STATUSES.has(oldStatus) && !ATTENTION_STATUSES.has(newStatus)) {
     if (inQueue !== -1) state.queue.splice(inQueue, 1);
     return;
   }
 
-  // closed：移除
-  if (newStatus === "closed") {
-    if (inQueue !== -1) state.queue.splice(inQueue, 1);
+  // done：加入队列尾部。覆盖 running -> done、首次识别为 agent 后已 done 等场景。
+  if (newStatus === "done") {
+    if (inQueue === -1) {
+      state.queue.push({ id: terminalId, name, status: newStatus });
+    } else {
+      state.queue[inQueue].status = newStatus;
+    }
     return;
   }
+
+  // running/idle/closed 不保留在队列中
+  if (inQueue !== -1) state.queue.splice(inQueue, 1);
 }
 
 // 缓存上次队列快照，避免无变化时重建 DOM 导致 hover 闪烁
@@ -1746,6 +1775,7 @@ function initQueueFromSnapshot() {
   for (const [id, terminal] of state.terminals) {
     if (state.hiddenTerminalIds.has(id)) continue;
     if (state.mutedTerminalIds.has(id)) continue;
+    if (!shouldTrackTerminalStatus(terminal)) continue;
     const name = terminal.name || id;
     if (ATTENTION_STATUSES.has(terminal.status)) {
       attentionItems.push({ id, name, status: terminal.status });
@@ -1973,7 +2003,7 @@ function bindCardActions(card, record) {
         setMessage(`已取消隐藏 ${record.name}`);
         // 取消隐藏时，检查状态决定是否入队（先去重）
         const terminal = state.terminals.get(record.id);
-        if (terminal && !state.queue.some((q) => q.id === record.id)) {
+        if (terminal && shouldTrackTerminalStatus(terminal) && !state.queue.some((q) => q.id === record.id)) {
           if (ATTENTION_STATUSES.has(terminal.status)) {
             state.queue.unshift({ id: record.id, name: terminal.name || record.id, status: terminal.status });
           } else if (terminal.status === "done") {
@@ -2201,6 +2231,7 @@ function bindCardActions(card, record) {
 
 function renderTerminal(record) {
   let card = document.getElementById(`card-${record.id}`);
+  const isMuted = state.mutedTerminalIds.has(record.id);
   if (!card) {
     card = document.createElement("section");
     card.id = `card-${record.id}`;
@@ -2211,6 +2242,7 @@ function renderTerminal(record) {
   // 正在编辑此卡片标题时，跳过全卡 innerHTML 替换
   // 否则 DOM 重建会销毁聚焦中的 input，触发 blur → finishRename，打断用户输入
   if (state.editingTitleTerminalId === record.id) {
+    syncAgentCardClass(card, record);
     updateTerminalSnapshot(record, card.querySelector(".wall-card-terminal"));
     return card;
   }
@@ -2219,8 +2251,8 @@ function renderTerminal(record) {
   const detailsOpen = card.querySelector(".wall-card-details-panel:not([hidden])") !== null;
   if (detailsOpen) {
     updateTerminalSnapshot(record, card.querySelector(".wall-card-terminal"));
-    updateCardMeta(card, record);
     card.className = `wall-card status-${record.status} has-open-details`;
+    updateCardMeta(card, record);
     return card;
   }
 
@@ -2233,12 +2265,14 @@ function renderTerminal(record) {
         <input class="wall-card-title-input" type="text" value="${escapeHtml(record.name)}" ${state.editingTitleTerminalId === record.id ? '' : 'hidden'} />
         <span class="wall-card-program-chip" hidden></span>
         <div class="wall-card-action-group">
-          <button data-action="toggle-hide" class="ghost wall-card-hide-button" title="${state.hiddenTerminalIds.has(record.id) ? "取消隐藏" : "隐藏"}">${state.hiddenTerminalIds.has(record.id) ? "显" : "隐"}</button>
-          <button data-action="toggle-mute" class="ghost wall-card-mute-button" title="${getMuteButtonTitle(state.mutedTerminalIds.has(record.id))}" aria-label="${getMuteButtonTitle(state.mutedTerminalIds.has(record.id))}">${renderMuteButtonContent(state.mutedTerminalIds.has(record.id))}</button>
-          <button type="button" class="ghost wall-card-more-button" title="更多信息">⋯</button>
+          <button type="button" class="ghost wall-card-more-button" title="更多操作" aria-label="更多操作">⋯</button>
         </div>
       </div>
       <div class="wall-card-details-panel" hidden>
+        <div class="wall-card-details-actions">
+          <button type="button" data-action="toggle-hide" class="secondary wall-card-panel-action wall-card-hide-button" title="${getHideButtonTitle(record)}" aria-label="${getHideButtonTitle(record)}">${getHideButtonLabel(record)}</button>
+          <button type="button" data-action="toggle-mute" class="secondary wall-card-panel-action wall-card-mute-button" title="${getMuteButtonTitle(isMuted)}" aria-label="${getMuteButtonTitle(isMuted)}">${getMuteButtonLabel(isMuted)}</button>
+        </div>
         <div class="wall-card-topline">
           <span class="badge status-${record.status}">${statusLabel(record.status)}</span>
           <span class="badge badge-program wall-card-program-badge"></span>
@@ -2424,6 +2458,7 @@ function incrementalUpdate(layout = null, changedIds) {
 function updateCardMeta(card, record) {
   // 正在编辑标题时跳过
   if (state.editingTitleTerminalId === record.id) return;
+  syncAgentCardClass(card, record);
   const program = getProgramInfo(record);
   // 更新标题
   const title = card.querySelector(".wall-card-title");
@@ -2434,6 +2469,11 @@ function updateCardMeta(card, record) {
     chip.textContent = program.label;
     chip.hidden = !shouldShowProgramChip(record);
   }
+  const hideButton = card.querySelector("[data-action='toggle-hide']");
+  if (hideButton) {
+    syncHideButton(hideButton, record);
+  }
+  syncMuteButton(card.querySelector("[data-action='toggle-mute']"), state.mutedTerminalIds.has(record.id));
   // 更新状态 badge
   const badge = card.querySelector(".badge");
   if (badge) {
@@ -2523,6 +2563,8 @@ function applySnapshot(terminals, layout = null, allTags = null) {
   for (const record of terminals) {
     if (record.hidden) {
       state.hiddenTerminalIds.add(record.id);
+    } else {
+      state.hiddenTerminalIds.delete(record.id);
     }
   }
   // 从后端数据恢复静默状态（优先级高于 localStorage）
@@ -2735,7 +2777,6 @@ function renderAppCard(monitor) {
   card = document.createElement("section");
   card.id = `app-card-${monitor.id}`;
   card.className = "wall-card app-card";
-  card.style.cssText = "width:320px;overflow:hidden;";
   card.dataset.appId = monitor.id;
 
   const statusClass = monitor.status === "active" ? "app-status-active"
@@ -2900,15 +2941,17 @@ function connectWebSocket() {
   function _applyTerminalUpdate(payload) {
     const oldRecord = state.terminals.get(payload.terminal.id);
     const oldStatus = oldRecord ? oldRecord.status : null;
-    if (payload.terminal.status === "waiting" && oldStatus !== "waiting") {
+    if (payload.terminal.status === "waiting" && oldStatus !== "waiting" && shouldTrackTerminalStatus(payload.terminal)) {
       playWaitingAlert();
     }
     state.terminals.set(payload.terminal.id, payload.terminal);
     // 从后端同步隐藏状态（接管时恢复）
     if (payload.terminal.hidden) {
       state.hiddenTerminalIds.add(payload.terminal.id);
-      saveViewState();
+    } else {
+      state.hiddenTerminalIds.delete(payload.terminal.id);
     }
+    saveViewState();
     if (payload.terminal.muted) {
       state.mutedTerminalIds.add(payload.terminal.id);
       saveViewState();
@@ -3758,7 +3801,7 @@ document.querySelectorAll("#topbar-filters .filter-tab").forEach((tab) => {
       // 进入"待处理"时对当前待处理终端做快照，避免处理后立即消失
       state.attentionSnapshot = new Set(
         [...state.terminals.values()]
-          .filter((r) => ["error", "waiting"].includes(r.status) && !state.hiddenTerminalIds.has(r.id))
+          .filter((r) => shouldTrackTerminalStatus(r) && ["error", "waiting"].includes(r.status) && !state.hiddenTerminalIds.has(r.id))
           .map((r) => r.id)
       );
     } else if (filter !== "attention") {

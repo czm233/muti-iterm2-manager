@@ -14,7 +14,16 @@ from typing import Any
 from multi_iterm2_manager.analyzer import analyze_screen_text, analyze_timeout_only, load_rules, RuleEngineConfig
 from multi_iterm2_manager.backend.mock import MockTerminalBackend
 from multi_iterm2_manager.config import Settings, save_ui_settings
-from multi_iterm2_manager.display import build_maximized_frame, get_all_screens, get_screen_index_from_coordinates, get_screen_name_from_coordinates, suggest_monitor_grid
+from multi_iterm2_manager.display import (
+    build_maximized_frame,
+    get_all_screens,
+    get_screen_by_display_id,
+    get_screen_by_name,
+    get_screen_index_from_coordinates,
+    get_screen_name_from_coordinates,
+    is_point_on_screen,
+    suggest_monitor_grid,
+)
 from multi_iterm2_manager.models import CreateTerminalParams, GridLayoutParams, TerminalFrame, TerminalRecord, TerminalStatus, new_terminal_id
 from multi_iterm2_manager.app_monitor import AppMonitorService
 from multi_iterm2_manager.program_detection import detect_terminal_program
@@ -320,13 +329,50 @@ class DashboardService:
 
     def get_target_screen(self) -> int:
         """获取当前配置的目标屏幕索引"""
-        return self.ui_settings.target_screen
+        target_index, _, _ = self.get_target_screen_info()
+        return target_index
 
     def set_target_screen(self, screen_index: int) -> None:
         """设置目标屏幕索引，-1 表示不指定，并持久化到配置文件"""
-        self.ui_settings = replace(self.ui_settings, target_screen=screen_index)
+        screens = self.get_screens()
+        target_screen_id = None
+        target_screen_name = None
+        if 0 <= screen_index < len(screens):
+            target_screen = screens[screen_index]
+            target_screen_id = target_screen.get("displayId")
+            target_screen_name = target_screen.get("name")
+
+        self.ui_settings = replace(
+            self.ui_settings,
+            target_screen=screen_index,
+            target_screen_id=target_screen_id,
+            target_screen_name=target_screen_name,
+        )
         self.settings.ui_settings = self.ui_settings
         save_ui_settings(self.settings.ui_settings_file, self.ui_settings)
+
+    def get_target_screen_info(self) -> tuple[int, str | None, dict | None]:
+        """解析当前目标屏幕，优先使用稳定的 displayId。"""
+        screens = self.get_screens()
+
+        target_screen_id = self.ui_settings.target_screen_id
+        if target_screen_id is not None:
+            screen = get_screen_by_display_id(target_screen_id, screens)
+            if screen is not None:
+                return screen["index"], screen.get("name"), screen
+
+        target_screen_name = self.ui_settings.target_screen_name
+        if target_screen_name:
+            screen = get_screen_by_name(target_screen_name, screens)
+            if screen is not None:
+                return screen["index"], screen.get("name"), screen
+
+        target_index = self.ui_settings.target_screen
+        if 0 <= target_index < len(screens):
+            screen = screens[target_index]
+            return target_index, screen.get("name"), screen
+
+        return -1, None, None
 
     def _resolve_preferred_screen(
         self,
@@ -339,11 +385,9 @@ class DashboardService:
         1. 用户显式设置了 `target_screen` 时，始终优先该屏幕。
         2. 仅当未设置目标屏幕时，才回退到浏览器坐标推断。
         """
-        screens = self.get_screens()
-        target_index = self.ui_settings.target_screen
-        if 0 <= target_index < len(screens):
-            screen = screens[target_index]
-            return target_index, screen.get("name")
+        target_index, target_name, _ = self.get_target_screen_info()
+        if target_index >= 0:
+            return target_index, target_name
 
         if browser_x is not None and browser_y is not None:
             screen_index = get_screen_index_from_coordinates(browser_x, browser_y)
@@ -410,9 +454,10 @@ class DashboardService:
 
     async def _move_to_target_screen(self, record: TerminalRecord) -> None:
         """如果设置了目标屏幕，确保窗口在目标屏幕上"""
-        if self.ui_settings.target_screen >= 0:
+        target_index, _, _ = self.get_target_screen_info()
+        if target_index >= 0:
             from multi_iterm2_manager.display import get_screen_bounds
-            bounds = get_screen_bounds(self.ui_settings.target_screen)
+            bounds = get_screen_bounds(target_index)
             if bounds is not None:
                 current_frame = await self.backend.get_frame(record.handle)
                 if current_frame is not None:
@@ -573,6 +618,11 @@ class DashboardService:
 
     async def _align_frame_to_siblings(self, record: TerminalRecord) -> None:
         """将窗口大小对齐到其他可见终端（取第一个非隐藏、非关闭终端的 frame）"""
+        target_index, target_screen_name = self._resolve_preferred_screen()
+        target_screen = None
+        if target_index >= 0:
+            _, _, target_screen = self.get_target_screen_info()
+
         # 对齐到兄弟终端的 frame
         for sibling in self.records.values():
             if sibling.id == record.id:
@@ -580,6 +630,8 @@ class DashboardService:
             if sibling.status == TerminalStatus.closed or sibling.hidden:
                 continue
             if sibling.frame is not None:
+                if target_screen is not None and not is_point_on_screen(target_screen, sibling.frame.x, sibling.frame.y):
+                    continue
                 target = TerminalFrame(
                     x=sibling.frame.x,
                     y=sibling.frame.y,
@@ -592,9 +644,13 @@ class DashboardService:
                 except Exception:
                     pass
                 return
-        # 没有兄弟终端时，如果设置了目标屏幕，移动到目标屏幕
-        if self.ui_settings.target_screen >= 0:
-            target = build_maximized_frame(screen_index=self.ui_settings.target_screen)
+
+        if target_screen is not None:
+            if record.frame is not None and is_point_on_screen(target_screen, record.frame.x, record.frame.y):
+                return
+
+            default_frame = self.get_default_frame(target_screen_name)
+            target = TerminalFrame(**default_frame) if default_frame is not None else build_maximized_frame(screen_index=target_index)
             try:
                 await self.backend.set_frame(record.handle, target)
                 record.frame = target
@@ -754,6 +810,18 @@ class DashboardService:
             return None
         if screen_name and screen_name in frames_map:
             return frames_map[screen_name]
+        if screen_name:
+            target_screen = get_screen_by_name(screen_name, self.get_screens())
+            if target_screen is not None:
+                for frame_data in frames_map.values():
+                    if not isinstance(frame_data, dict):
+                        continue
+                    x = frame_data.get("x")
+                    y = frame_data.get("y", 0)
+                    if x is None:
+                        continue
+                    if is_point_on_screen(target_screen, x, y):
+                        return frame_data
         return None
 
     async def set_default_frame(self, frame: TerminalFrame, screen_name: str) -> dict:

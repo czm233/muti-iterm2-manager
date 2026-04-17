@@ -3,6 +3,15 @@ settings:
   default_last_n_lines: 20
 
 rules:
+  # --- 内容规则：Codex 正在工作（左下角 Working 状态栏） ---
+  - name: codex-working-indicator
+    status: running
+    type: content
+    priority: 110
+    last_n_lines: 8
+    patterns:
+      - "\\bWorking\\s*\\([^\\n)]*esc\\s+to\\s+interrupt\\)"
+
   # --- 内容规则：等待人类（Claude Code 特征） ---
   - name: claude-code-permission
     status: waiting

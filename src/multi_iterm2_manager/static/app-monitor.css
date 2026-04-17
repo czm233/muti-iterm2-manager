@@ -13,7 +13,9 @@
 /* 覆盖 styles.css 中 .wall-card 和 .app-monitor-wall .wall-card.app-card 的样式 */
 .wall-card.app-card {
   flex-shrink: 0;
-  width: 320px;
+  width: min(320px, calc(100vw - 24px));
+  max-width: 100%;
+  min-width: 0;
   height: auto !important;
   min-height: 0 !important;
   display: block !important;
@@ -48,6 +50,12 @@
 }
 .app-card .wall-card-header {
   padding: 6px 10px;
+  min-width: 0;
+}
+.app-card .wall-card-title-row {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
 }
 .app-card .app-card-subtitle {
   font-size: 0.7rem;
@@ -56,6 +64,8 @@
   overflow: hidden;
   text-overflow: ellipsis;
   margin-top: 2px;
+  min-width: 0;
+  max-width: 100%;
 }
 .app-monitor-status-badge {
   font-size: 0.6rem;

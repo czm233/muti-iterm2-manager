@@ -134,11 +134,16 @@ async def _apply_screen_layout(
 async def _apply_target_screen_default_layout(target_screen: int | None = None) -> dict | None:
     """对当前目标屏幕补应用一次默认布局，覆盖重启恢复时的错位窗口。"""
     screens = service.get_screens()
-    target_index = service.get_target_screen() if target_screen is None else target_screen
-    if target_index < 0 or target_index >= len(screens):
+    if target_screen is None:
+        target_index, screen_name, _ = service.get_target_screen_info()
+    else:
+        if target_screen < 0 or target_screen >= len(screens):
+            return None
+        target_index = target_screen
+        screen_name = screens[target_screen]["name"]
+    if target_index < 0 or target_index >= len(screens) or not screen_name:
         return None
 
-    screen_name = screens[target_index]["name"]
     ensure_preset_layout(screen_name)
     default_layout = get_default_layout_for_screen(screen_name)
     if not default_layout:
@@ -222,7 +227,6 @@ class UiSettingsPayload(BaseModel):
     wall_card_padding_px: int = Field(default=10, ge=0, le=48)
     wall_card_border_radius_px: int = Field(default=22, ge=0, le=48)
     wall_card_border_width_px: float = Field(default=1.0, ge=0.0, le=8.0)
-    wall_card_terminal_border_width_px: float = Field(default=1.0, ge=0.0, le=8.0)
     split_resizer_hit_area_px: int = Field(default=14, ge=4, le=48)
     split_resizer_line_width_px: int = Field(default=2, ge=0, le=8)
     grid_resizer_hit_area_px: int = Field(default=16, ge=4, le=48)
@@ -591,10 +595,7 @@ async def get_screen_configs() -> dict:
 
     # 获取目标弹出屏幕的名称
     screens = get_all_screens()
-    target_index = service.get_target_screen()
-    target_screen_name = None
-    if 0 <= target_index < len(screens):
-        target_screen_name = screens[target_index].get("name")
+    _, target_screen_name, _ = service.get_target_screen_info()
 
     # 确保所有检测到的屏幕都有预设布局
     for screen in screens:
@@ -665,9 +666,8 @@ async def save_current_layout(payload: SaveLayoutPayload | None = None) -> dict:
     terminals = await _collect_live_terminal_layouts()
 
     # 使用目标弹出屏幕名称作为 key
-    screens = service.get_screens()
-    target_index = service.get_target_screen()
-    screen_name = screens[target_index]["name"] if 0 <= target_index < len(screens) else current_config.primary_screen_name
+    _, target_screen_name, _ = service.get_target_screen_info()
+    screen_name = target_screen_name or current_config.primary_screen_name
     config_name = payload.config_name if payload and payload.config_name else f"{screen_name} 布局"
 
     # 检查同名布局

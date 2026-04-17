@@ -58,7 +58,8 @@
         "label": "Claude Code",
         "source": "direct",
         "pid": 12345,
-        "commandLine": "claude"
+        "commandLine": "claude",
+        "isAgent": true
       },
       "updatedAt": "2026-03-09T16:00:00",
       "isLive": true,
@@ -279,6 +280,8 @@
 | `updatedAt` | string | 更新时间 |
 | `isLive` | boolean | 是否来自流式更新 |
 | `lastError` | string \/ null | 最近错误 |
+
+`program` 子对象包含 `key / label / source / pid / commandLine / isAgent`，其中 `isAgent` 用于前端只跟踪 `codex` 与 `claude-code` 的状态提醒和队列。
 
 ## 认证与安全现状
 

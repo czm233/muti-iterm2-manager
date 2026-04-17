@@ -17,7 +17,6 @@
   --wall-card-padding-px: 10px;
   --wall-card-radius-px: 0px;
   --wall-card-border-width-px: 1px;
-  --wall-card-terminal-border-width-px: 1px;
   --wall-card-shell-bg: #070b10;
   --wall-card-shell-border: rgba(54, 78, 100, 0.76);
   --wall-card-shell-header-bg: linear-gradient(180deg, #101923, #0b1219);
@@ -1170,6 +1169,9 @@ input {
   padding: 0;
   cursor: default;
   min-height: 0;
+  min-width: 0;
+  width: 100%;
+  max-width: 100%;
   height: 100%;
   position: relative;
   overflow: visible;
@@ -1204,7 +1206,7 @@ input {
 }
 
 .wall-card.status-running {
-  border-color: rgba(83, 111, 136, 0.78);
+  border-color: #1A2634;
   --wall-card-accent: var(--wall-card-accent-running);
 }
 
@@ -1215,72 +1217,72 @@ input {
 }
 
 .wall-card--queued-done {
-  border-color: rgba(56, 211, 159, 0.42);
+  border-width: 2px;
+  border-color: rgba(87, 228, 169, 0.72);
   --wall-card-accent: var(--done);
   box-shadow:
-    inset 0 0 0 1px rgba(17, 51, 39, 0.92),
-    0 0 0 1px rgba(56, 211, 159, 0.12),
+    inset 0 0 0 1px rgba(24, 73, 55, 0.94),
+    0 0 0 1px rgba(87, 228, 169, 0.18),
+    0 0 18px rgba(56, 211, 159, 0.16),
     0 10px 22px rgba(6, 18, 15, 0.24);
 }
 
 .wall-card--queued-done::before {
-  height: 1px;
-  background: linear-gradient(90deg, rgba(56, 211, 159, 0.08), rgba(137, 255, 214, 0.72) 50%, rgba(56, 211, 159, 0.08));
-  box-shadow: 0 0 12px rgba(56, 211, 159, 0.14);
+  height: 2px;
+  background: rgba(110, 244, 188, 0.92);
+  box-shadow: 0 0 12px rgba(87, 228, 169, 0.22);
 }
 
 .wall-card--queued-done::after {
   content: "";
   position: absolute;
-  inset: -1px;
-  padding: 1px;
-  background:
-    radial-gradient(circle, rgba(166, 255, 224, 0.9) 0, rgba(82, 239, 179, 0.42) 18%, rgba(82, 239, 179, 0.08) 38%, transparent 62%) no-repeat,
-    linear-gradient(135deg, rgba(19, 62, 48, 0.9), rgba(8, 20, 17, 0.14) 34%, rgba(132, 255, 217, 0.16) 50%, rgba(8, 20, 17, 0.14) 66%, rgba(19, 62, 48, 0.9));
-  background-size: 160px 160px, 100% 100%;
-  background-position: -22% 50%, 0 0;
+  inset: -2px;
+  padding: 2px;
+  background: linear-gradient(rgba(102, 242, 184, 0.9), rgba(102, 242, 184, 0.9));
   -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
   -webkit-mask-composite: xor;
   mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
   mask-composite: exclude;
   pointer-events: none;
   z-index: 0;
-  opacity: 0.92;
-  animation: wall-card-queued-done-spotlight 4.8s linear infinite;
+  opacity: 0.88;
+  box-shadow:
+    0 0 10px rgba(102, 242, 184, 0.2),
+    0 0 20px rgba(56, 211, 159, 0.1);
 }
 
 .wall-card--queued-done .wall-card-header {
   background:
     linear-gradient(180deg, rgba(12, 24, 20, 0.98), rgba(8, 17, 14, 0.96)),
     var(--wall-card-shell-header-bg);
-  border-bottom-color: rgba(56, 211, 159, 0.18);
+  border-bottom-color: rgba(87, 228, 169, 0.24);
 }
 
 .wall-card--queued-done .wall-card-title {
   color: #f3fff8;
-  text-shadow: 0 0 10px rgba(56, 211, 159, 0.12);
+  text-shadow: 0 0 12px rgba(87, 228, 169, 0.16);
 }
 
 .wall-card--queued-done .badge.status-done {
-  color: #9aeccd;
-  background: rgba(56, 211, 159, 0.08);
-  border-color: rgba(56, 211, 159, 0.18);
+  color: #b6f7dd;
+  background: rgba(56, 211, 159, 0.1);
+  border-color: rgba(87, 228, 169, 0.22);
 }
 
 .wall-card--queued-done .wall-card-terminal {
-  outline: 1px solid rgba(56, 211, 159, 0.1);
-  outline-offset: -1px;
+  outline: 1px solid rgba(87, 228, 169, 0.14);
+  outline-offset: -2px;
 }
 
 .wall-card.status-waiting {
   background: var(--wall-card-shell-bg);
-  border-color: rgba(164, 121, 53, 0.78);
+  border-color: #1A2634;
   --wall-card-accent: var(--wall-card-accent-waiting);
 }
 
 .wall-card.status-error {
   background: var(--wall-card-shell-bg);
-  border-color: rgba(155, 75, 75, 0.84);
+  border-color: #1A2634;
   --wall-card-accent: var(--wall-card-accent-error);
 }
 
@@ -1297,6 +1299,7 @@ input {
   align-items: center;
   gap: 6px;
   flex-shrink: 0;
+  min-width: 0;
   padding: 3px var(--wall-card-padding-px) 5px;
   background: var(--wall-card-shell-header-bg);
   border-bottom: 1px solid rgba(42, 58, 76, 0.68);
@@ -1325,6 +1328,8 @@ input {
   position: relative;
   flex: 1;
   min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
 }
 
 .wall-card-action-group {
@@ -1406,9 +1411,7 @@ button.wall-card-drag-handle:focus-visible {
   font-size: 0.92rem;
 }
 
-button.wall-card-more-button,
-button.wall-card-hide-button,
-button.wall-card-mute-button {
+button.wall-card-more-button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1426,21 +1429,6 @@ button.wall-card-mute-button {
   box-shadow: none;
 }
 
-button.wall-card-hide-button {
-  width: auto;
-  min-width: 18px;
-  padding: 0 2px;
-  font-size: 0.78rem;
-  font-weight: 700;
-  letter-spacing: 0.02em;
-}
-
-button.wall-card-mute-button {
-  width: 24px;
-  height: 24px;
-  padding: 3px;
-}
-
 button.wall-card-more-button {
   width: 24px;
   height: 24px;
@@ -1449,50 +1437,14 @@ button.wall-card-more-button {
 }
 
 button.wall-card-more-button:hover,
-button.wall-card-more-button:focus-visible,
-button.wall-card-hide-button:hover,
-button.wall-card-hide-button:focus-visible,
-button.wall-card-mute-button:hover,
-button.wall-card-mute-button:focus-visible {
+button.wall-card-more-button:focus-visible {
   background: transparent;
   color: rgba(236, 242, 251, 0.94);
 }
 
-button.wall-card-more-button.is-active,
-button.wall-card-hide-button.is-active,
-button.wall-card-mute-button.is-active {
+button.wall-card-more-button.is-active {
   background: transparent;
   color: rgba(236, 242, 251, 0.94);
-}
-
-.wall-card-mute-icon-shell {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 14px;
-  height: 14px;
-  pointer-events: none;
-}
-
-.wall-card-mute-icon {
-  display: block;
-  width: 14px;
-  height: 14px;
-  object-fit: contain;
-  pointer-events: none;
-}
-
-.wall-card-mute-slash {
-  position: absolute;
-  top: -1px;
-  left: 6.4px;
-  width: 1.2px;
-  height: 16px;
-  border-radius: 999px;
-  transform: rotate(-38deg);
-  transform-origin: center;
-  background: #75d8ff;
 }
 
 .wall-card-details-panel {
@@ -1553,15 +1505,27 @@ button.wall-card-mute-button.is-active {
 .wall-card-details-panel > .wall-card-marker-list,
 .wall-card-details-panel > .wall-card-input-wrap,
 .wall-card-details-panel > .wall-card-tools,
+.wall-card-details-panel > .wall-card-details-actions,
 .wall-card-details-panel > .wall-card-topline {
   margin: 4px 0;
 }
 
+.wall-card-details-panel > .wall-card-details-actions,
 .wall-card-details-panel > .wall-card-tools,
 .wall-card-details-panel > .wall-card-topline {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+}
+
+.wall-card-details-panel > .wall-card-details-actions {
+  margin-top: 0;
+  margin-bottom: 8px;
+}
+
+.wall-card-details-actions > button {
+  flex: 1 1 0;
+  min-width: 0;
 }
 
 .wall-card-details-panel > .wall-card-input-wrap {
@@ -1626,7 +1590,7 @@ button.wall-card-mute-button.is-active {
   overflow: hidden;
   border-radius: 0;
   border: none;
-  background: rgba(1, 5, 12, 0.95);
+  background: #000;
   user-select: none;
 }
 
@@ -2301,26 +2265,6 @@ body.is-resizing-split * {
   50% { opacity: 0.7; }
 }
 
-@keyframes wall-card-queued-done-spotlight {
-  0% {
-    background-position: -22% 50%, 0 0;
-    opacity: 0.84;
-  }
-  45% {
-    opacity: 0.94;
-  }
-  100% {
-    background-position: 122% 50%, 0 0;
-    opacity: 0.84;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .wall-card--queued-done::after {
-    animation: none;
-    background-position: 50% 50%, 0 0;
-  }
-}
 
 /* --- 队列右键菜单 --- */
 .queue-context-menu {
@@ -2588,6 +2532,7 @@ body.is-resizing-split * {
   border-radius: 8px;
   cursor: default;
   transition: background 0.15s;
+  min-width: 0;
 }
 .app-monitor-window-item:hover {
   background: rgba(255, 255, 255, 0.06);
@@ -2599,7 +2544,11 @@ body.is-resizing-split * {
   font-weight: 600;
   font-size: 0.85rem;
   white-space: nowrap;
-  min-width: 100px;
+  min-width: 0;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 0 1 160px;
 }
 .app-monitor-window-title {
   font-size: 0.75rem;
@@ -2608,6 +2557,7 @@ body.is-resizing-split * {
   overflow: hidden;
   text-overflow: ellipsis;
   flex: 1;
+  min-width: 0;
 }
 .app-monitor-window-status {
   font-size: 0.7rem;
@@ -2627,6 +2577,7 @@ body.is-resizing-split * {
   cursor: pointer;
   white-space: nowrap;
   transition: all 0.15s;
+  flex-shrink: 0;
 }
 .app-monitor-remove-list-btn:hover {
   background: rgba(255, 82, 82, 0.18);
@@ -2645,6 +2596,7 @@ body.is-resizing-split * {
   cursor: pointer;
   white-space: nowrap;
   transition: all 0.15s;
+  flex-shrink: 0;
 }
 .app-monitor-add-btn:hover {
   background: rgba(0, 200, 83, 0.1);
@@ -2712,4 +2664,11 @@ body.is-resizing-split * {
 .wall-card-terminal pre,
 .wall-card-terminal .terminal-mirror {
   font-family: "JetBrains Mono", "Fira Code", "SF Mono", Menlo, Monaco, Consolas, monospace;
+}
+.wall-card.status-idle {
+  border-color: #1A2634;
+}
+
+.wall-card.wall-card--non-agent {
+  border-color: #fff;
 }

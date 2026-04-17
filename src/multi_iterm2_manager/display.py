@@ -95,24 +95,21 @@ class DisplayBounds:
 
 
 def get_primary_display_bounds() -> DisplayBounds:
-    if AppKit is None:
+    screens = get_all_screens()
+    primary = next((screen for screen in screens if screen.get("isMain")), screens[0] if screens else None)
+    if primary is None:
         return DisplayBounds(x=0.0, y=0.0, width=1728.0, height=1117.0)
 
-    screen = AppKit.NSScreen.mainScreen()
-    if screen is None:
-        return DisplayBounds(x=0.0, y=0.0, width=1728.0, height=1117.0)
-
-    frame = screen.visibleFrame()
     return DisplayBounds(
-        x=float(frame.origin.x),
-        y=float(frame.origin.y),
-        width=float(frame.size.width),
-        height=float(frame.size.height),
+        x=float(primary.get("visibleX", primary.get("x", 0.0))),
+        y=float(primary.get("visibleY", primary.get("y", 0.0))),
+        width=float(primary.get("visibleWidth", primary.get("width", 1728.0))),
+        height=float(primary.get("visibleHeight", primary.get("height", 1117.0))),
     )
 
 
 def get_all_screens() -> list[dict]:
-    """获取所有可用屏幕信息，返回包含 index/name/width/height/x/y 的列表。
+    """获取所有可用屏幕信息。
 
     使用 CoreGraphics CGGetActiveDisplayList 实时检测屏幕，
     避免 NSScreen.screens() 在长时间运行进程中的缓存问题（热插拔外接屏幕时不更新）。
@@ -137,10 +134,11 @@ def get_all_screens() -> list[dict]:
                 desc = s.deviceDescription()
                 num = desc.get("NSScreenNumber", None)
                 if num is not None:
+                    frame = s.frame()
                     v = s.visibleFrame()
                     visible_map[int(num)] = {
-                        "visibleX": int(v.origin.x),
-                        "visibleY": int(v.origin.y),
+                        "offsetX": int(v.origin.x - frame.origin.x),
+                        "offsetY": int(v.origin.y - frame.origin.y),
                         "visibleWidth": int(v.size.width),
                         "visibleHeight": int(v.size.height),
                     }
@@ -178,7 +176,10 @@ def get_all_screens() -> list[dict]:
         # 可用区域：优先用 NSScreen 数据，否则近似
         vis = visible_map.get(did)
         if vis:
-            vx, vy, vw, vh = vis["visibleX"], vis["visibleY"], vis["visibleWidth"], vis["visibleHeight"]
+            vx = x + vis["offsetX"]
+            vy = y + vis["offsetY"]
+            vw = vis["visibleWidth"]
+            vh = vis["visibleHeight"]
         else:
             # 近似：主屏幕扣除菜单栏(~39px)，非主屏幕使用全部区域
             menu_bar = 39 if is_main else 0
@@ -186,6 +187,7 @@ def get_all_screens() -> list[dict]:
 
         result.append({
             "index": i,
+            "displayId": int(did),
             "name": name,
             "width": w,
             "height": h,
@@ -195,6 +197,8 @@ def get_all_screens() -> list[dict]:
             "visibleY": vy,
             "visibleWidth": vw,
             "visibleHeight": vh,
+            "isMain": is_main,
+            "isBuiltin": is_builtin,
         })
     return result
 
@@ -204,27 +208,51 @@ def _get_all_screens_appkit() -> list[dict]:
     if AppKit is None:
         return [{"index": 0, "name": "主屏幕", "width": 1728, "height": 1117,
                  "x": 0, "y": 0, "visibleX": 0, "visibleY": 0,
-                 "visibleWidth": 1728, "visibleHeight": 1117}]
+                 "visibleWidth": 1728, "visibleHeight": 1117,
+                 "displayId": 0, "isMain": True, "isBuiltin": True}]
 
     screens = AppKit.NSScreen.screens()
     if not screens:
         return [{"index": 0, "name": "主屏幕", "width": 1728, "height": 1117,
                  "x": 0, "y": 0, "visibleX": 0, "visibleY": 0,
-                 "visibleWidth": 1728, "visibleHeight": 1117}]
+                 "visibleWidth": 1728, "visibleHeight": 1117,
+                 "displayId": 0, "isMain": True, "isBuiltin": True}]
 
     result = []
+    main_screen = None
+    try:
+        main_screen = AppKit.NSScreen.mainScreen()
+    except Exception:
+        main_screen = None
     for i, screen in enumerate(screens):
         frame = screen.frame()
         visible = screen.visibleFrame()
         name = "主屏幕" if i == 0 else f"屏幕 {i + 1}"
+        display_id = i
         try:
             localized = screen.localizedName()
             if localized:
                 name = str(localized)
         except Exception:
             pass
+        try:
+            desc = screen.deviceDescription()
+            number = desc.get("NSScreenNumber", None)
+            if number is not None:
+                display_id = int(number)
+        except Exception:
+            pass
+        is_main = False
+        if main_screen is not None:
+            try:
+                is_main = bool(screen.isEqual_(main_screen))
+            except Exception:
+                is_main = False
+        if not is_main and i == 0:
+            is_main = True
         result.append({
             "index": i,
+            "displayId": display_id,
             "name": name,
             "width": int(frame.size.width),
             "height": int(frame.size.height),
@@ -234,8 +262,30 @@ def _get_all_screens_appkit() -> list[dict]:
             "visibleY": int(visible.origin.y),
             "visibleWidth": int(visible.size.width),
             "visibleHeight": int(visible.size.height),
+            "isMain": is_main,
+            "isBuiltin": i == 0 and int(frame.origin.x) == 0 and int(frame.origin.y) == 0,
         })
     return result
+
+
+def is_point_on_screen(screen: dict, x: float, y: float, *, allow_x_only_fallback: bool = True) -> bool:
+    """判断坐标是否落在指定屏幕内。
+
+    macOS 多显示器场景下，窗口 y 坐标偶尔会带旧的负值，允许回退到仅比较 x 坐标。
+    """
+    if screen["x"] <= x < screen["x"] + screen["width"] and screen["y"] <= y < screen["y"] + screen["height"]:
+        return True
+    return allow_x_only_fallback and screen["x"] <= x < screen["x"] + screen["width"]
+
+
+def get_screen_by_name(screen_name: str, screens: list[dict] | None = None) -> dict | None:
+    screens = get_all_screens() if screens is None else screens
+    return next((screen for screen in screens if screen.get("name") == screen_name), None)
+
+
+def get_screen_by_display_id(display_id: int, screens: list[dict] | None = None) -> dict | None:
+    screens = get_all_screens() if screens is None else screens
+    return next((screen for screen in screens if screen.get("displayId") == display_id), None)
 
 
 def get_screen_bounds(screen_index: int) -> DisplayBounds | None:
@@ -260,8 +310,7 @@ def get_screen_index_from_coordinates(x: float, y: float) -> int:
     """根据坐标判断所在屏幕索引，返回 -1 表示未找到"""
     screens = get_all_screens()
     for screen in screens:
-        if (screen["x"] <= x < screen["x"] + screen["width"] and
-            screen["y"] <= y < screen["y"] + screen["height"]):
+        if is_point_on_screen(screen, x, y):
             return screen["index"]
     return -1
 
@@ -273,17 +322,9 @@ def get_screen_name_from_coordinates(x: float, y: float) -> str | None:
     此时回退到仅根据 x 坐标推断屏幕。
     """
     screens = get_all_screens()
-    # 首先尝试精确匹配（x 和 y 都在范围内）
     for screen in screens:
-        if (screen["x"] <= x < screen["x"] + screen["width"] and
-            screen["y"] <= y < screen["y"] + screen["height"]):
+        if is_point_on_screen(screen, x, y):
             return screen["name"]
-
-    # 回退：仅根据 x 坐标推断（处理 y 坐标异常的情况）
-    for screen in screens:
-        if screen["x"] <= x < screen["x"] + screen["width"]:
-            return screen["name"]
-
     return None
 
 
@@ -357,15 +398,13 @@ def build_grid_frames(count: int, params: GridLayoutParams, screen_index: int = 
 
 def _dict_to_screen_info(screen_dict: dict) -> ScreenInfo:
     """将 get_all_screens() 返回的 dict 转换为 ScreenInfo 对象"""
-    # 判断是否为主屏幕：x=0 且 y=0 或者是第一个屏幕
-    is_primary = screen_dict.get("index", 0) == 0 or (screen_dict["x"] == 0 and screen_dict["y"] == 0)
     return ScreenInfo(
         name=screen_dict["name"],
         width=screen_dict["width"],
         height=screen_dict["height"],
         x=screen_dict["x"],
         y=screen_dict["y"],
-        is_primary=is_primary,
+        is_primary=bool(screen_dict.get("isMain")),
     )
 
 

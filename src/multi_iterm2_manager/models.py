@@ -104,6 +104,9 @@ class TerminalStatus(str, Enum):
     closed = "closed"
 
 
+_AGENT_PROGRAM_KEYS = frozenset({"claude-code", "codex"})
+
+
 @dataclass
 class TerminalRuntimeInfo:
     job_name: str | None = None
@@ -122,6 +125,10 @@ class TerminalProgramInfo:
     pid: int | None = None
     command_line: str | None = None
 
+    @property
+    def is_agent(self) -> bool:
+        return self.key in _AGENT_PROGRAM_KEYS
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "key": self.key,
@@ -129,6 +136,7 @@ class TerminalProgramInfo:
             "source": self.source,
             "pid": self.pid,
             "commandLine": self.command_line,
+            "isAgent": self.is_agent,
         }
 
 
