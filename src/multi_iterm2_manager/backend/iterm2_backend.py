@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import asyncio
 import html
+import logging
 import os
+import shlex
 import signal
 import subprocess
 import time
 from typing import Any
 
 from multi_iterm2_manager.display import build_maximized_frame
-from multi_iterm2_manager.models import CreateTerminalParams, TerminalFrame, TerminalHandle, TerminalRuntimeInfo
+from multi_iterm2_manager.models import CreateTerminalParams, SplitTerminalParams, TerminalFrame, TerminalHandle, TerminalRuntimeInfo
 
 try:
     import AppKit  # type: ignore
@@ -82,8 +84,11 @@ MANAGED_HIDDEN_VAR = "user.mitm_hidden"
 MANAGED_TAGS_VAR = "user.mitm_tags"  # 标签列表，逗号分隔存储
 MANAGED_ID_VAR = "user.mitm_id"  # 持久化终端 ID，跨重启稳定
 MANAGED_MUTED_VAR = "user.mitm_muted"  # 静默状态，跨重启稳定
+MANAGED_PRIMARY_VAR = "user.mitm_primary"  # 最重要任务状态，跨重启稳定
 ANCHOR_ROLE_VAR = "user.mitm_role"
 ANCHOR_ROLE_VALUE = "anchor"
+
+logger = logging.getLogger(__name__)
 
 
 class ITerm2Backend:
@@ -232,7 +237,34 @@ class ITerm2Backend:
     async def create_terminal(self, params: CreateTerminalParams) -> TerminalHandle:
         async def _inner():
             connection, app = await self._get_runtime()
-            window = await iterm2.Window.async_create(connection, profile=params.profile, command=params.command)
+            profile_customizations = None
+            command = params.command
+            if params.cwd:
+                try:
+                    local_profile_cls = getattr(iterm2, "LocalWriteOnlyProfile", None)
+                    if local_profile_cls is None:
+                        local_profile_cls = getattr(getattr(iterm2, "profile", None), "LocalWriteOnlyProfile", None)
+                    working_dir_enum = getattr(iterm2, "InitialWorkingDirectory", None)
+                    if working_dir_enum is None:
+                        working_dir_enum = getattr(getattr(iterm2, "profile", None), "InitialWorkingDirectory", None)
+                    if local_profile_cls is not None and working_dir_enum is not None:
+                        profile_customizations = local_profile_cls()
+                        window_setting = getattr(working_dir_enum, "INITIAL_WORKING_DIRECTORY_CUSTOM", None)
+                        if window_setting is not None:
+                            profile_customizations.set_advanced_working_directory_window_setting(window_setting)
+                            profile_customizations.set_advanced_working_directory_window_directory(params.cwd)
+                except Exception:
+                    profile_customizations = None
+
+            if command is not None and profile_customizations is not None:
+                profile_customizations = None
+
+            window = await iterm2.Window.async_create(
+                connection,
+                profile=params.profile,
+                command=command,
+                profile_customizations=profile_customizations,
+            )
             if window is None:
                 raise RuntimeError("iTerm2 返回了空窗口")
             await app.async_refresh()
@@ -256,8 +288,89 @@ class ITerm2Backend:
             target_frame = params.frame or build_maximized_frame()
             handle = TerminalHandle(window_id=fresh_window.window_id, session_id=session.session_id, tab_id=tab.tab_id)
             await self.set_frame(handle, target_frame)
+            if params.cwd and profile_customizations is None:
+                try:
+                    await session.async_send_text(f"cd {shlex.quote(params.cwd)}\n")
+                except Exception:
+                    pass
             await self.hide_app()
             return handle
+        return await self._run_with_reconnect(_inner)
+
+    async def split_terminal(self, handle: TerminalHandle, params: SplitTerminalParams) -> TerminalHandle:
+        async def _inner():
+            _, app = await self._get_runtime()
+            source_session = await self._get_session(handle.session_id)
+
+            profile_name = params.profile
+            if not profile_name:
+                try:
+                    profile = await source_session.async_get_profile()
+                    profile_name = getattr(profile, "name", None) if profile is not None else None
+                except Exception:
+                    profile_name = None
+
+            profile_customizations = None
+            try:
+                local_profile_cls = getattr(iterm2, "LocalWriteOnlyProfile", None)
+                if local_profile_cls is None:
+                    local_profile_cls = getattr(getattr(iterm2, "profile", None), "LocalWriteOnlyProfile", None)
+                working_dir_enum = getattr(iterm2, "InitialWorkingDirectory", None)
+                if working_dir_enum is None:
+                    working_dir_enum = getattr(getattr(iterm2, "profile", None), "InitialWorkingDirectory", None)
+
+                if local_profile_cls is not None and working_dir_enum is not None:
+                    profile_customizations = local_profile_cls()
+                    if params.cwd:
+                        pane_setting = getattr(working_dir_enum, "INITIAL_WORKING_DIRECTORY_CUSTOM", None)
+                        if pane_setting is not None:
+                            profile_customizations.set_advanced_working_directory_pane_setting(pane_setting)
+                            profile_customizations.set_advanced_working_directory_pane_directory(params.cwd)
+                    else:
+                        pane_setting = getattr(working_dir_enum, "INITIAL_WORKING_DIRECTORY_RECYCLE", None)
+                        if pane_setting is not None:
+                            profile_customizations.set_advanced_working_directory_pane_setting(pane_setting)
+            except Exception:
+                profile_customizations = None
+
+            try:
+                session = await source_session.async_split_pane(
+                    vertical=params.vertical,
+                    before=False,
+                    profile=profile_name,
+                    profile_customizations=profile_customizations,
+                )
+            except Exception as exc:
+                # iTerm2 对 split 时的 profile/profile_customizations 兼容性存在差异。
+                # 回退到最基础的 split，后续由 service 层通过 `cd` 兜底同步 cwd。
+                logger.warning(
+                    "split pane with profile settings failed for session=%s: %s; fallback to plain split",
+                    handle.session_id,
+                    exc,
+                )
+                session = await source_session.async_split_pane(
+                    vertical=params.vertical,
+                    before=False,
+                )
+            if session is None:
+                raise RuntimeError("iTerm2 未返回新的 split pane")
+
+            await app.async_refresh()
+            fresh_session = app.get_session_by_id(session.session_id) or session
+            tab = getattr(fresh_session, "tab", None)
+            try:
+                await fresh_session.async_set_variable(MANAGED_FLAG_VAR, True)
+                await fresh_session.async_set_variable(MANAGED_OWNER_VAR, MANAGED_OWNER_VALUE)
+                await fresh_session.async_set_variable(ANCHOR_ROLE_VAR, "managed")
+            except Exception:
+                pass
+
+            return TerminalHandle(
+                window_id=handle.window_id,
+                session_id=fresh_session.session_id,
+                tab_id=getattr(tab, "tab_id", handle.tab_id),
+            )
+
         return await self._run_with_reconnect(_inner)
 
     # 最大捕获行数（监控场景只需看近期输出）
@@ -329,6 +442,10 @@ class ITerm2Backend:
                         try:
                             await asyncio.wait_for(streamer.async_get(), timeout=5)
                         except asyncio.TimeoutError:
+                            try:
+                                await self._get_session(handle.session_id)
+                            except Exception:
+                                raise RuntimeError(f"找不到 session: {handle.session_id}")
                             if not self._is_iterm2_running():
                                 raise RuntimeError("无法连接 iTerm2 — 应用未在运行")
                         # 每次都检查 session 是否还存在（检测窗口关闭）
@@ -457,6 +574,20 @@ class ITerm2Backend:
             return results
         return await self._run_with_reconnect(_inner)
 
+    async def list_session_ids(self) -> set[str]:
+        async def _inner():
+            _, app = await self._get_runtime(force_refresh=True)
+            session_ids: set[str] = set()
+            for window in list(app.terminal_windows):
+                for tab in list(window.tabs):
+                    for session in list(tab.sessions):
+                        session_id = getattr(session, "session_id", None)
+                        if session_id:
+                            session_ids.add(session_id)
+            return session_ids
+
+        return await self._run_with_reconnect(_inner)
+
     async def adopt(self, session_id: str, name: str | None = None) -> TerminalHandle:
         async def _inner():
             _, app = await self._get_runtime(force_refresh=True)
@@ -518,6 +649,12 @@ class ITerm2Backend:
                     adopted_tags = [t.strip() for t in tags_val.split(",") if t.strip()]
             except Exception:
                 pass
+            adopted_primary = False
+            try:
+                primary_val = await target_session.async_get_variable(MANAGED_PRIMARY_VAR)
+                adopted_primary = bool(primary_val)
+            except Exception:
+                pass
             # 读取持久化终端 ID
             adopted_id = None
             try:
@@ -536,6 +673,7 @@ class ITerm2Backend:
                 adopted_muted=adopted_muted,
                 adopted_hidden=adopted_hidden,
                 adopted_tags=adopted_tags,
+                adopted_primary=adopted_primary,
             )
         return await self._run_with_reconnect(_inner)
 
@@ -588,6 +726,8 @@ class ITerm2Backend:
                 command_line=_as_str(await _get_var("commandLine")),
                 job_pid=_as_int(await _get_var("jobPid")),
                 process_title=_as_str(await _get_var("processTitle")),
+                terminal_title=_as_str(await _get_var("terminalTitle")),
+                session_name=_as_str(await _get_var("session.name")) or _as_str(await _get_var("name")),
                 tty=_as_str(await _get_var("tty")),
                 session_pid=_as_int(await _get_var("pid")),
             )
@@ -623,6 +763,13 @@ class ITerm2Backend:
         async def _inner():
             session = await self._get_session(handle.session_id)
             await session.async_set_variable(MANAGED_MUTED_VAR, muted)
+        await self._run_with_reconnect(_inner)
+
+    async def set_primary(self, handle: TerminalHandle, primary: bool) -> None:
+        """将最重要任务状态写入 iTerm2 session 变量，重启后可恢复"""
+        async def _inner():
+            session = await self._get_session(handle.session_id)
+            await session.async_set_variable(MANAGED_PRIMARY_VAR, primary)
         await self._run_with_reconnect(_inner)
 
     async def rename(self, handle: TerminalHandle, name: str) -> None:
@@ -676,11 +823,6 @@ class ITerm2Backend:
             try:
                 session = await self._get_session(handle.session_id)
                 await session.async_close(force=True)
-            except Exception:
-                pass
-            try:
-                window = await self._get_window(handle.window_id)
-                await window.async_close(force=True)
             except Exception:
                 pass
         await self._run_with_reconnect(_inner)

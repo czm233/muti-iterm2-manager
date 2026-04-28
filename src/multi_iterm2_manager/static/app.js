@@ -1,14 +1,29 @@
+const VIEW_MODE_STORAGE_KEY = "mitm-view-mode";
+const VIEW_MODE_SEQUENCE = ["live", "brief"];
+const SAVED_IDEAS_STORAGE_KEY = "mitm-saved-ideas";
+const DEFAULT_IDEA_FOLDER_KEY = "__unfiled__";
+const DEFAULT_IDEA_FOLDER_NAME = "未归属项目";
+const CONNECTION_DIALOG_SHOW_DELAY_MS = 600;
+const CONNECTION_RETRY_DELAY_MS = 3000;
+const CONNECTION_LONG_WAIT_MS = 30000;
+const CONNECTION_SUCCESS_HOLD_MS = 1000;
+
 const state = {
   terminals: new Map(),
   orderedTerminalIds: [],
   views: new Map(),
+  viewMode: localStorage.getItem(VIEW_MODE_STORAGE_KEY) === "brief" ? "brief" : "live",
   layout: { count: 0, columns: 1, rows: 1 },
   nextFitMode: false,
   gridTrackRatios: {},
   layoutTree: null,
+  summaryCellAssignments: {},
+  summaryGridRows: 1,
+  summaryGridColumns: 1,
   draggedTerminalId: null,
   hoverTargetPaneId: null,
   hoverDropZone: null,
+  hoverSummaryCellIndex: null,
   activeGridResize: null,
   activeSplitResize: null,
   activeCardDrag: null,
@@ -27,11 +42,34 @@ const state = {
   _pendingLayout: null,           // 待应用的 layout
   _incrementalIds: new Set(),     // 需要增量更新的终端 ID 集合
   queue: [],                       // 队列: [{ id, name, status }]
+  summaryConfig: {},               // 摘要配置缓存（含 activeInterval）
   queueDismissed: new Map(),       // 用户手动移除的终端: Map<id, status> — 状态变化后自动清除
   allTags: [],                     // 全局标签列表，从后端同步
   selectedTag: null,               // 当前选中的标签筛选
   appMonitors: new Map(),          // App 监控数据: Map<appId, monitor>
   orderedAppMonitorIds: [],        // App 监控有序 ID 列表
+  savedIdeas: [],                  // 菜单内想法缓存区，持久化到 localStorage
+  connectionDialog: {
+    status: "connecting",
+    attempt: 0,
+    startedAt: 0,
+    nextRetryAt: 0,
+    showTimer: null,
+    tickTimer: null,
+    closeTimer: null,
+  },
+  ideaDialog: {
+    selectedFolderKey: null,
+    draft: "",
+    editingId: null,
+    editDraft: "",
+  },
+  contextMenu: {
+    terminalId: null,
+    anchorX: 0,
+    anchorY: 0,
+    tagDraft: "",
+  },
 };
 
 const VIEW_STATE_STORAGE_KEY = "mitm-monitor-view-state";
@@ -71,8 +109,10 @@ function saveViewState() {
       orderedTerminalIds: state.orderedTerminalIds,
       gridTrackRatios: state.gridTrackRatios,
       layoutTree: state.layoutTree,
+      summaryCellAssignments: state.summaryCellAssignments,
       hiddenTerminalIds: [...state.hiddenTerminalIds],
       mutedTerminalIds: [...state.mutedTerminalIds],
+      queueDismissed: [...state.queueDismissed.entries()],
       selectedTag: state.selectedTag,
     };
     window.localStorage.setItem(VIEW_STATE_STORAGE_KEY, JSON.stringify(payload));
@@ -96,17 +136,46 @@ function loadViewState() {
     if (payload.layoutTree && typeof payload.layoutTree === "object") {
       state.layoutTree = normalizeLayoutTree(payload.layoutTree);
     }
+    if (payload.summaryCellAssignments && typeof payload.summaryCellAssignments === "object") {
+      state.summaryCellAssignments = normalizeSummaryCellAssignments(payload.summaryCellAssignments);
+    }
     if (Array.isArray(payload.hiddenTerminalIds)) {
       state.hiddenTerminalIds = new Set(payload.hiddenTerminalIds);
     }
     if (Array.isArray(payload.mutedTerminalIds)) {
       state.mutedTerminalIds = new Set(payload.mutedTerminalIds);
     }
+    if (Array.isArray(payload.queueDismissed)) {
+      state.queueDismissed = new Map(
+        payload.queueDismissed.filter((entry) =>
+          Array.isArray(entry)
+          && entry.length === 2
+          && typeof entry[0] === "string"
+          && typeof entry[1] === "string"
+        ),
+      );
+    }
     if (payload.selectedTag) {
       state.selectedTag = payload.selectedTag;
     }
   } catch {
   }
+}
+
+function dismissQueueItem(terminalId, status) {
+  if (!terminalId || !status) {
+    return;
+  }
+  state.queueDismissed.set(terminalId, status);
+  saveViewState();
+}
+
+function clearDismissedQueueItem(terminalId) {
+  if (!state.queueDismissed.has(terminalId)) {
+    return;
+  }
+  state.queueDismissed.delete(terminalId);
+  saveViewState();
 }
 
 function syncHideButton(button, recordOrId) {
@@ -154,6 +223,7 @@ function saveTagLayout() {
       orderedTerminalIds: state.orderedTerminalIds ? [...state.orderedTerminalIds] : [],
       gridTrackRatios: state.gridTrackRatios ? JSON.parse(JSON.stringify(state.gridTrackRatios)) : {},
       layoutTree: state.layoutTree ? JSON.parse(JSON.stringify(state.layoutTree)) : null,
+      summaryCellAssignments: state.summaryCellAssignments ? JSON.parse(JSON.stringify(state.summaryCellAssignments)) : {},
     };
     localStorage.setItem(TAG_LAYOUTS_STORAGE_KEY, JSON.stringify(stored));
   } catch {
@@ -170,11 +240,13 @@ function loadTagLayout() {
       if (layout.orderedTerminalIds) state.orderedTerminalIds = layout.orderedTerminalIds;
       state.gridTrackRatios = layout.gridTrackRatios || {};
       state.layoutTree = layout.layoutTree ? normalizeLayoutTree(layout.layoutTree) : null;
+      state.summaryCellAssignments = normalizeSummaryCellAssignments(layout.summaryCellAssignments || {});
     } else {
       // 该标签没有保存过布局，清空让 syncTerminalOrder 自然排列
       state.orderedTerminalIds = [];
       state.gridTrackRatios = {};
       state.layoutTree = null;
+      state.summaryCellAssignments = {};
     }
   } catch {
     // 读取失败时静默忽略
@@ -200,6 +272,18 @@ const uiSettingsResetButton = document.getElementById("ui-settings-reset");
 const uiSettingsPath = document.getElementById("ui-settings-path");
 const topbarFilters = document.getElementById("topbar-filters");
 const tagFilterTabs = document.getElementById("tag-filter-tabs");
+const terminalContextMenu = document.getElementById("terminal-context-menu");
+const connectionDialog = document.getElementById("connection-dialog");
+const connectionDialogTitle = document.getElementById("connection-dialog-title");
+const connectionDialogState = document.getElementById("connection-dialog-state");
+const connectionDialogDescription = document.getElementById("connection-dialog-description");
+const connectionDialogDetail = document.getElementById("connection-dialog-detail");
+const connectionDialogAttempt = document.getElementById("connection-dialog-attempt");
+const connectionDialogRetry = document.getElementById("connection-dialog-retry");
+const ideaDialog = document.getElementById("idea-dialog");
+const ideaDialogContent = document.getElementById("idea-dialog-content");
+const ideaDialogClose = document.getElementById("idea-dialog-close");
+const viewModeButtons = [...document.querySelectorAll(".view-btn[data-view]")];
 function getTopbarMenus() {
   return [...document.querySelectorAll(".topbar-menu")];
 }
@@ -215,6 +299,1636 @@ function getTopbarMenuPanel(menu) {
     return document.getElementById(panelId);
   }
   return menu?.querySelector(".topbar-menu-panel");
+}
+
+function hasOpenTopbarMenu() {
+  return getTopbarMenus().some((menu) => menu.classList.contains("is-open"));
+}
+
+function createDefaultContextMenuState() {
+  return {
+    terminalId: null,
+    anchorX: 0,
+    anchorY: 0,
+    tagDraft: "",
+    ideaDraft: "",
+    ideaEditingId: null,
+    ideaEditDraft: "",
+    ideaDragEnabledId: null,
+    ideaDragId: null,
+    ideaDragOverId: null,
+    ideaDropPlacement: "after",
+  };
+}
+
+function getContextMenuState() {
+  if (!state.contextMenu) {
+    state.contextMenu = createDefaultContextMenuState();
+  }
+  return state.contextMenu;
+}
+
+function isContextMenuBoundToTerminal(terminalId) {
+  return Boolean(terminalId) && getContextMenuState().terminalId === terminalId;
+}
+
+function getTerminalCardById(terminalId) {
+  return terminalId ? document.getElementById(`card-${terminalId}`) : null;
+}
+
+function isContextMenuEditableTarget(target) {
+  return Boolean(target?.closest("input, textarea, [contenteditable='true']"));
+}
+
+function isKeyboardShortcutEditableTarget(target) {
+  return Boolean(target?.closest("input, textarea, select, button, a[href], summary, [contenteditable='true'], [role='button'], [tabindex]:not([tabindex='-1'])"));
+}
+
+function syncViewModeButtons() {
+  viewModeButtons.forEach((btn) => {
+    btn.classList.toggle("is-active", btn.dataset.view === state.viewMode);
+  });
+}
+
+function setViewMode(mode) {
+  if (!VIEW_MODE_SEQUENCE.includes(mode) || mode === state.viewMode) {
+    return false;
+  }
+  state.viewMode = mode;
+  localStorage.setItem(VIEW_MODE_STORAGE_KEY, mode);
+  syncViewModeButtons();
+  state._needFullRefresh = true;
+  scheduleRender();
+  return true;
+}
+
+function toggleViewMode() {
+  const nextMode = state.viewMode === "brief" ? "live" : "brief";
+  return setViewMode(nextMode);
+}
+
+function getContextMenuHideLabel(record) {
+  return isTerminalHidden(record) ? "取消隐藏" : "隐藏终端";
+}
+
+function getContextMenuMuteLabel(record) {
+  return state.mutedTerminalIds.has(record?.id) ? "取消静默" : "静默队列";
+}
+
+function getContextMenuPrimaryLabel(record) {
+  return record?.isPrimary ? "取消最重要任务" : "标记为最重要任务";
+}
+
+function getRecordTags(record) {
+  return Array.isArray(record?.tags) ? record.tags : [];
+}
+
+function getCandidateTags(record) {
+  const currentTags = new Set(getRecordTags(record));
+  return state.allTags.filter((tag) => !currentTags.has(tag));
+}
+
+function normalizeIdeaText(text) {
+  return String(text || "")
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .map((line) => line.replace(/[ \t\f\v]+/g, " ").trim())
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function normalizeIdeaFolderPath(folderPath) {
+  return String(folderPath || "").trim().replace(/\/+$/, "");
+}
+
+function getIdeaFolderKey(folderPath) {
+  const normalizedPath = normalizeIdeaFolderPath(folderPath);
+  return normalizedPath || DEFAULT_IDEA_FOLDER_KEY;
+}
+
+function getIdeaFolderName(folderPath, fallbackName = "") {
+  const normalizedPath = normalizeIdeaFolderPath(folderPath);
+  if (normalizedPath) {
+    return getSummaryFolderName(normalizedPath);
+  }
+  return normalizeIdeaText(fallbackName) || DEFAULT_IDEA_FOLDER_NAME;
+}
+
+function getIdeaFolderFromRecord(record) {
+  const folderPath = getSummaryFolderPath(record);
+  return {
+    key: getIdeaFolderKey(folderPath),
+    folderPath,
+    folderName: getIdeaFolderName(folderPath),
+  };
+}
+
+function normalizeSavedIdeas(items) {
+  if (!Array.isArray(items)) {
+    return [];
+  }
+  return items
+    .filter((item) => item && typeof item === "object")
+    .map((item, index) => {
+      const text = normalizeIdeaText(item.text);
+      if (!text) {
+        return null;
+      }
+      const folderPath = normalizeIdeaFolderPath(item.folderPath);
+      return {
+        id: typeof item.id === "string" && item.id ? item.id : `idea-${index}`,
+        text,
+        folderPath,
+        folderName: getIdeaFolderName(folderPath, item.folderName),
+        createdAt: typeof item.createdAt === "string" && item.createdAt
+          ? item.createdAt
+          : new Date().toISOString(),
+      };
+    })
+    .filter(Boolean);
+}
+
+function createSavedIdea(text, folder = {}) {
+  const folderPath = normalizeIdeaFolderPath(folder.folderPath);
+  return {
+    id: `idea-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+    text: normalizeIdeaText(text),
+    folderPath,
+    folderName: getIdeaFolderName(folderPath, folder.folderName),
+    createdAt: new Date().toISOString(),
+  };
+}
+
+function loadSavedIdeas() {
+  try {
+    const raw = window.localStorage.getItem(SAVED_IDEAS_STORAGE_KEY);
+    state.savedIdeas = normalizeSavedIdeas(raw ? JSON.parse(raw) : []);
+  } catch {
+    state.savedIdeas = [];
+  }
+}
+
+function persistSavedIdeas() {
+  try {
+    window.localStorage.setItem(SAVED_IDEAS_STORAGE_KEY, JSON.stringify(state.savedIdeas));
+  } catch {
+  }
+}
+
+function getSavedIdeaById(ideaId) {
+  return state.savedIdeas.find((idea) => idea.id === ideaId) || null;
+}
+
+function getSavedIdeasForFolder(folderKey) {
+  const key = folderKey || DEFAULT_IDEA_FOLDER_KEY;
+  return state.savedIdeas.filter((idea) => getIdeaFolderKey(idea.folderPath) === key);
+}
+
+function countSavedIdeasForFolder(folderKey) {
+  return getSavedIdeasForFolder(folderKey).length;
+}
+
+function getIdeaDialogState() {
+  if (!state.ideaDialog) {
+    state.ideaDialog = {
+      selectedFolderKey: null,
+      draft: "",
+      editingId: null,
+      editDraft: "",
+    };
+  }
+  return state.ideaDialog;
+}
+
+function clearContextMenuIdeaEditState() {
+  const contextMenuState = getContextMenuState();
+  contextMenuState.ideaEditingId = null;
+  contextMenuState.ideaEditDraft = "";
+}
+
+function beginIdeaEditing(ideaId) {
+  const idea = getSavedIdeaById(ideaId);
+  if (!idea) {
+    return;
+  }
+  const contextMenuState = getContextMenuState();
+  contextMenuState.ideaEditingId = idea.id;
+  contextMenuState.ideaEditDraft = idea.text;
+  renderOpenTerminalContextMenu();
+  focusContextMenuField("idea-edit");
+}
+
+function addIdeaFolderToMap(foldersByKey, folderPath, options = {}) {
+  const normalizedPath = normalizeIdeaFolderPath(folderPath);
+  const key = getIdeaFolderKey(normalizedPath);
+  const existing = foldersByKey.get(key);
+  if (existing) {
+    if (options.terminal) {
+      existing.terminalCount += 1;
+    }
+    if (options.idea) {
+      existing.ideaCount += 1;
+    }
+    return existing;
+  }
+  const folder = {
+    key,
+    folderPath: normalizedPath,
+    folderName: getIdeaFolderName(normalizedPath, options.folderName),
+    terminalCount: options.terminal ? 1 : 0,
+    ideaCount: options.idea ? 1 : 0,
+  };
+  foldersByKey.set(key, folder);
+  return folder;
+}
+
+function buildIdeaFolders() {
+  const foldersByKey = new Map();
+  for (const record of state.terminals.values()) {
+    addIdeaFolderToMap(foldersByKey, getSummaryFolderPath(record), { terminal: true });
+  }
+  for (const idea of state.savedIdeas) {
+    addIdeaFolderToMap(foldersByKey, idea.folderPath, {
+      idea: true,
+      folderName: idea.folderName,
+    });
+  }
+  if (foldersByKey.size === 0) {
+    addIdeaFolderToMap(foldersByKey, "");
+  }
+  return [...foldersByKey.values()].sort((a, b) => {
+    const aUnfiled = a.key === DEFAULT_IDEA_FOLDER_KEY;
+    const bUnfiled = b.key === DEFAULT_IDEA_FOLDER_KEY;
+    if (aUnfiled !== bUnfiled) {
+      return aUnfiled ? 1 : -1;
+    }
+    if (a.terminalCount !== b.terminalCount) {
+      return b.terminalCount - a.terminalCount;
+    }
+    return a.folderName.localeCompare(b.folderName, "zh-Hans-CN", { numeric: true });
+  });
+}
+
+function ensureIdeaDialogFolder(preferredFolderKey = null) {
+  const dialogState = getIdeaDialogState();
+  const folders = buildIdeaFolders();
+  const requestedKey = preferredFolderKey || dialogState.selectedFolderKey;
+  const selectedFolder = folders.find((folder) => folder.key === requestedKey) || folders[0];
+  dialogState.selectedFolderKey = selectedFolder?.key || DEFAULT_IDEA_FOLDER_KEY;
+  return {
+    folders,
+    selectedFolder: selectedFolder || {
+      key: DEFAULT_IDEA_FOLDER_KEY,
+      folderPath: "",
+      folderName: DEFAULT_IDEA_FOLDER_NAME,
+      terminalCount: 0,
+      ideaCount: 0,
+    },
+  };
+}
+
+function formatIdeaCreatedAt(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+}
+
+function renderIdeaFolderButton(folder, selectedKey) {
+  const isSelected = folder.key === selectedKey;
+  const activeBadge = folder.terminalCount > 0
+    ? `<span class="idea-folder-active">${folder.terminalCount} 个终端</span>`
+    : "";
+  return `
+    <button
+      type="button"
+      class="idea-folder-item${isSelected ? " is-active" : ""}"
+      data-idea-folder-key="${escapeHtml(folder.key)}"
+      aria-pressed="${isSelected ? "true" : "false"}"
+    >
+      <span class="idea-folder-main">
+        <span class="idea-folder-name">${escapeHtml(folder.folderName)}</span>
+        <span class="idea-folder-count">${folder.ideaCount}</span>
+      </span>
+      <span class="idea-folder-path">${escapeHtml(folder.folderPath || "未归属项目")}</span>
+      ${activeBadge}
+    </button>
+  `;
+}
+
+function renderIdeaDialogIdeaRow(idea, dialogState) {
+  const isEditing = idea.id === dialogState.editingId;
+  const createdAt = formatIdeaCreatedAt(idea.createdAt);
+  return `
+    <div class="idea-dialog-idea-row" data-idea-id="${escapeHtml(idea.id)}">
+      <div class="idea-dialog-idea-copy" title="${escapeHtml(idea.text)}">
+        <div class="idea-dialog-idea-text">${escapeHtml(idea.text)}</div>
+        ${createdAt ? `<div class="idea-dialog-idea-time">${escapeHtml(createdAt)}</div>` : ""}
+      </div>
+      <div class="idea-dialog-idea-actions">
+        <button type="button" class="idea-dialog-button" data-idea-copy="${escapeHtml(idea.id)}">复制</button>
+        <button type="button" class="idea-dialog-button${isEditing ? " is-active" : ""}" data-idea-edit="${escapeHtml(idea.id)}">编辑</button>
+        <button type="button" class="idea-dialog-button is-destructive" data-idea-delete="${escapeHtml(idea.id)}">删除</button>
+      </div>
+    </div>
+  `;
+}
+
+function renderIdeaDialog() {
+  if (!ideaDialogContent) {
+    return;
+  }
+  const dialogState = getIdeaDialogState();
+  const { folders, selectedFolder } = ensureIdeaDialogFolder();
+  const ideas = getSavedIdeasForFolder(selectedFolder.key);
+  const createDisabledAttr = dialogState.editingId ? " disabled" : "";
+  const sharedActionsMarkup = dialogState.editingId
+    ? `
+      <button type="button" class="idea-dialog-button is-primary" data-idea-save-shared-edit>保存编辑</button>
+      <button type="button" class="idea-dialog-button" data-idea-shared-cancel>取消</button>
+    `
+    : "";
+  const ideasMarkup = ideas.length > 0
+    ? ideas.map((idea) => renderIdeaDialogIdeaRow(idea, dialogState)).join("")
+    : '<div class="idea-dialog-empty">这个项目还没有想法</div>';
+  ideaDialogContent.innerHTML = `
+    <div class="idea-dialog-layout">
+      <aside class="idea-folder-pane" aria-label="项目列表">
+        <div class="idea-pane-title">项目</div>
+        <div class="idea-folder-list">
+          ${folders.map((folder) => renderIdeaFolderButton(folder, selectedFolder.key)).join("")}
+        </div>
+      </aside>
+      <section class="idea-list-pane" aria-label="想法列表">
+        <div class="idea-list-header">
+          <div class="idea-list-title-wrap">
+            <div class="idea-list-kicker">想法</div>
+            <h3 class="idea-list-title">${escapeHtml(selectedFolder.folderName)}</h3>
+            <div class="idea-list-path">${escapeHtml(selectedFolder.folderPath || "未归属项目")}</div>
+          </div>
+          <span class="idea-list-count">${ideas.length} 条</span>
+        </div>
+        <form class="idea-dialog-form" data-idea-form="add">
+          <label class="idea-dialog-field">
+            <textarea
+              class="idea-dialog-input"
+              name="idea"
+              data-idea-input="draft"
+              rows="4"
+              placeholder="输入想法，可换行记录"
+            >${escapeHtml(dialogState.draft)}</textarea>
+          </label>
+          <div class="idea-dialog-form-actions">
+            ${sharedActionsMarkup}
+            <button type="submit" class="idea-dialog-submit"${createDisabledAttr}>创建想法</button>
+          </div>
+        </form>
+        <div class="idea-dialog-ideas">
+          ${ideasMarkup}
+        </div>
+      </section>
+    </div>
+  `;
+}
+
+function flashPressedButton(button) {
+  if (!button || button.disabled) {
+    return;
+  }
+  button.classList.add("is-pressed");
+  window.setTimeout(() => {
+    button.classList.remove("is-pressed");
+  }, 260);
+}
+
+function bindPressedButtonFeedback(root, selector) {
+  if (!root) {
+    return;
+  }
+  let pressedButton = null;
+  const clearPressedButton = () => {
+    if (!pressedButton) {
+      return;
+    }
+    const button = pressedButton;
+    pressedButton = null;
+    window.setTimeout(() => {
+      button.classList.remove("is-pressed");
+    }, 120);
+  };
+
+  root.addEventListener("pointerdown", (event) => {
+    const target = event.target instanceof Element ? event.target : null;
+    const button = target?.closest(selector);
+    if (!button || button.disabled) {
+      return;
+    }
+    pressedButton?.classList.remove("is-pressed");
+    pressedButton = button;
+    button.classList.add("is-pressed");
+  });
+  root.addEventListener("pointerup", clearPressedButton);
+  root.addEventListener("pointercancel", clearPressedButton);
+  root.addEventListener("pointerleave", clearPressedButton);
+}
+
+function isIdeaDialogOpen() {
+  return Boolean(ideaDialog?.open);
+}
+
+function focusIdeaDialogField(kind = "draft") {
+  const selector = kind === "edit"
+    ? "[data-idea-input='edit']"
+    : "[data-idea-input='draft']";
+  window.requestAnimationFrame(() => {
+    const field = ideaDialog?.querySelector(selector);
+    if (!field) {
+      return;
+    }
+    field.focus();
+    if (typeof field.select === "function") {
+      field.select();
+    }
+  });
+}
+
+function clearIdeaDialogEditState() {
+  const dialogState = getIdeaDialogState();
+  dialogState.editingId = null;
+  dialogState.editDraft = "";
+}
+
+function clearIdeaDialogSelectionState(options = {}) {
+  clearIdeaDialogEditState();
+  if (options.clearDraft) {
+    getIdeaDialogState().draft = "";
+  }
+}
+
+function openIdeaDialog(record = null, options = {}) {
+  if (!ideaDialog) {
+    return;
+  }
+  closeAllTopbarMenus();
+  const dialogState = getIdeaDialogState();
+  const folder = record ? getIdeaFolderFromRecord(record) : null;
+  dialogState.selectedFolderKey = options.folderKey || folder?.key || dialogState.selectedFolderKey;
+  dialogState.draft = "";
+  clearIdeaDialogEditState();
+  renderIdeaDialog();
+  if (typeof ideaDialog.showModal === "function") {
+    if (!ideaDialog.open) {
+      ideaDialog.showModal();
+    }
+  } else {
+    ideaDialog.setAttribute("open", "");
+  }
+  if (options.mode === "create") {
+    focusIdeaDialogField("draft");
+  }
+}
+
+function closeIdeaDialog() {
+  if (!ideaDialog || !isIdeaDialogOpen()) {
+    return;
+  }
+  if (typeof ideaDialog.close === "function") {
+    ideaDialog.close();
+  } else {
+    ideaDialog.removeAttribute("open");
+  }
+}
+
+function beginIdeaDialogEditing(ideaId) {
+  const idea = getSavedIdeaById(ideaId);
+  if (!idea) {
+    return;
+  }
+  const dialogState = getIdeaDialogState();
+  dialogState.editingId = idea.id;
+  dialogState.editDraft = "";
+  dialogState.draft = idea.text;
+  renderIdeaDialog();
+  focusIdeaDialogField("draft");
+}
+
+function bindIdeaDialog() {
+  if (!ideaDialog || !ideaDialogContent) {
+    return;
+  }
+  ideaDialogClose?.addEventListener("click", () => {
+    closeIdeaDialog();
+  });
+  ideaDialog.addEventListener("click", (event) => {
+    if (event.target === ideaDialog) {
+      closeIdeaDialog();
+    }
+  });
+  ideaDialog.addEventListener("close", () => {
+    const dialogState = getIdeaDialogState();
+    dialogState.draft = "";
+    clearIdeaDialogSelectionState();
+  });
+  bindPressedButtonFeedback(ideaDialogContent, ".idea-dialog-button, .idea-dialog-submit");
+  ideaDialogContent.addEventListener("click", async (event) => {
+    const target = event.target instanceof Element ? event.target : null;
+    if (!target) {
+      return;
+    }
+    const actionButton = target.closest(".idea-dialog-button");
+    if (actionButton) {
+      flashPressedButton(actionButton);
+    }
+    const folderButton = target.closest("[data-idea-folder-key]");
+    if (folderButton) {
+      const dialogState = getIdeaDialogState();
+      dialogState.selectedFolderKey = folderButton.dataset.ideaFolderKey;
+      dialogState.draft = "";
+      clearIdeaDialogSelectionState();
+      renderIdeaDialog();
+      focusIdeaDialogField("draft");
+      return;
+    }
+    const saveSharedEditButton = target.closest("[data-idea-save-shared-edit]");
+    if (saveSharedEditButton) {
+      const dialogState = getIdeaDialogState();
+      const ideaId = dialogState.editingId;
+      const nextText = normalizeIdeaText(dialogState.draft);
+      if (!ideaId || !nextText) {
+        focusIdeaDialogField("draft");
+        return;
+      }
+      state.savedIdeas = state.savedIdeas.map((idea) => (
+        idea.id === ideaId ? { ...idea, text: nextText } : idea
+      ));
+      clearIdeaDialogEditState();
+      dialogState.draft = "";
+      persistSavedIdeas();
+      renderIdeaDialog();
+      focusIdeaDialogField("draft");
+      setMessage("想法已更新");
+      return;
+    }
+    const cancelSharedButton = target.closest("[data-idea-shared-cancel]");
+    if (cancelSharedButton) {
+      clearIdeaDialogSelectionState({ clearDraft: true });
+      renderIdeaDialog();
+      focusIdeaDialogField("draft");
+      return;
+    }
+    const copyButton = target.closest("[data-idea-copy]");
+    if (copyButton) {
+      const idea = getSavedIdeaById(copyButton.dataset.ideaCopy);
+      if (!idea) {
+        return;
+      }
+      try {
+        await copyTextToClipboard(idea.text);
+        setMessage("想法已复制，可直接发给 Codex");
+      } catch (error) {
+        setMessage(error.message, true);
+      }
+      return;
+    }
+    const editButton = target.closest("[data-idea-edit]");
+    if (editButton) {
+      beginIdeaDialogEditing(editButton.dataset.ideaEdit);
+      return;
+    }
+    const deleteButton = target.closest("[data-idea-delete]");
+    if (deleteButton) {
+      const ideaId = deleteButton.dataset.ideaDelete;
+      const nextIdeas = state.savedIdeas.filter((idea) => idea.id !== ideaId);
+      if (nextIdeas.length === state.savedIdeas.length) {
+        return;
+      }
+      const wasEditingSelection = getIdeaDialogState().editingId === ideaId;
+      state.savedIdeas = nextIdeas;
+      if (getIdeaDialogState().editingId === ideaId) {
+        clearIdeaDialogEditState();
+      }
+      if (wasEditingSelection) {
+        getIdeaDialogState().draft = "";
+      }
+      persistSavedIdeas();
+      renderIdeaDialog();
+      setMessage("想法已删除");
+    }
+  });
+  ideaDialogContent.addEventListener("input", (event) => {
+    const target = event.target instanceof Element ? event.target : null;
+    const input = target?.closest("[data-idea-input]");
+    if (!input) {
+      return;
+    }
+    const dialogState = getIdeaDialogState();
+    if (input.dataset.ideaInput === "draft") {
+      dialogState.draft = input.value;
+    }
+    if (input.dataset.ideaInput === "edit") {
+      dialogState.editingId = input.dataset.ideaId || dialogState.editingId;
+      dialogState.editDraft = input.value;
+    }
+  });
+  ideaDialogContent.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const target = event.target instanceof Element ? event.target : null;
+    const form = target?.closest("[data-idea-form]");
+    if (!form) {
+      return;
+    }
+    const submitButton = event.submitter instanceof HTMLButtonElement
+      ? event.submitter
+      : form.querySelector(".idea-dialog-submit");
+    flashPressedButton(submitButton);
+    const dialogState = getIdeaDialogState();
+    if (form.dataset.ideaForm === "add") {
+      if (dialogState.editingId) {
+        focusIdeaDialogField("draft");
+        return;
+      }
+      const nextText = normalizeIdeaText(dialogState.draft);
+      if (!nextText) {
+        focusIdeaDialogField("draft");
+        return;
+      }
+      const { selectedFolder } = ensureIdeaDialogFolder();
+      const newIdea = createSavedIdea(nextText, selectedFolder);
+      state.savedIdeas.unshift(newIdea);
+      dialogState.draft = "";
+      persistSavedIdeas();
+      renderIdeaDialog();
+      focusIdeaDialogField("draft");
+      setMessage("想法已保存");
+      return;
+    }
+    if (form.dataset.ideaForm === "edit") {
+      const ideaId = form.dataset.ideaId;
+      const nextText = normalizeIdeaText(dialogState.editDraft);
+      if (!nextText) {
+        focusIdeaDialogField("edit");
+        return;
+      }
+      state.savedIdeas = state.savedIdeas.map((idea) => (
+        idea.id === ideaId ? { ...idea, text: nextText } : idea
+      ));
+      persistSavedIdeas();
+      clearIdeaDialogEditState();
+      dialogState.draft = "";
+      renderIdeaDialog();
+      focusIdeaDialogField("draft");
+      setMessage("想法已更新");
+    }
+  });
+  ideaDialogContent.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape" || !getIdeaDialogState().editingId) {
+      return;
+    }
+    event.preventDefault();
+    clearIdeaDialogEditState();
+    renderIdeaDialog();
+    focusIdeaDialogField("draft");
+  });
+}
+
+function clearIdeaDropIndicator() {
+  if (!terminalContextMenu) {
+    return;
+  }
+  terminalContextMenu
+    .querySelectorAll("[data-context-idea-row]")
+    .forEach((row) => row.classList.remove("is-dragging", "is-drop-before", "is-drop-after"));
+  terminalContextMenu
+    .querySelector("[data-context-idea-list]")
+    ?.classList.remove("is-drop-at-end");
+}
+
+function syncIdeaDropIndicator(targetIdeaId = null, placement = "after") {
+  clearIdeaDropIndicator();
+  const contextMenuState = getContextMenuState();
+  contextMenuState.ideaDragOverId = targetIdeaId;
+  contextMenuState.ideaDropPlacement = placement;
+  if (!terminalContextMenu) {
+    return;
+  }
+  if (!targetIdeaId) {
+    if (state.savedIdeas.length > 0) {
+      terminalContextMenu
+        .querySelector("[data-context-idea-list]")
+        ?.classList.add("is-drop-at-end");
+    }
+    return;
+  }
+  const targetRow = [...terminalContextMenu.querySelectorAll("[data-context-idea-row]")]
+    .find((row) => row.dataset.ideaId === targetIdeaId);
+  if (!targetRow) {
+    return;
+  }
+  targetRow.classList.add(placement === "before" ? "is-drop-before" : "is-drop-after");
+}
+
+function clearContextMenuIdeaDragState() {
+  const contextMenuState = getContextMenuState();
+  contextMenuState.ideaDragEnabledId = null;
+  contextMenuState.ideaDragId = null;
+  contextMenuState.ideaDragOverId = null;
+  contextMenuState.ideaDropPlacement = "after";
+  if (!terminalContextMenu) {
+    return;
+  }
+  terminalContextMenu
+    .querySelectorAll("[data-context-idea-row]")
+    .forEach((row) => row.setAttribute("draggable", "false"));
+  clearIdeaDropIndicator();
+}
+
+function reorderSavedIdeas(draggedIdeaId, targetIdeaId = null, placement = "after") {
+  const fromIndex = state.savedIdeas.findIndex((idea) => idea.id === draggedIdeaId);
+  if (fromIndex === -1) {
+    return false;
+  }
+  const nextIdeas = [...state.savedIdeas];
+  const [draggedIdea] = nextIdeas.splice(fromIndex, 1);
+  let insertIndex = nextIdeas.length;
+  if (targetIdeaId) {
+    const targetIndex = nextIdeas.findIndex((idea) => idea.id === targetIdeaId);
+    if (targetIndex !== -1) {
+      insertIndex = placement === "before" ? targetIndex : targetIndex + 1;
+    }
+  }
+  nextIdeas.splice(insertIndex, 0, draggedIdea);
+  const changed = nextIdeas.some((idea, index) => idea.id !== state.savedIdeas[index]?.id);
+  if (!changed) {
+    return false;
+  }
+  state.savedIdeas = nextIdeas;
+  persistSavedIdeas();
+  return true;
+}
+
+async function copyTextToClipboard(text) {
+  const value = String(text || "");
+  if (!value) {
+    return;
+  }
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+  const fallback = document.createElement("textarea");
+  fallback.value = value;
+  fallback.setAttribute("readonly", "true");
+  fallback.style.position = "fixed";
+  fallback.style.top = "-9999px";
+  fallback.style.opacity = "0";
+  document.body.appendChild(fallback);
+  fallback.focus();
+  fallback.select();
+  const copied = document.execCommand("copy");
+  document.body.removeChild(fallback);
+  if (!copied) {
+    throw new Error("复制失败，请手动复制");
+  }
+}
+
+function renderTerminalContextMenuIcon(action, record) {
+  const isHidden = isTerminalHidden(record);
+  const isMuted = state.mutedTerminalIds.has(record?.id);
+  const isPrimary = Boolean(record?.isPrimary);
+  const iconMap = {
+    rename: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5Z"/>',
+    "split-vertical": '<path d="M12 4v16"/><rect x="4.5" y="6" width="6.5" height="12" rx="1.5"/><rect x="13" y="6" width="6.5" height="12" rx="1.5"/>',
+    "split-horizontal": '<path d="M4 12h16"/><rect x="6" y="4.5" width="12" height="6.5" rx="1.5"/><rect x="6" y="13" width="12" height="6.5" rx="1.5"/>',
+    "set-default-frame": '<path d="M9 4.5h6l-1 4 3 2.5H7l3-2.5-1-4Z"/><path d="M12 11v8.5"/>',
+    "apply-default-frame-all": '<rect x="4" y="5" width="6.5" height="5.5" rx="1"/><rect x="13.5" y="5" width="6.5" height="5.5" rx="1"/><rect x="4" y="13.5" width="6.5" height="5.5" rx="1"/><rect x="13.5" y="13.5" width="6.5" height="5.5" rx="1"/>',
+    "toggle-primary": isPrimary
+      ? '<path d="M12 4.5 14.2 9l5 .7-3.6 3.5.85 5-4.45-2.35-4.45 2.35.85-5L4.8 9.7l5-.7L12 4.5Z"/><path d="M9.2 9.8h5.6"/><path d="M10.4 12.5h3.2"/>'
+      : '<path d="M12 4.5 14.2 9l5 .7-3.6 3.5.85 5-4.45-2.35-4.45 2.35.85-5L4.8 9.7l5-.7L12 4.5Z"/>',
+    "toggle-hide": isHidden
+      ? '<path d="M3.5 12s3-5 8.5-5 8.5 5 8.5 5-3 5-8.5 5-8.5-5-8.5-5Z"/><path d="M4.5 4.5 19.5 19.5"/>'
+      : '<path d="M3.5 12s3-5 8.5-5 8.5 5 8.5 5-3 5-8.5 5-8.5-5-8.5-5Z"/><circle cx="12" cy="12" r="2.5"/>',
+    "toggle-mute": isMuted
+      ? '<path d="M6.5 9H4v6h2.5l4 3V6l-4 3Z"/><path d="M14.5 9.5 19 14"/><path d="M19 9.5 14.5 14"/>'
+      : '<path d="M6.5 9H4v6h2.5l4 3V6l-4 3Z"/><path d="M15 9.5a4 4 0 0 1 0 5"/><path d="M17.5 7a7 7 0 0 1 0 10"/>',
+    "create-idea": '<path d="M12 5v14"/><path d="M5 12h14"/><rect x="4.5" y="4.5" width="15" height="15" rx="2.5"/>',
+    "view-ideas": '<path d="M5.5 6.5h13"/><path d="M5.5 11.5h13"/><path d="M5.5 16.5h8"/><rect x="3.5" y="4" width="17" height="16" rx="2.5"/>',
+    detach: '<path d="M9 8.5 6.5 11a3 3 0 1 0 4.2 4.2l2.3-2.3"/><path d="m15 15.5 2.5-2.5a3 3 0 0 0-4.2-4.2L11 11.1"/><path d="M4.5 19.5 19.5 4.5"/>',
+    close: '<path d="M6 6l12 12"/><path d="M18 6L6 18"/><rect x="4.5" y="4.5" width="15" height="15" rx="2"/>',
+  };
+  return `
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      ${iconMap[action] || '<circle cx="12" cy="12" r="8.5"/>'}
+    </svg>
+  `;
+}
+
+function renderTerminalContextMenuItem(action, options = {}) {
+  const className = options.destructive
+    ? "terminal-context-menu-item is-destructive"
+    : "terminal-context-menu-item";
+  const disabledAttr = options.disabled ? " disabled" : "";
+  const detail = options.detail
+    ? `<span class="terminal-context-menu-item-detail">${escapeHtml(options.detail)}</span>`
+    : "";
+  const hintClass = options.hintTone
+    ? `terminal-context-menu-item-hint is-${options.hintTone}`
+    : "terminal-context-menu-item-hint";
+  const hint = options.hint
+    ? `<span class="${hintClass}">${escapeHtml(options.hint)}</span>`
+    : "";
+  return `
+    <button type="button" class="${className}" data-context-action="${action}" role="menuitem"${disabledAttr}>
+      <span class="terminal-context-menu-item-icon" aria-hidden="true">${options.icon || ""}</span>
+      <span class="terminal-context-menu-item-copy">
+        <span class="terminal-context-menu-item-label">${escapeHtml(options.label || "")}</span>
+        ${detail}
+      </span>
+      ${hint}
+    </button>
+  `;
+}
+
+function renderTerminalContextMenuError(record) {
+  if (!record.lastError) {
+    return "";
+  }
+  return `
+    <section class="terminal-context-menu-section terminal-context-menu-section--error" aria-label="错误信息">
+      <div class="terminal-context-menu-section-title">最近错误</div>
+      <div class="terminal-context-menu-error-box">${escapeHtml(record.lastError)}</div>
+    </section>
+  `;
+}
+
+function renderTerminalContextMenuTags(record, contextMenuState) {
+  const tags = getRecordTags(record);
+  const candidateTags = getCandidateTags(record);
+  const tagDraft = contextMenuState.tagDraft || "";
+  return `
+    <section class="terminal-context-menu-section" aria-label="标签管理">
+      <div class="terminal-context-menu-section-title">标签</div>
+      <div class="terminal-context-menu-tags">
+        ${tags.length > 0
+          ? tags.map((tag) => `
+              <button type="button" class="terminal-context-menu-tag" data-context-tag-remove="${escapeHtml(tag)}" aria-label="移除标签 ${escapeHtml(tag)}">
+                <span>${escapeHtml(tag)}</span>
+                <span class="terminal-context-menu-tag-remove" aria-hidden="true">×</span>
+              </button>
+            `).join("")
+          : '<div class="terminal-context-menu-empty">当前没有标签</div>'}
+      </div>
+      ${candidateTags.length > 0 ? `
+        <div class="terminal-context-menu-tag-candidates">
+          ${candidateTags.map((tag) => `
+            <button type="button" class="terminal-context-menu-candidate" data-context-tag-add="${escapeHtml(tag)}">+ ${escapeHtml(tag)}</button>
+          `).join("")}
+        </div>
+      ` : ""}
+      <form class="terminal-context-menu-form" data-context-form="tag">
+        <label class="terminal-context-menu-field">
+          <input
+            class="terminal-context-menu-input"
+            type="text"
+            name="tag"
+            data-context-input="tag"
+            aria-label="新标签"
+            value="${escapeHtml(tagDraft)}"
+            placeholder="输入标签名后回车"
+          />
+        </label>
+        <button type="submit" class="terminal-context-menu-submit">添加</button>
+      </form>
+    </section>
+  `;
+}
+
+function renderTerminalContextMenuIdeas(contextMenuState) {
+  const ideaDraft = contextMenuState.ideaDraft || "";
+  const editingIdeaId = contextMenuState.ideaEditingId || "";
+  const ideaEditDraft = contextMenuState.ideaEditDraft || "";
+  const ideasMarkup = state.savedIdeas.length > 0
+    ? state.savedIdeas.map((idea) => {
+      const isEditing = idea.id === editingIdeaId;
+      if (isEditing) {
+        return `
+          <form
+            class="terminal-context-menu-idea-row terminal-context-menu-idea-row--editing"
+            data-context-form="idea-edit"
+            data-context-idea-row
+            data-idea-id="${escapeHtml(idea.id)}"
+          >
+            <label class="terminal-context-menu-field">
+              <input
+                class="terminal-context-menu-input"
+                type="text"
+                name="idea-edit"
+                data-context-input="idea-edit"
+                data-idea-id="${escapeHtml(idea.id)}"
+                value="${escapeHtml(ideaEditDraft)}"
+                placeholder="修改这条想法"
+              />
+            </label>
+            <div class="terminal-context-menu-idea-actions">
+              <button type="submit" class="terminal-context-menu-idea-button is-primary">保存</button>
+              <button type="button" class="terminal-context-menu-idea-button" data-context-idea-cancel="${escapeHtml(idea.id)}">取消</button>
+            </div>
+          </form>
+        `;
+      }
+      return `
+        <div
+          class="terminal-context-menu-idea-row"
+          data-context-idea-row
+          data-idea-id="${escapeHtml(idea.id)}"
+          draggable="false"
+        >
+          <button
+            type="button"
+            class="terminal-context-menu-idea-handle"
+            data-context-idea-handle="${escapeHtml(idea.id)}"
+            aria-label="拖拽排序 ${escapeHtml(idea.text)}"
+            title="拖拽排序"
+          >
+            ≡
+          </button>
+          <div class="terminal-context-menu-idea-copy" title="${escapeHtml(idea.text)}">
+            <div class="terminal-context-menu-idea-text">${escapeHtml(idea.text)}</div>
+          </div>
+          <div class="terminal-context-menu-idea-actions">
+            <button type="button" class="terminal-context-menu-idea-button" data-context-idea-copy="${escapeHtml(idea.id)}">复制</button>
+            <button type="button" class="terminal-context-menu-idea-button" data-context-idea-edit="${escapeHtml(idea.id)}">编辑</button>
+            <button type="button" class="terminal-context-menu-idea-button is-destructive" data-context-idea-delete="${escapeHtml(idea.id)}">删除</button>
+          </div>
+        </div>
+      `;
+    }).join("")
+    : '<div class="terminal-context-menu-empty">还没有记录想法</div>';
+
+  return `
+    <section class="terminal-context-menu-section" aria-label="想法列表">
+      <div class="terminal-context-menu-section-title">想法</div>
+      <form class="terminal-context-menu-form" data-context-form="idea-add">
+        <label class="terminal-context-menu-field">
+          <input
+            class="terminal-context-menu-input"
+            type="text"
+            name="idea"
+            data-context-input="idea"
+            aria-label="想法"
+            value="${escapeHtml(ideaDraft)}"
+            placeholder="输入一个临时想法，回车即可保存"
+          />
+        </label>
+        <button type="submit" class="terminal-context-menu-submit">保存</button>
+      </form>
+      <div class="terminal-context-menu-ideas" data-context-idea-list>
+        ${ideasMarkup}
+      </div>
+      <div class="terminal-context-menu-footnote">拖到第一条，等会直接复制发给 Codex。</div>
+    </section>
+  `;
+}
+
+function buildTerminalContextMenuActions(record) {
+  const isClosed = record.status === "closed";
+  const isHidden = isTerminalHidden(record);
+  const isMuted = state.mutedTerminalIds.has(record.id);
+  const isPrimary = Boolean(record.isPrimary);
+  const ideaFolder = getIdeaFolderFromRecord(record);
+  const ideaCount = countSavedIdeasForFolder(ideaFolder.key);
+  const actions = {
+    rename: {
+      label: "重命名",
+      detail: "修改这个终端在监控墙和摘要里的显示名称",
+    },
+    "create-idea": {
+      label: "创建想法",
+      detail: `保存到 ${ideaFolder.folderName}`,
+    },
+    "view-ideas": {
+      label: "查看想法",
+      detail: ideaCount > 0 ? `查看 ${ideaFolder.folderName} 的想法` : `打开 ${ideaFolder.folderName} 的想法页`,
+      hint: ideaCount > 0 ? `${ideaCount} 条` : "",
+      hintTone: "neutral",
+    },
+    "split-vertical": {
+      label: "垂直拆分",
+      detail: "在右侧新增 pane，并继承当前目录",
+      disabled: isClosed,
+    },
+    "split-horizontal": {
+      label: "水平拆分",
+      detail: "在下方新增 pane，并继承当前目录",
+      disabled: isClosed,
+    },
+    "set-default-frame": {
+      label: "记住当前位置",
+      detail: "把这个 iTerm2 的窗口位置设为默认模板",
+      disabled: isClosed,
+    },
+    "apply-default-frame-all": {
+      label: "全部对齐",
+      detail: "让所有终端对齐到当前默认窗口位置",
+      disabled: isClosed,
+    },
+    "toggle-primary": {
+      label: getContextMenuPrimaryLabel(record),
+      detail: isPrimary ? "取消当前唯一主任务标记" : "设为当前唯一主任务，其他主任务会自动取消",
+      hint: isPrimary ? "当前主任务" : "",
+      hintTone: "neutral",
+      disabled: isClosed,
+    },
+    "toggle-hide": {
+      label: getContextMenuHideLabel(record),
+      detail: isHidden ? "重新回到默认监控视图" : "从默认监控墙中暂时收起",
+      hint: isHidden ? "已隐藏" : "",
+      hintTone: "neutral",
+    },
+    "toggle-mute": {
+      label: getContextMenuMuteLabel(record),
+      detail: isMuted ? "恢复队列提醒与待处理提示" : "状态变化不再进入顶部队列",
+      hint: isMuted ? "静默中" : "",
+      hintTone: "neutral",
+    },
+    detach: {
+      label: "解绑终端",
+      detail: "从监控墙移除，但不关闭真实 iTerm2",
+      disabled: isClosed,
+      destructive: true,
+    },
+    close: {
+      label: "关闭终端",
+      detail: "关闭真实 iTerm2 窗口并从监控墙移除",
+      disabled: isClosed,
+      destructive: true,
+    },
+  };
+
+  return Object.fromEntries(
+    Object.entries(actions).map(([action, meta]) => [
+      action,
+      {
+        ...meta,
+        icon: renderTerminalContextMenuIcon(action, record),
+      },
+    ]),
+  );
+}
+
+function renderTerminalContextMenuGroup(actions, actionMap) {
+  return `
+    <div class="terminal-context-menu-group">
+      ${actions.map((action) => renderTerminalContextMenuItem(action, actionMap[action])).join("")}
+    </div>
+  `;
+}
+
+function buildTerminalContextMenuMarkup(record) {
+  const program = getProgramInfo(record);
+  const title = displayTitle(record);
+  const actionMap = buildTerminalContextMenuActions(record);
+  const contextMenuState = getContextMenuState();
+  const groups = [
+    ["rename", "create-idea", "view-ideas"],
+    ["split-vertical", "split-horizontal"],
+    ["set-default-frame", "apply-default-frame-all"],
+    ["toggle-primary", "toggle-hide", "toggle-mute"],
+    ["detach", "close"],
+  ];
+
+  return `
+    <div class="terminal-context-menu-header">
+      <div class="terminal-context-menu-identity">
+        <span class="terminal-context-menu-status-dot" aria-hidden="true"></span>
+        <div class="terminal-context-menu-header-copy">
+          <div class="terminal-context-menu-title">${escapeHtml(title)}</div>
+          <div class="terminal-context-menu-subtitle">${escapeHtml(program.label)}</div>
+        </div>
+        <span class="terminal-context-menu-status">${escapeHtml(statusLabel(record.status))}</span>
+      </div>
+    </div>
+    ${groups.map((group, index) => `
+      ${index > 0 ? '<div class="terminal-context-menu-divider"></div>' : ""}
+      ${renderTerminalContextMenuGroup(group, actionMap)}
+    `).join("")}
+    <div class="terminal-context-menu-divider"></div>
+    ${renderTerminalContextMenuError(record)}
+    ${renderTerminalContextMenuTags(record, contextMenuState)}
+  `;
+}
+
+function getContextMenuButtons() {
+  if (!terminalContextMenu) {
+    return [];
+  }
+  return [...terminalContextMenu.querySelectorAll(".terminal-context-menu-item:not([disabled])")];
+}
+
+function isTerminalContextMenuOpen() {
+  return Boolean(terminalContextMenu) && !terminalContextMenu.hidden && Boolean(getContextMenuState().terminalId);
+}
+
+function closeTerminalContextMenu() {
+  if (!terminalContextMenu || terminalContextMenu.hidden) {
+    return;
+  }
+  state.contextMenu = createDefaultContextMenuState();
+  terminalContextMenu.hidden = true;
+  terminalContextMenu.innerHTML = "";
+  terminalContextMenu.setAttribute("aria-hidden", "true");
+  terminalContextMenu.removeAttribute("data-terminal-id");
+  terminalContextMenu.removeAttribute("data-status");
+  terminalContextMenu.style.left = "0px";
+  terminalContextMenu.style.top = "0px";
+  terminalContextMenu.style.visibility = "";
+}
+
+function focusContextMenuField(kind) {
+  const selectorMap = {
+    tag: "[data-context-input='tag']",
+    idea: "[data-context-input='idea']",
+    "idea-edit": "[data-context-input='idea-edit']",
+  };
+  const selector = selectorMap[kind] || null;
+  if (!selector) {
+    return;
+  }
+  window.requestAnimationFrame(() => {
+    const field = terminalContextMenu?.querySelector(selector);
+    if (!field) {
+      return;
+    }
+    field.focus();
+    if (typeof field.select === "function") {
+      field.select();
+    }
+  });
+}
+
+function renderOpenTerminalContextMenu() {
+  if (!terminalContextMenu) {
+    return;
+  }
+  const contextMenuState = getContextMenuState();
+  if (!contextMenuState.terminalId) {
+    closeTerminalContextMenu();
+    return;
+  }
+  const record = state.terminals.get(contextMenuState.terminalId);
+  if (!record) {
+    closeTerminalContextMenu();
+    return;
+  }
+  terminalContextMenu.dataset.terminalId = record.id;
+  terminalContextMenu.dataset.status = record.status;
+  terminalContextMenu.innerHTML = buildTerminalContextMenuMarkup(record);
+  terminalContextMenu.hidden = false;
+  terminalContextMenu.setAttribute("aria-hidden", "false");
+  terminalContextMenu.style.visibility = "hidden";
+  positionTerminalContextMenu(contextMenuState.anchorX, contextMenuState.anchorY);
+  terminalContextMenu.style.visibility = "";
+}
+
+function positionTerminalContextMenu(clientX, clientY) {
+  if (!terminalContextMenu) {
+    return;
+  }
+  const margin = 12;
+  const { width, height } = terminalContextMenu.getBoundingClientRect();
+  const maxX = Math.max(margin, window.innerWidth - width - margin);
+  const maxY = Math.max(margin, window.innerHeight - height - margin);
+  terminalContextMenu.style.left = `${Math.min(Math.max(clientX, margin), maxX)}px`;
+  terminalContextMenu.style.top = `${Math.min(Math.max(clientY, margin), maxY)}px`;
+}
+
+function openTerminalContextMenu(record, clientX, clientY) {
+  if (!terminalContextMenu || !record) {
+    return;
+  }
+  closeAllTopbarMenus();
+  state.contextMenu = {
+    ...createDefaultContextMenuState(),
+    terminalId: record.id,
+    anchorX: clientX,
+    anchorY: clientY,
+  };
+  renderOpenTerminalContextMenu();
+  getContextMenuButtons()[0]?.focus();
+}
+
+function focusTerminalContextMenuItem(step) {
+  const buttons = getContextMenuButtons();
+  if (buttons.length === 0) {
+    return;
+  }
+  const currentIndex = buttons.indexOf(document.activeElement);
+  const nextIndex = currentIndex === -1
+    ? 0
+    : (currentIndex + step + buttons.length) % buttons.length;
+  buttons[nextIndex]?.focus();
+}
+
+async function runTerminalContextMenuAction(action) {
+  if (!terminalContextMenu) {
+    return;
+  }
+  const { terminalId } = getContextMenuState();
+  const record = state.terminals.get(terminalId);
+
+  if (!record) {
+    closeTerminalContextMenu();
+    return;
+  }
+
+  try {
+    switch (action) {
+      case "create-idea":
+        closeTerminalContextMenu();
+        openIdeaDialog(record, { mode: "create" });
+        break;
+      case "view-ideas":
+        closeTerminalContextMenu();
+        openIdeaDialog(record, { mode: "view" });
+        break;
+      case "rename":
+        closeTerminalContextMenu();
+        await promptRenameTerminal(record);
+        break;
+      case "split-vertical":
+        closeTerminalContextMenu();
+        if (record.status !== "closed") {
+          const result = await request(`/api/terminals/${record.id}/split`, {
+            method: "POST",
+            body: JSON.stringify({ direction: "vertical" }),
+          });
+          insertSplitTerminalIntoLayout(record.id, result.item, "right", result.layout || null);
+          setMessage("已在右侧新增 split pane");
+        }
+        break;
+      case "split-horizontal":
+        closeTerminalContextMenu();
+        if (record.status !== "closed") {
+          const result = await request(`/api/terminals/${record.id}/split`, {
+            method: "POST",
+            body: JSON.stringify({ direction: "horizontal" }),
+          });
+          insertSplitTerminalIntoLayout(record.id, result.item, "bottom", result.layout || null);
+          setMessage("已在下方新增 split pane");
+        }
+        break;
+      case "set-default-frame":
+        closeTerminalContextMenu();
+        if (record.status !== "closed") {
+          await setTerminalDefaultFrame(record);
+        }
+        break;
+      case "apply-default-frame-all":
+        closeTerminalContextMenu();
+        if (record.status !== "closed") {
+          await applyDefaultFrameToAll();
+        }
+        break;
+      case "toggle-hide":
+        closeTerminalContextMenu();
+        await toggleTerminalHidden(record);
+        break;
+      case "toggle-primary":
+        closeTerminalContextMenu();
+        await toggleTerminalPrimary(record);
+        break;
+      case "toggle-mute":
+        closeTerminalContextMenu();
+        await toggleTerminalMuted(record);
+        break;
+      case "detach":
+        closeTerminalContextMenu();
+        if (record.status !== "closed") {
+          await detachTerminal(record);
+        }
+        break;
+      case "close":
+        closeTerminalContextMenu();
+        if (record.status !== "closed") {
+          await closeTerminalRecord(record);
+        }
+        break;
+      default:
+        break;
+    }
+  } catch (error) {
+    setMessage(error.message, true);
+  }
+}
+
+function bindTerminalContextMenu() {
+  if (!terminalContextMenu) {
+    return;
+  }
+
+  terminalContextMenu.addEventListener("mousedown", (event) => {
+    event.stopPropagation();
+  });
+  terminalContextMenu.addEventListener("click", async (event) => {
+    const removeTagButton = event.target.closest("[data-context-tag-remove]");
+    if (removeTagButton) {
+      event.preventDefault();
+      event.stopPropagation();
+      const record = state.terminals.get(getContextMenuState().terminalId);
+      if (!record) return;
+      const tagToRemove = removeTagButton.dataset.contextTagRemove;
+      const nextTags = getRecordTags(record).filter((tag) => tag !== tagToRemove);
+      await updateTerminalTags(record, nextTags);
+      renderOpenTerminalContextMenu();
+      return;
+    }
+    const addTagButton = event.target.closest("[data-context-tag-add]");
+    if (addTagButton) {
+      event.preventDefault();
+      event.stopPropagation();
+      const record = state.terminals.get(getContextMenuState().terminalId);
+      if (!record) return;
+      const tagToAdd = addTagButton.dataset.contextTagAdd;
+      const nextTags = [...getRecordTags(record), tagToAdd];
+      await updateTerminalTags(record, nextTags);
+      renderOpenTerminalContextMenu();
+      return;
+    }
+    const copyIdeaButton = event.target.closest("[data-context-idea-copy]");
+    if (copyIdeaButton) {
+      event.preventDefault();
+      event.stopPropagation();
+      const idea = getSavedIdeaById(copyIdeaButton.dataset.contextIdeaCopy);
+      if (!idea) return;
+      try {
+        await copyTextToClipboard(idea.text);
+        setMessage("想法已复制，可直接发给 Codex");
+      } catch (error) {
+        setMessage(error.message, true);
+      }
+      return;
+    }
+    const editIdeaButton = event.target.closest("[data-context-idea-edit]");
+    if (editIdeaButton) {
+      event.preventDefault();
+      event.stopPropagation();
+      beginIdeaEditing(editIdeaButton.dataset.contextIdeaEdit);
+      return;
+    }
+    const cancelIdeaButton = event.target.closest("[data-context-idea-cancel]");
+    if (cancelIdeaButton) {
+      event.preventDefault();
+      event.stopPropagation();
+      clearContextMenuIdeaEditState();
+      renderOpenTerminalContextMenu();
+      focusContextMenuField("idea");
+      return;
+    }
+    const deleteIdeaButton = event.target.closest("[data-context-idea-delete]");
+    if (deleteIdeaButton) {
+      event.preventDefault();
+      event.stopPropagation();
+      const ideaId = deleteIdeaButton.dataset.contextIdeaDelete;
+      const nextIdeas = state.savedIdeas.filter((idea) => idea.id !== ideaId);
+      if (nextIdeas.length === state.savedIdeas.length) {
+        return;
+      }
+      state.savedIdeas = nextIdeas;
+      if (getContextMenuState().ideaEditingId === ideaId) {
+        clearContextMenuIdeaEditState();
+      }
+      persistSavedIdeas();
+      renderOpenTerminalContextMenu();
+      setMessage("想法已删除");
+      return;
+    }
+    const actionButton = event.target.closest("[data-context-action]");
+    if (!actionButton) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    await runTerminalContextMenuAction(actionButton.dataset.contextAction);
+  });
+  terminalContextMenu.addEventListener("input", (event) => {
+    const input = event.target.closest("[data-context-input]");
+    if (!input) {
+      return;
+    }
+    if (input.dataset.contextInput === "tag") {
+      state.contextMenu.tagDraft = input.value;
+    }
+    if (input.dataset.contextInput === "idea") {
+      state.contextMenu.ideaDraft = input.value;
+    }
+    if (input.dataset.contextInput === "idea-edit") {
+      state.contextMenu.ideaEditingId = input.dataset.ideaId || state.contextMenu.ideaEditingId;
+      state.contextMenu.ideaEditDraft = input.value;
+    }
+  });
+  terminalContextMenu.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const form = event.target.closest("[data-context-form]");
+    if (!form) {
+      return;
+    }
+    const record = state.terminals.get(getContextMenuState().terminalId);
+    if (!record) {
+      return;
+    }
+    if (form.dataset.contextForm === "tag") {
+      const newTag = state.contextMenu.tagDraft.trim();
+      if (!newTag) {
+        focusContextMenuField("tag");
+        return;
+      }
+      const currentTags = getRecordTags(record);
+      if (!currentTags.includes(newTag)) {
+        await updateTerminalTags(record, [...currentTags, newTag]);
+      }
+      state.contextMenu.tagDraft = "";
+      renderOpenTerminalContextMenu();
+      focusContextMenuField("tag");
+      return;
+    }
+    if (form.dataset.contextForm === "idea-add") {
+      const nextText = normalizeIdeaText(state.contextMenu.ideaDraft);
+      if (!nextText) {
+        focusContextMenuField("idea");
+        return;
+      }
+      state.savedIdeas.unshift(createSavedIdea(nextText));
+      persistSavedIdeas();
+      state.contextMenu.ideaDraft = "";
+      renderOpenTerminalContextMenu();
+      focusContextMenuField("idea");
+      setMessage("想法已保存");
+      return;
+    }
+    if (form.dataset.contextForm === "idea-edit") {
+      const ideaId = form.dataset.ideaId;
+      const nextText = normalizeIdeaText(state.contextMenu.ideaEditDraft);
+      if (!nextText) {
+        focusContextMenuField("idea-edit");
+        return;
+      }
+      state.savedIdeas = state.savedIdeas.map((idea) => (
+        idea.id === ideaId ? { ...idea, text: nextText } : idea
+      ));
+      persistSavedIdeas();
+      clearContextMenuIdeaEditState();
+      renderOpenTerminalContextMenu();
+      focusContextMenuField("idea");
+      setMessage("想法已更新");
+    }
+  });
+  terminalContextMenu.addEventListener("pointerdown", (event) => {
+    const handle = event.target.closest("[data-context-idea-handle]");
+    if (!handle) {
+      return;
+    }
+    const row = handle.closest("[data-context-idea-row]");
+    if (!row) {
+      return;
+    }
+    state.contextMenu.ideaDragEnabledId = row.dataset.ideaId;
+    row.setAttribute("draggable", "true");
+  });
+  terminalContextMenu.addEventListener("pointerup", () => {
+    if (getContextMenuState().ideaDragId) {
+      return;
+    }
+    terminalContextMenu
+      .querySelectorAll("[data-context-idea-row]")
+      .forEach((row) => row.setAttribute("draggable", "false"));
+    state.contextMenu.ideaDragEnabledId = null;
+  });
+  terminalContextMenu.addEventListener("pointercancel", () => {
+    if (getContextMenuState().ideaDragId) {
+      return;
+    }
+    terminalContextMenu
+      .querySelectorAll("[data-context-idea-row]")
+      .forEach((row) => row.setAttribute("draggable", "false"));
+    state.contextMenu.ideaDragEnabledId = null;
+  });
+  terminalContextMenu.addEventListener("dragstart", (event) => {
+    const row = event.target.closest("[data-context-idea-row]");
+    if (!row) {
+      return;
+    }
+    const ideaId = row.dataset.ideaId;
+    if (!ideaId || state.contextMenu.ideaDragEnabledId !== ideaId) {
+      event.preventDefault();
+      return;
+    }
+    state.contextMenu.ideaDragId = ideaId;
+    row.classList.add("is-dragging");
+    if (event.dataTransfer) {
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", ideaId);
+    }
+  });
+  terminalContextMenu.addEventListener("dragover", (event) => {
+    const { ideaDragId } = getContextMenuState();
+    if (!ideaDragId) {
+      return;
+    }
+    const list = event.target.closest("[data-context-idea-list]");
+    if (!list) {
+      return;
+    }
+    event.preventDefault();
+    const row = event.target.closest("[data-context-idea-row]");
+    if (!row || row.dataset.ideaId === ideaDragId) {
+      syncIdeaDropIndicator(null, "after");
+      return;
+    }
+    const rect = row.getBoundingClientRect();
+    const placement = event.clientY <= rect.top + rect.height / 2 ? "before" : "after";
+    syncIdeaDropIndicator(row.dataset.ideaId, placement);
+  });
+  terminalContextMenu.addEventListener("drop", (event) => {
+    const contextMenuState = getContextMenuState();
+    if (!contextMenuState.ideaDragId) {
+      return;
+    }
+    const list = event.target.closest("[data-context-idea-list]");
+    if (!list) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    const row = event.target.closest("[data-context-idea-row]");
+    const targetIdeaId = row?.dataset.ideaId || null;
+    const placement = targetIdeaId && targetIdeaId !== contextMenuState.ideaDragId
+      ? contextMenuState.ideaDropPlacement || "after"
+      : "after";
+    const changed = reorderSavedIdeas(
+      contextMenuState.ideaDragId,
+      targetIdeaId && targetIdeaId !== contextMenuState.ideaDragId ? targetIdeaId : null,
+      placement,
+    );
+    clearContextMenuIdeaDragState();
+    if (changed) {
+      renderOpenTerminalContextMenu();
+      setMessage("想法顺序已更新");
+    }
+  });
+  terminalContextMenu.addEventListener("dragend", () => {
+    clearContextMenuIdeaDragState();
+  });
+  terminalContextMenu.addEventListener("contextmenu", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+  });
+  terminalContextMenu.addEventListener("keydown", async (event) => {
+    if (event.target.closest("[data-context-input='idea-edit']") && event.key === "Escape") {
+      event.preventDefault();
+      clearContextMenuIdeaEditState();
+      renderOpenTerminalContextMenu();
+      focusContextMenuField("idea");
+      return;
+    }
+    if (isContextMenuEditableTarget(event.target)) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeTerminalContextMenu();
+      }
+      return;
+    }
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      focusTerminalContextMenuItem(1);
+      return;
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      focusTerminalContextMenuItem(-1);
+      return;
+    }
+    if (event.key === "Home") {
+      event.preventDefault();
+      getContextMenuButtons()[0]?.focus();
+      return;
+    }
+    if (event.key === "End") {
+      event.preventDefault();
+      getContextMenuButtons().at(-1)?.focus();
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeTerminalContextMenu();
+    }
+  });
 }
 
 function updateTopbarMenuExpandedState(menu, expanded) {
@@ -283,6 +1997,89 @@ function initTopbarMenus() {
   });
 }
 
+function getNumberInputStepPrecision(input) {
+  const stepRaw = input?.getAttribute("step") || "";
+  if (!stepRaw || stepRaw === "any") {
+    return 0;
+  }
+  const decimalPart = stepRaw.split(".")[1] || "";
+  return decimalPart.length;
+}
+
+function formatNumberInputValue(value, precision) {
+  if (!Number.isFinite(value)) {
+    return "";
+  }
+  if (precision <= 0) {
+    return String(Math.round(value));
+  }
+  return value.toFixed(precision).replace(/\.?0+$/, "");
+}
+
+function stepNumberInputWithWheel(input, event) {
+  if (!(input instanceof HTMLInputElement) || input.type !== "number" || input.disabled || input.readOnly) {
+    return false;
+  }
+  if (event.deltaY === 0) {
+    return false;
+  }
+  const rawStep = Number(input.step);
+  const step = Number.isFinite(rawStep) && rawStep > 0 ? rawStep : 1;
+  const precision = getNumberInputStepPrecision(input);
+  const currentRaw = Number(input.value);
+  const minRaw = Number(input.min);
+  const maxRaw = Number(input.max);
+  const current = Number.isFinite(currentRaw)
+    ? currentRaw
+    : Number.isFinite(minRaw)
+      ? minRaw
+      : 0;
+  const direction = event.deltaY < 0 ? 1 : -1;
+  const factor = precision > 0 ? 10 ** precision : 1;
+  let next = current + direction * step;
+  if (precision > 0) {
+    next = Math.round(next * factor) / factor;
+  } else {
+    next = Math.round(next);
+  }
+  if (Number.isFinite(minRaw)) {
+    next = Math.max(minRaw, next);
+  }
+  if (Number.isFinite(maxRaw)) {
+    next = Math.min(maxRaw, next);
+  }
+  const nextValue = formatNumberInputValue(next, precision);
+  if (input.value === nextValue) {
+    return false;
+  }
+  input.value = nextValue;
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  return true;
+}
+
+function bindTopbarNumberInputWheelGuard() {
+  getTopbarMenus().forEach((menu) => {
+    const panel = getTopbarMenuPanel(menu);
+    if (!panel || panel.dataset.numberWheelGuardBound === "true") {
+      return;
+    }
+    panel.dataset.numberWheelGuardBound = "true";
+    panel.addEventListener("wheel", (event) => {
+      const target = event.target;
+      if (!(target instanceof Element)) {
+        return;
+      }
+      const input = target.closest("input[type='number']");
+      if (!(input instanceof HTMLInputElement)) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      stepNumberInputWithWheel(input, event);
+    }, { passive: false });
+  });
+}
+
 const DEFAULT_UI_SETTINGS = {
   dashboard_padding_px: 0,
   monitor_stage_padding_px: 12,
@@ -299,18 +2096,88 @@ const DEFAULT_UI_SETTINGS = {
   statusbar_meter_height_px: 10,
   filter_tab_slide_duration_ms: 420,
   terminal_font_size_px: 10,
+  summary_grid_gap_px: 10,
+  summary_hex_side_px: 96,
+  summary_card_width_px: 320,
+  summary_card_min_height_px: 140,
+  summary_card_padding_px: 10,
+  summary_card_border_radius_px: 14,
+  summary_gap_glow_color: "#ff70db",
+  summary_gap_glow_radius_px: 285,
+  summary_gap_glow_strength: 0.88,
+  summary_gap_glow_softness_px: 14,
+  summary_gap_glow_line_width_px: 0,
 };
 
 const MIN_GRID_TRACK_RATIO = 0.18;
 const MIN_SPLIT_TRACK_RATIO = 0.12;
 const CARD_DRAG_START_THRESHOLD_PX = 6;
 
+function normalizeSummaryCellAssignments(raw = {}) {
+  const next = {};
+  if (!raw || typeof raw !== "object") {
+    return next;
+  }
+  for (const [terminalId, cellIndex] of Object.entries(raw)) {
+    const normalizedIndex = Number(cellIndex);
+    if (typeof terminalId === "string" && terminalId && Number.isInteger(normalizedIndex) && normalizedIndex >= 0) {
+      next[terminalId] = normalizedIndex;
+    }
+  }
+  return next;
+}
+
+function pruneSummaryCellAssignments(validTerminalIds = null) {
+  const validSet = validTerminalIds instanceof Set
+    ? validTerminalIds
+    : new Set(state.terminals.keys());
+  let changed = false;
+  for (const terminalId of Object.keys(state.summaryCellAssignments || {})) {
+    if (!validSet.has(terminalId)) {
+      delete state.summaryCellAssignments[terminalId];
+      changed = true;
+    }
+  }
+  return changed;
+}
+
 function getUiSetting(key) {
   return state.uiSettings?.[key] ?? DEFAULT_UI_SETTINGS[key];
 }
 
 function getGridGapPx() {
-  return getUiSetting("monitor_grid_gap_px");
+  return getUiSetting(state.viewMode === "brief" ? "summary_grid_gap_px" : "monitor_grid_gap_px");
+}
+
+function getSummaryHexSidePx() {
+  return Math.max(42, Number(getUiSetting("summary_hex_side_px")) || DEFAULT_UI_SETTINGS.summary_hex_side_px);
+}
+
+function getNumericUiSetting(key, fallback = DEFAULT_UI_SETTINGS[key]) {
+  const value = Number(getUiSetting(key));
+  const defaultValue = Number(fallback);
+  return Number.isFinite(value) ? value : defaultValue;
+}
+
+function getColorUiSetting(key, fallback = DEFAULT_UI_SETTINGS[key]) {
+  const value = String(getUiSetting(key) || "").trim();
+  return /^#[0-9a-fA-F]{6}$/.test(value) ? value : fallback;
+}
+
+function hexToRgb(hex) {
+  const normalized = /^#[0-9a-fA-F]{6}$/.test(String(hex || "").trim())
+    ? String(hex).trim()
+    : DEFAULT_UI_SETTINGS.summary_gap_glow_color;
+  const value = Number.parseInt(normalized.slice(1), 16);
+  return {
+    r: (value >> 16) & 255,
+    g: (value >> 8) & 255,
+    b: value & 255,
+  };
+}
+
+function rgbaFromRgb(rgb, alpha) {
+  return `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${Math.max(0, Math.min(1, alpha))})`;
 }
 
 function getGridResizerSizePx() {
@@ -324,6 +2191,11 @@ function getSplitResizerSizePx() {
 function normalizeUiSettings(raw = {}) {
   const next = {};
   for (const [key, fallback] of Object.entries(DEFAULT_UI_SETTINGS)) {
+    if (typeof fallback === "string") {
+      const incoming = String(raw[key] ?? "").trim();
+      next[key] = incoming || fallback;
+      continue;
+    }
     const incoming = Number(raw[key]);
     next[key] = Number.isFinite(incoming) ? incoming : fallback;
   }
@@ -363,6 +2235,15 @@ function applyUiSettings(raw, options = {}) {
   rootStyle.setProperty("--statusbar-meter-height-px", `${getUiSetting("statusbar_meter_height_px")}px`);
   rootStyle.setProperty("--filter-tab-slide-duration-ms", `${getUiSetting("filter_tab_slide_duration_ms")}ms`);
   rootStyle.setProperty("--terminal-font-size-px", `${getUiSetting("terminal_font_size_px")}px`);
+  rootStyle.setProperty("--summary-grid-gap-px", `${getUiSetting("summary_grid_gap_px")}px`);
+  const summaryHexSide = getSummaryHexSidePx();
+  rootStyle.setProperty("--summary-hex-side-px", `${summaryHexSide}px`);
+  rootStyle.setProperty("--summary-hex-width-px", `${Math.sqrt(3) * summaryHexSide}px`);
+  rootStyle.setProperty("--summary-hex-height-px", `${2 * summaryHexSide}px`);
+  rootStyle.setProperty("--summary-card-width-px", `${getUiSetting("summary_card_width_px")}px`);
+  rootStyle.setProperty("--summary-card-min-height-px", `${getUiSetting("summary_card_min_height_px")}px`);
+  rootStyle.setProperty("--summary-card-padding-px", `${getUiSetting("summary_card_padding_px")}px`);
+  rootStyle.setProperty("--summary-card-border-radius-px", `${getUiSetting("summary_card_border_radius_px")}px`);
   syncUiSettingsForm();
 }
 
@@ -398,6 +2279,191 @@ function setWebSocketStatus(status, detail = "") {
   };
   wsStatus.style.setProperty("--statusbar-fill", fillMap[status] || "0%");
   wsStatus.style.setProperty("--statusbar-fill-color", colorMap[status] || "#68d2ff");
+}
+
+function formatConnectionSeconds(ms) {
+  return Math.max(0, Math.ceil(ms / 1000));
+}
+
+function updateConnectionDialogContent() {
+  if (!connectionDialog) {
+    return;
+  }
+  const connectionState = state.connectionDialog;
+  const elapsed = connectionState.startedAt ? Date.now() - connectionState.startedAt : 0;
+  const isLongWaiting = elapsed >= CONNECTION_LONG_WAIT_MS
+    && connectionState.status !== "restoring"
+    && connectionState.status !== "connected";
+  const visualState = isLongWaiting ? "long-waiting" : connectionState.status;
+  connectionDialog.dataset.connectionState = visualState;
+
+  if (visualState === "connected") {
+    connectionDialogTitle.textContent = "连接成功";
+    connectionDialogState.textContent = "已连接";
+    connectionDialogDescription.textContent = "连接已恢复，监控数据已同步。";
+    connectionDialogDetail.textContent = "即将返回监控墙。";
+    connectionDialogAttempt.textContent = connectionState.attempt > 0
+      ? `已重连 ${connectionState.attempt} 次`
+      : "连接已建立";
+    connectionDialogRetry.textContent = "1 秒后关闭";
+    return;
+  }
+
+  if (visualState === "restoring") {
+    connectionDialogTitle.textContent = "正在恢复监控数据";
+    connectionDialogState.textContent = "同步中";
+    connectionDialogDescription.textContent = "连接已恢复，正在同步终端状态。";
+    connectionDialogDetail.textContent = "收到最新快照后，监控墙会自动恢复可操作状态。";
+    connectionDialogAttempt.textContent = connectionState.attempt > 0
+      ? `已重连 ${connectionState.attempt} 次`
+      : "连接已建立";
+    connectionDialogRetry.textContent = "等待数据同步";
+    return;
+  }
+
+  if (visualState === "long-waiting") {
+    connectionDialogTitle.textContent = "连接时间较长";
+    connectionDialogState.textContent = "重连中";
+    connectionDialogDescription.textContent = "后端服务暂时不可用，前端会继续自动重连。";
+    connectionDialogDetail.textContent = "当前监控画面会保留；可以检查终端里的服务是否仍在运行。";
+  } else if (connectionState.status === "reconnecting") {
+    connectionDialogTitle.textContent = "正在重新连接 multi-iterm2-manager";
+    connectionDialogState.textContent = "重连中";
+    connectionDialogDescription.textContent = "服务连接暂时中断，正在自动重连。";
+    connectionDialogDetail.textContent = "当前监控画面会保留，连接恢复后会自动同步最新状态。";
+  } else {
+    connectionDialogTitle.textContent = "正在连接 multi-iterm2-manager";
+    connectionDialogState.textContent = "连接中";
+    connectionDialogDescription.textContent = "正在建立与后端服务的连接。";
+    connectionDialogDetail.textContent = "如果后端正在重启，连接恢复后会自动同步最新状态。";
+  }
+
+  const retryIn = connectionState.nextRetryAt
+    ? formatConnectionSeconds(connectionState.nextRetryAt - Date.now())
+    : 0;
+  connectionDialogAttempt.textContent = connectionState.attempt > 0
+    ? `第 ${connectionState.attempt} 次重连`
+    : "准备连接";
+  connectionDialogRetry.textContent = retryIn > 0 ? `${retryIn} 秒后继续` : "正在尝试连接";
+}
+
+function startConnectionDialogTicker() {
+  const connectionState = state.connectionDialog;
+  if (connectionState.tickTimer) {
+    return;
+  }
+  connectionState.tickTimer = window.setInterval(updateConnectionDialogContent, 1000);
+}
+
+function stopConnectionDialogTicker() {
+  const connectionState = state.connectionDialog;
+  if (!connectionState.tickTimer) {
+    return;
+  }
+  window.clearInterval(connectionState.tickTimer);
+  connectionState.tickTimer = null;
+}
+
+function showConnectionDialog() {
+  if (!connectionDialog || connectionDialog.open) {
+    updateConnectionDialogContent();
+    return;
+  }
+  updateConnectionDialogContent();
+  try {
+    connectionDialog.showModal();
+  } catch {
+    connectionDialog.setAttribute("open", "");
+  }
+  startConnectionDialogTicker();
+}
+
+function scheduleConnectionDialogShow() {
+  if (!connectionDialog) {
+    return;
+  }
+  const connectionState = state.connectionDialog;
+  if (connectionDialog.open || connectionState.showTimer) {
+    updateConnectionDialogContent();
+    return;
+  }
+  connectionState.showTimer = window.setTimeout(() => {
+    connectionState.showTimer = null;
+    showConnectionDialog();
+  }, CONNECTION_DIALOG_SHOW_DELAY_MS);
+}
+
+function hideConnectionDialog() {
+  const connectionState = state.connectionDialog;
+  if (connectionState.showTimer) {
+    window.clearTimeout(connectionState.showTimer);
+    connectionState.showTimer = null;
+  }
+  if (connectionState.closeTimer) {
+    window.clearTimeout(connectionState.closeTimer);
+    connectionState.closeTimer = null;
+  }
+  stopConnectionDialogTicker();
+  if (!connectionDialog || !connectionDialog.open) {
+    return;
+  }
+  connectionDialog.close();
+}
+
+function setConnectionDialogStatus(status, options = {}) {
+  const connectionState = state.connectionDialog;
+  const now = Date.now();
+  const previousStatus = connectionState.status;
+  if (connectionState.closeTimer && status !== "connected") {
+    window.clearTimeout(connectionState.closeTimer);
+    connectionState.closeTimer = null;
+  }
+  if (!connectionState.startedAt || (status === "connecting" && previousStatus === "connected")) {
+    connectionState.startedAt = now;
+  }
+  if (status === "connecting" && previousStatus === "connected") {
+    connectionState.attempt = 0;
+  }
+  connectionState.status = status;
+  if (Number.isInteger(options.attempt)) {
+    connectionState.attempt = options.attempt;
+  }
+  if (Number.isFinite(options.nextRetryAt)) {
+    connectionState.nextRetryAt = options.nextRetryAt;
+  } else if (status !== "reconnecting") {
+    connectionState.nextRetryAt = 0;
+  }
+
+  if (status === "connected") {
+    connectionState.nextRetryAt = 0;
+    if (connectionState.showTimer) {
+      window.clearTimeout(connectionState.showTimer);
+      connectionState.showTimer = null;
+    }
+    if (!connectionDialog || !connectionDialog.open) {
+      connectionState.startedAt = 0;
+      connectionState.attempt = 0;
+      hideConnectionDialog();
+      return;
+    }
+    updateConnectionDialogContent();
+    stopConnectionDialogTicker();
+    connectionState.closeTimer = window.setTimeout(() => {
+      connectionState.closeTimer = null;
+      connectionState.startedAt = 0;
+      connectionState.attempt = 0;
+      hideConnectionDialog();
+    }, CONNECTION_SUCCESS_HOLD_MS);
+    return;
+  }
+  scheduleConnectionDialogShow();
+  updateConnectionDialogContent();
+}
+
+if (connectionDialog) {
+  connectionDialog.addEventListener("cancel", (event) => {
+    event.preventDefault();
+  });
 }
 
 function setMessage(text, isError = false) {
@@ -834,6 +2900,42 @@ function reorderTerminalsByZone(sourceId, targetId, zone) {
   refreshWall();
 }
 
+function insertSplitTerminalIntoLayout(sourceId, terminal, zone, layout = null) {
+  if (!sourceId || !terminal?.id) {
+    return;
+  }
+
+  state.terminals.set(terminal.id, terminal);
+  if (terminal.hidden) {
+    state.hiddenTerminalIds.add(terminal.id);
+  } else {
+    state.hiddenTerminalIds.delete(terminal.id);
+  }
+  if (terminal.muted) {
+    state.mutedTerminalIds.add(terminal.id);
+  } else {
+    state.mutedTerminalIds.delete(terminal.id);
+  }
+  if (!state.orderedTerminalIds.includes(terminal.id)) {
+    state.orderedTerminalIds.push(terminal.id);
+  }
+
+  const activeRecords = [...state.terminals.values()].filter((record) => record && record.status !== "closed");
+  const activeIds = activeRecords.map((record) => record.id);
+  const baseTree = state.layoutTree || buildInitialLayoutTree(activeRecords, Math.max(1, state.layout.columns || 2));
+  const nextBaseTree = removeTerminalFromTree(baseTree, terminal.id);
+  state.layoutTree = normalizeLayoutTree(
+    insertTerminalBySplit(nextBaseTree, sourceId, createTerminalLayoutNode(terminal.id), zone),
+  );
+  if (state.layoutTree) {
+    mergeVisibleIds(getTerminalIdsFromTree(state.layoutTree).filter((id) => activeIds.includes(id)), activeIds);
+  }
+  updateQueue(terminal.id, null, terminal.status);
+  clearSplitDropPreview();
+  saveViewState();
+  refreshWall(layout);
+}
+
 function updateGridResizerPositions() {
   const overlay = grid.querySelector(".grid-resizer-overlay");
   if (!overlay) return;
@@ -862,7 +2964,7 @@ function removeGridResizers() {
 
 function renderGridResizers() {
   removeGridResizers();
-  if (!grid || state.layout.count <= 1 || state.layoutTree) return;
+  if (!grid || state.viewMode === "brief" || state.layout.count <= 1 || state.layoutTree) return;
   const layout = state.layout;
   const gridGapPx = getGridGapPx();
   const ratios = ensureGridTrackRatios(layout);
@@ -1056,8 +3158,8 @@ function getDropTargetAtPoint(clientX, clientY) {
     return null;
   }
   let bestTarget = null;
-  document.querySelectorAll('.wall-card').forEach((card) => {
-    const terminalId = card.id.replace(/^card-/, '');
+  document.querySelectorAll('.wall-card[data-terminal-id]').forEach((card) => {
+    const terminalId = card.dataset.terminalId;
     if (!terminalId || terminalId === state.draggedTerminalId) {
       return;
     }
@@ -1098,9 +3200,14 @@ function stopCardPointerDrag() {
   state.activeCardDrag = null;
   state.draggedTerminalId = null;
   clearSplitDropPreview();
+  clearSummaryCellPreview();
 }
 
 function commitCardPointerDrag(clientX, clientY) {
+  if (state.viewMode === "brief") {
+    commitSummaryCellDrag(clientX, clientY);
+    return;
+  }
   const target = getDropTargetAtPoint(clientX, clientY);
   if (!target || !state.draggedTerminalId) {
     return;
@@ -1109,6 +3216,8 @@ function commitCardPointerDrag(clientX, clientY) {
 }
 
 let _cardDragRafId = 0;
+let _summaryGapGlowRafId = 0;
+let _summaryGapGlowPoint = null;
 
 function handleCardPointerMove(event) {
   const session = state.activeCardDrag;
@@ -1133,6 +3242,16 @@ function handleCardPointerMove(event) {
   if (_cardDragRafId) return;
   _cardDragRafId = requestAnimationFrame(() => {
     _cardDragRafId = 0;
+    if (state.viewMode === "brief") {
+      clearSummaryGapGlow();
+      const target = getSummaryDropTargetAtPoint(cx, cy);
+      if (target) {
+        applySummaryCellPreview(target);
+      } else {
+        clearSummaryCellPreview();
+      }
+      return;
+    }
     const target = getDropTargetAtPoint(cx, cy);
     if (target) {
       applySplitDropPreview(target.card, target.terminalId, target.zone);
@@ -1169,6 +3288,9 @@ function beginCardPointerDrag(card, record, event) {
     card,
     handle,
   };
+  if (state.viewMode === "brief") {
+    clearSummaryGapGlow();
+  }
   handle.setPointerCapture?.(event.pointerId);
   window.addEventListener('pointermove', handleCardPointerMove);
   window.addEventListener('pointerup', handleCardPointerUp);
@@ -1222,6 +3344,218 @@ function playWaitingAlert() {
   }
 }
 
+/** 将 Unix 时间戳（秒）格式化为真实相对时间 */
+function formatSummaryTime(unixSeconds) {
+  if (!unixSeconds) return "";
+  const diff = Math.max(0, Math.floor(Date.now() / 1000 - Number(unixSeconds)));
+  if (diff < 5) return "刚刚";
+  if (diff < 60) return `${diff}s前`;
+  if (diff < 3600) return `${Math.floor(diff / 60)}分钟前`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}小时前`;
+
+  const date = new Date(Number(unixSeconds) * 1000);
+  const hours = String(date.getHours()).padStart(2, "0");
+  const minutes = String(date.getMinutes()).padStart(2, "0");
+  if (diff < 172800) {
+    return `昨天 ${hours}:${minutes}`;
+  }
+
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${month}-${day} ${hours}:${minutes}`;
+}
+
+/**
+ * 根据摘要状态和原因生成 none 状态的提示 HTML
+ * @param {string} reason - aiSummaryReason 值
+ * @param {number} aiSummaryAt - 上次总结时间（Unix 秒）
+ * @returns {string} HTML 字符串
+ */
+function buildNoneReasonHtml(reason, aiSummaryAt) {
+  switch (reason) {
+    case "content_changing":
+      return `<span class="wall-card-brief-text--reason-pulse">内容变化中...</span>`;
+    case "cooldown": {
+      // 计算冷却剩余秒数
+      const activeInterval = (state.summaryConfig && state.summaryConfig.activeInterval) || 10;
+      const elapsed = aiSummaryAt > 0 ? Math.floor(Date.now() / 1000) - aiSummaryAt : 0;
+      const remaining = Math.max(0, Math.ceil(activeInterval - elapsed));
+      return `<span class="wall-card-brief-text--reason">冷却中，${remaining}s后更新</span>`;
+    }
+    case "idle":
+      return `<span class="wall-card-brief-text--reason">空闲中</span>`;
+    case "no_api":
+      return `<span class="wall-card-brief-text--warn">未配置 API</span>`;
+    default:
+      return `<span class="wall-card-brief-text wall-card-brief-text--waiting">等待总结...</span>`;
+  }
+}
+
+/**
+ * 根据摘要原因生成 fallback 状态的附加小字 HTML
+ * @param {string} reason - aiSummaryReason 值
+ * @returns {string} HTML 字符串（可能为空）
+ */
+function buildFallbackReasonNoteHtml(reason, errorDetail = "") {
+  const detail = errorDetail ? escapeHtml(errorDetail) : "";
+  switch (reason) {
+    case "api_error":
+      return `<span class="wall-card-brief-reason-note">${detail || "请求失败"} · 稍后重试</span>`;
+    case "empty_response":
+      return `<span class="wall-card-brief-reason-note">模型返回空内容 · 稍后重试</span>`;
+    case "no_api":
+      return `<span class="wall-card-brief-reason-note wall-card-brief-reason-note--warn">未配置API</span>`;
+    default:
+      return "";
+  }
+}
+
+function collectTransientCardClasses(card) {
+  const preserveClasses = [];
+  if (card.classList.contains("is-dragging")) preserveClasses.push("is-dragging");
+  for (const cls of card.classList) {
+    if (cls.startsWith("split-preview-")) preserveClasses.push(cls);
+  }
+  return preserveClasses;
+}
+
+function getCardClassName(record, options = {}) {
+  const classes = ["wall-card"];
+  if (options.brief) {
+    classes.push("wall-card--brief", "wall-card--brief-detail");
+  }
+  classes.push(`status-${record.status}`);
+  if (record.isPrimary && record.status !== "closed") {
+    classes.push("wall-card--primary-focus");
+  }
+  if (Array.isArray(options.extraClasses) && options.extraClasses.length) {
+    classes.push(...options.extraClasses);
+  }
+  return classes.join(" ");
+}
+
+function buildBriefContentModel(record) {
+  const summaryStatus = record.aiSummaryStatus || "none";
+  const summaryText = record.aiSummary || record.summary || "暂无输出";
+  const reason = record.aiSummaryReason || "";
+  const errorDetail = record.aiSummaryErrorDetail || "";
+  const updatedAt = record.lastInteractionAt ? formatSummaryTime(record.lastInteractionAt) : "";
+
+  let mainHtml = "";
+  let noteHtml = "";
+  let badgeHtml = "";
+
+  if (summaryStatus === "summarizing") {
+    mainHtml = `
+      <span class="wall-card-brief-state-line">
+        <span class="wall-card-brief-dots">
+          <span class="brief-dot"></span>
+          <span class="brief-dot"></span>
+          <span class="brief-dot"></span>
+        </span>
+        <span class="wall-card-brief-loading-text">LLM 正在总结...</span>
+      </span>
+    `;
+    badgeHtml = `<span class="wall-card-brief-badge wall-card-brief-badge--progress">生成中</span>`;
+  } else if (summaryStatus === "done") {
+    mainHtml = `<span class="wall-card-brief-text">${escapeHtml(summaryText)}</span>`;
+    badgeHtml = `<span class="wall-card-brief-badge wall-card-brief-badge--ai">AI总结</span>`;
+  } else if (summaryStatus === "fallback") {
+    mainHtml = `<span class="wall-card-brief-text wall-card-brief-text--fallback">${escapeHtml(summaryText)}</span>`;
+    noteHtml = buildFallbackReasonNoteHtml(reason, errorDetail);
+    badgeHtml = `<span class="wall-card-brief-badge wall-card-brief-badge--fallback">Fallback</span>`;
+  } else {
+    mainHtml = buildNoneReasonHtml(reason, record.aiSummaryAt || 0);
+    const waitingLabel = reason === "no_api"
+      ? "待配置"
+      : reason === "cooldown"
+        ? "冷却中"
+        : "待摘要";
+    badgeHtml = `<span class="wall-card-brief-badge wall-card-brief-badge--muted">${waitingLabel}</span>`;
+  }
+
+  return {
+    summaryStatus,
+    updatedAt,
+    mainHtml,
+    noteHtml,
+    badgeHtml,
+  };
+}
+
+function buildBriefBadgesHtml(record, summary) {
+  const program = getProgramInfo(record);
+  const badges = [];
+  if (shouldShowProgramChip(record)) {
+    badges.push(`
+      <span
+        class="wall-card-program-chip program-${program.key}"
+        title="${escapeHtml(program.commandLine || programSourceLabel(program.source))}"
+      >${escapeHtml(program.label)}</span>
+    `);
+  }
+  if (summary?.badgeHtml) {
+    badges.push(summary.badgeHtml);
+  }
+  if (shouldTrackTerminalStatus(record)) {
+    badges.push(`<span class="wall-card-brief-status-chip status-${record.status}">${escapeHtml(statusLabel(record.status))}</span>`);
+  }
+  if (!badges.length) {
+    return `
+      <div class="wall-card-brief-tags wall-card-brief-tags--empty" aria-label="类型标签">
+        <span class="wall-card-brief-tag wall-card-brief-tag--empty">Shell</span>
+      </div>
+    `;
+  }
+  return `
+    <div class="wall-card-brief-tags" aria-label="类型标签">
+      ${badges.join("")}
+    </div>
+  `;
+}
+
+function rerenderBriefCard(card, record) {
+  const summary = buildBriefContentModel(record);
+  const folderName = getSummaryFolderName(getSummaryFolderPath(record));
+  const timeHtml = summary.updatedAt
+    ? `<span class="wall-card-brief-time">${summary.updatedAt}</span>`
+    : `<span class="wall-card-brief-time wall-card-brief-time--empty">--</span>`;
+  card.className = getCardClassName(record, {
+    brief: true,
+    extraClasses: collectTransientCardClasses(card),
+  });
+  card.innerHTML = `
+    <div
+      class="wall-card-brief"
+      data-summary-status="${summary.summaryStatus}"
+      data-summary-reason="${escapeHtml(record.aiSummaryReason || "")}"
+      data-summary-error-detail="${escapeHtml(record.aiSummaryErrorDetail || "")}"
+    >
+	      <div class="wall-card-brief-shell">
+	        <div class="wall-card-brief-drag-zone">
+	          <button type="button" class="ghost wall-card-drag-handle" title="拖拽排序" aria-label="拖拽排序"><svg width="100%" height="100%" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M12 1l-3 3.5h6L12 1z"/><path d="M12 23l-3-3.5h6L12 23z"/><path d="M1 12l3.5-3v6L1 12z"/><path d="M23 12l-3.5-3v6L23 12z"/><rect x="11.25" y="4" width="1.5" height="16" rx=".75"/><rect x="4" y="11.25" width="16" height="1.5" rx=".75"/></svg></button>
+	        </div>
+	        <div class="wall-card-brief-folder-line">
+	          <span class="wall-card-folder-title" title="${escapeHtml(getSummaryFolderPath(record) || folderName)}">${escapeHtml(folderName)}</span>
+        </div>
+        ${buildBriefBadgesHtml(record, summary)}
+        <div class="wall-card-brief-main">
+          <div class="wall-card-brief-summary-panel">
+            ${summary.mainHtml}
+            ${summary.noteHtml ? `<div class="wall-card-brief-note">${summary.noteHtml}</div>` : ""}
+          </div>
+        </div>
+	        <div class="wall-card-brief-title-line">
+	          <h2 class="wall-card-title">${escapeHtml(record.name || "")}</h2>
+        </div>
+        <div class="wall-card-brief-time-row">${timeHtml}</div>
+      </div>
+    </div>
+  `;
+  updateCardMeta(card, record);
+  bindCardActions(card, record);
+}
+
 function escapeHtml(text) {
   return (text || "")
     .replaceAll("&", "&amp;")
@@ -1239,6 +3573,658 @@ function displayTitle(record) {
   const folder = parts[parts.length - 1] || "";
   if (!folder) return name;
   return `${name} · ${folder}`;
+}
+
+function getSummaryFolderPath(record) {
+  const cwd = typeof record?.cwd === "string" ? record.cwd.trim() : "";
+  return cwd.replace(/\/+$/, "");
+}
+
+function getSummaryFolderKey(record) {
+  return getSummaryFolderPath(record) || "__unknown-folder__";
+}
+
+function getSummaryFolderName(folderPath) {
+  if (!folderPath) {
+    return "未识别文件夹";
+  }
+  const parts = folderPath.split("/").filter(Boolean);
+  return parts[parts.length - 1] || folderPath;
+}
+
+function buildSummaryFolderGroups(records) {
+  const groups = [];
+  const groupByKey = new Map();
+  for (const record of records) {
+    const folderPath = getSummaryFolderPath(record);
+    const key = getSummaryFolderKey(record);
+    let group = groupByKey.get(key);
+    if (!group) {
+      group = {
+        key,
+        folderPath,
+        folderName: getSummaryFolderName(folderPath),
+        records: [],
+      };
+      groupByKey.set(key, group);
+      groups.push(group);
+    }
+    group.records.push(record);
+  }
+  return groups;
+}
+
+function renderSummaryFolderColumn(group) {
+  const column = document.createElement("section");
+  column.className = "summary-folder-column";
+  column.dataset.summaryFolderKey = group.key;
+  column.dataset.summaryFolderPath = group.folderPath || "";
+
+  const header = document.createElement("header");
+  header.className = "summary-folder-column-header";
+  header.title = group.folderPath || "未识别文件夹";
+
+  const titleRow = document.createElement("div");
+  titleRow.className = "summary-folder-title-row";
+
+  const title = document.createElement("div");
+  title.className = "summary-folder-title";
+  title.textContent = group.folderName;
+
+  const count = document.createElement("span");
+  count.className = "summary-folder-count";
+  count.textContent = String(group.records.length);
+
+  const path = document.createElement("div");
+  path.className = "summary-folder-path";
+  path.textContent = group.folderPath || "未识别文件夹";
+
+  titleRow.appendChild(title);
+  titleRow.appendChild(count);
+  header.appendChild(titleRow);
+  header.appendChild(path);
+  column.appendChild(header);
+
+  const body = document.createElement("div");
+  body.className = "summary-folder-column-body";
+  for (const record of group.records) {
+    body.appendChild(renderTerminal(record));
+  }
+  column.appendChild(body);
+
+  return column;
+}
+
+function renderSummaryFolderColumns(records) {
+  const groups = buildSummaryFolderGroups(records);
+  grid.dataset.summaryFolderCount = String(groups.length);
+  for (const group of groups) {
+    grid.appendChild(renderSummaryFolderColumn(group));
+  }
+}
+
+function getSummaryCellWidthPx() {
+  return Math.sqrt(3) * getSummaryHexSidePx();
+}
+
+function getSummaryCellHeightPx() {
+  return 2 * getSummaryHexSidePx();
+}
+
+function getSummaryGridAvailableRect() {
+  const rect = grid?.getBoundingClientRect();
+  const parentRect = grid?.parentElement?.getBoundingClientRect();
+  return {
+    width: Math.max(1, parentRect?.width || rect?.width || window.innerWidth || getSummaryCellWidthPx()),
+    height: Math.max(
+      getSummaryCellHeightPx(),
+      rect?.height || grid?.parentElement?.clientHeight || Math.max(240, window.innerHeight - 160),
+    ),
+  };
+}
+
+function buildSummaryHexMetrics(side, gap = getGridGapPx()) {
+  const width = Math.sqrt(3) * side;
+  const height = 2 * side;
+  return {
+    side,
+    gap,
+    width,
+    height,
+    stepX: width + gap,
+    stepY: side * 1.5 + gap,
+  };
+}
+
+function getSummaryHexMetrics() {
+  return buildSummaryHexMetrics(getSummaryHexSidePx());
+}
+
+function getSummaryFittingColumnCount(metrics, availableWidth) {
+  return getSummaryFittingColumnCountForOffset(metrics, availableWidth, metrics.stepX / 2);
+}
+
+function getSummaryFittingColumnCountForOffset(metrics, availableWidth, offset = 0) {
+  if (availableWidth < metrics.width) {
+    return 1;
+  }
+  return Math.max(1, Math.floor((availableWidth - metrics.width - offset) / metrics.stepX) + 1);
+}
+
+function getSummaryUsableRowEntries(metrics, availableHeight) {
+  const firstRowTop = -metrics.stepY;
+  const rows = Math.max(3, Math.ceil((availableHeight + metrics.height / 2) / metrics.stepY));
+  const usableRowEntries = [];
+  for (let row = 0; row < rows; row += 1) {
+    const top = firstRowTop + row * metrics.stepY;
+    if (top >= 0 && top + metrics.height <= availableHeight) {
+      usableRowEntries.push({ row, top, usableRowIndex: usableRowEntries.length });
+    }
+  }
+  if (usableRowEntries.length === 0) {
+    const fallbackRow = Math.max(1, Math.floor(rows / 2));
+    usableRowEntries.push({
+      row: fallbackRow,
+      top: Math.max(0, Math.min(availableHeight - metrics.height, firstRowTop + fallbackRow * metrics.stepY)),
+      usableRowIndex: 0,
+    });
+  }
+  return { firstRowTop, rows, usableRowEntries };
+}
+
+function getAdaptiveSummaryHexLayout(recordCount, available) {
+  const configuredSide = getSummaryHexSidePx();
+  const minSide = 42;
+  const gap = getGridGapPx();
+  for (let side = configuredSide; side >= minSide; side -= 2) {
+    const metrics = buildSummaryHexMetrics(side, gap);
+    const rowModel = getSummaryUsableRowEntries(metrics, available.height);
+    const fitColumns = getSummaryFittingColumnCount(metrics, available.width);
+    const capacity = fitColumns * rowModel.usableRowEntries.length;
+    if (recordCount <= capacity || side === minSide) {
+      return { metrics, ...rowModel, fitColumns };
+    }
+  }
+  const metrics = buildSummaryHexMetrics(minSide, gap);
+  return {
+    metrics,
+    ...getSummaryUsableRowEntries(metrics, available.height),
+    fitColumns: getSummaryFittingColumnCount(metrics, available.width),
+  };
+}
+
+function buildSummaryGridModel(records) {
+  const available = getSummaryGridAvailableRect();
+  const { metrics, firstRowTop, rows, usableRowEntries, fitColumns } = getAdaptiveSummaryHexLayout(records.length, available);
+  const usableRows = usableRowEntries.length;
+  state.summaryCellAssignments = normalizeSummaryCellAssignments(state.summaryCellAssignments);
+
+  let maxAssignedIndex = -1;
+  for (const record of records) {
+    const assignedIndex = state.summaryCellAssignments[record.id];
+    if (Number.isInteger(assignedIndex) && assignedIndex >= 0) {
+      maxAssignedIndex = Math.max(maxAssignedIndex, assignedIndex);
+    }
+  }
+
+  let columns = Math.max(
+    fitColumns,
+    Math.ceil(records.length / usableRows),
+    1,
+  );
+  columns = Math.min(columns, fitColumns);
+  const slots = Array.from({ length: columns * usableRows }, () => null);
+  const unassignedRecords = [];
+
+  for (const record of records) {
+    const assignedIndex = state.summaryCellAssignments[record.id];
+    if (Number.isInteger(assignedIndex) && assignedIndex >= 0 && assignedIndex < slots.length && !slots[assignedIndex]) {
+      slots[assignedIndex] = record;
+    } else {
+      unassignedRecords.push(record);
+    }
+  }
+
+  for (const record of unassignedRecords) {
+    let slotIndex = slots.findIndex((slot) => !slot);
+    if (slotIndex === -1) {
+      slots.push(...Array.from({ length: usableRows }, () => null));
+      columns += 1;
+      slotIndex = slots.length - usableRows;
+    }
+    slots[slotIndex] = record;
+  }
+
+  columns = Math.max(1, Math.ceil(slots.length / usableRows));
+  const normalizedSlotCount = columns * usableRows;
+  while (slots.length < normalizedSlotCount) {
+    slots.push(null);
+  }
+
+  const visualColumns = Math.max(
+    columns,
+    getSummaryFittingColumnCountForOffset(metrics, available.width, 0),
+    getSummaryFittingColumnCountForOffset(metrics, available.width, metrics.stepX / 2),
+  );
+  const cells = [];
+  let contentWidth = 0;
+  let contentHeight = available.height;
+  const usableRowsByRow = new Map(usableRowEntries.map((entry) => [entry.row, entry]));
+  for (let column = -1; column <= visualColumns; column += 1) {
+    for (let row = 0; row < rows; row += 1) {
+      const rawTop = firstRowTop + row * metrics.stepY;
+      const left = column * metrics.stepX + (row % 2 === 1 ? metrics.stepX / 2 : 0);
+      const usableEntry = usableRowsByRow.get(row) || null;
+      const top = usableEntry?.top ?? rawTop;
+      const right = left + metrics.width;
+      const bottom = top + metrics.height;
+      if (right <= 0 || left >= available.width || bottom <= 0 || top >= available.height) {
+        continue;
+      }
+      const fitsWidth = left >= 0 && right <= available.width + 0.5;
+      const fitsHeight = top >= 0 && bottom <= available.height + 0.5;
+      const isPartial = !fitsWidth || !fitsHeight;
+      const slotIndex = usableEntry && column >= 0 && column < columns && fitsWidth && fitsHeight
+        ? column * usableRows + usableEntry.usableRowIndex
+        : -1;
+      cells.push({
+        row,
+        column,
+        left,
+        top,
+        width: metrics.width,
+        height: metrics.height,
+        usable: Boolean(usableEntry) && column < columns && fitsWidth && !isPartial,
+        partial: isPartial,
+        usableRowIndex: usableEntry?.usableRowIndex ?? -1,
+        slotIndex,
+        record: slotIndex >= 0 ? slots[slotIndex] : null,
+      });
+      contentWidth = Math.max(contentWidth, left + metrics.width);
+      contentHeight = Math.max(contentHeight, top + metrics.height);
+    }
+  }
+
+  return {
+    rows,
+    usableRows,
+    columns,
+    slots,
+    cells,
+    metrics,
+    available,
+    contentWidth,
+    contentHeight,
+  };
+}
+
+function ensureSummaryCellAssignments(records) {
+  const model = buildSummaryGridModel(records);
+  model.slots.forEach((record, index) => {
+    if (record?.id) {
+      state.summaryCellAssignments[record.id] = index;
+    }
+  });
+  return model;
+}
+
+function renderSummaryGrid(records) {
+  const model = buildSummaryGridModel(records);
+  state.summaryGridRows = model.rows;
+  state.summaryGridColumns = model.columns;
+  grid.dataset.summaryRows = String(model.rows);
+  grid.dataset.summaryUsableRows = String(model.usableRows);
+  grid.dataset.summaryColumns = String(model.columns);
+  grid.setAttribute("role", "grid");
+  grid.setAttribute("aria-rowcount", String(model.usableRows));
+  grid.setAttribute("aria-colcount", String(model.columns));
+  grid.style.removeProperty("grid-auto-flow");
+  grid.style.removeProperty("grid-auto-columns");
+  grid.style.removeProperty("grid-auto-rows");
+  grid.style.removeProperty("grid-template-rows");
+  grid.style.removeProperty("grid-template-columns");
+  grid.style.removeProperty("min-width");
+  grid.style.width = "100%";
+  grid.style.height = "100%";
+  grid.style.setProperty("--summary-hex-side-px", `${model.metrics.side}px`);
+  grid.style.setProperty("--summary-hex-width-px", `${model.metrics.width}px`);
+  grid.style.setProperty("--summary-hex-height-px", `${model.metrics.height}px`);
+
+  const glowCanvas = document.createElement("canvas");
+  glowCanvas.className = "summary-gap-glow-canvas";
+  glowCanvas.setAttribute("aria-hidden", "true");
+  glowCanvas.width = Math.max(1, Math.ceil(model.available.width * (window.devicePixelRatio || 1)));
+  glowCanvas.height = Math.max(1, Math.ceil(model.available.height * (window.devicePixelRatio || 1)));
+  glowCanvas.style.width = `${model.available.width}px`;
+  glowCanvas.style.height = `${model.available.height}px`;
+  grid.appendChild(glowCanvas);
+
+  model.cells.forEach((hexCell) => {
+    const cell = document.createElement("div");
+    cell.className = `summary-grid-cell summary-grid-cell--hex${hexCell.partial ? " summary-grid-cell--half" : ""}`;
+    cell.style.left = `${hexCell.left}px`;
+    cell.style.top = `${hexCell.top}px`;
+    cell.style.width = `${hexCell.width}px`;
+    cell.style.height = `${hexCell.height}px`;
+    cell.dataset.summaryRow = String(hexCell.row);
+    cell.dataset.summaryColumn = String(hexCell.column);
+    cell.setAttribute("role", "gridcell");
+    if (hexCell.usable) {
+      cell.dataset.summaryCellIndex = String(hexCell.slotIndex);
+      cell.dataset.summaryUsableRow = String(hexCell.usableRowIndex);
+      cell.setAttribute("aria-label", hexCell.record ? `摘要蜂巢：${displayTitle(hexCell.record)}` : "空摘要蜂巢");
+    } else {
+      cell.dataset.summaryDisabled = "true";
+      cell.setAttribute("aria-hidden", "true");
+    }
+    if (hexCell.record) {
+      cell.classList.add("summary-grid-cell--occupied");
+      cell.dataset.terminalId = hexCell.record.id;
+      cell.appendChild(renderTerminal(hexCell.record));
+    }
+    grid.appendChild(cell);
+  });
+}
+
+function clearSummaryCellPreview() {
+  state.hoverSummaryCellIndex = null;
+  document.querySelector(".summary-grid-cell--virtual")?.remove();
+  document
+    .querySelectorAll(".summary-grid-cell.is-summary-drop-target")
+    .forEach((cell) => cell.classList.remove("is-summary-drop-target"));
+}
+
+function getSummaryGapGlowCanvas() {
+  return grid?.querySelector(".summary-gap-glow-canvas") || null;
+}
+
+function clearSummaryGapGlow() {
+  if (_summaryGapGlowRafId) {
+    cancelAnimationFrame(_summaryGapGlowRafId);
+    _summaryGapGlowRafId = 0;
+  }
+  _summaryGapGlowPoint = null;
+  const canvas = getSummaryGapGlowCanvas();
+  const context = canvas?.getContext("2d");
+  if (canvas && context) {
+    context.clearRect(0, 0, canvas.width, canvas.height);
+  }
+}
+
+function traceSummaryHexPath(context, left, top, width, height) {
+  context.beginPath();
+  context.moveTo(left + width * 0.5, top);
+  context.lineTo(left + width, top + height * 0.25);
+  context.lineTo(left + width, top + height * 0.75);
+  context.lineTo(left + width * 0.5, top + height);
+  context.lineTo(left, top + height * 0.75);
+  context.lineTo(left, top + height * 0.25);
+  context.closePath();
+}
+
+function drawSummaryGapGlow() {
+  _summaryGapGlowRafId = 0;
+  if (!_summaryGapGlowPoint || state.viewMode !== "brief" || !grid || state.activeCardDrag || state.draggedTerminalId) {
+    clearSummaryGapGlow();
+    return;
+  }
+
+  const canvas = getSummaryGapGlowCanvas();
+  const context = canvas?.getContext("2d");
+  if (!canvas || !context) {
+    return;
+  }
+
+  const gridRect = grid.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  const cssWidth = Math.max(1, Math.round(gridRect.width));
+  const cssHeight = Math.max(1, Math.round(gridRect.height));
+  const pixelWidth = Math.max(1, Math.ceil(cssWidth * dpr));
+  const pixelHeight = Math.max(1, Math.ceil(cssHeight * dpr));
+  if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
+    canvas.width = pixelWidth;
+    canvas.height = pixelHeight;
+    canvas.style.width = `${cssWidth}px`;
+    canvas.style.height = `${cssHeight}px`;
+  }
+
+  context.setTransform(dpr, 0, 0, dpr, 0, 0);
+  context.clearRect(0, 0, cssWidth, cssHeight);
+
+  const hoverX = _summaryGapGlowPoint.clientX - gridRect.left;
+  const hoverY = _summaryGapGlowPoint.clientY - gridRect.top;
+  const cells = grid.querySelectorAll(".summary-grid-cell:not(.summary-grid-cell--virtual):not(.summary-grid-cell--half)");
+  const glowColor = hexToRgb(getColorUiSetting("summary_gap_glow_color"));
+  const glowRadius = Math.max(80, getNumericUiSetting("summary_gap_glow_radius_px", 285));
+  const glowStrength = Math.max(0, getNumericUiSetting("summary_gap_glow_strength", 0.88));
+  const glowSoftness = Math.max(0, getNumericUiSetting("summary_gap_glow_softness_px", 14));
+  const configuredLineWidth = getNumericUiSetting("summary_gap_glow_line_width_px", 0);
+  const glowLineWidth = configuredLineWidth > 0
+    ? configuredLineWidth
+    : Math.max(2, Math.min(8, getGridGapPx() + 2));
+
+  context.save();
+  context.lineJoin = "round";
+  context.lineCap = "round";
+
+  cells.forEach((cell) => {
+    const left = Number.parseFloat(cell.style.left) || 0;
+    const top = Number.parseFloat(cell.style.top) || 0;
+    const width = Number.parseFloat(cell.style.width) || cell.offsetWidth || 0;
+    const height = Number.parseFloat(cell.style.height) || cell.offsetHeight || 0;
+    if (!width || !height) {
+      return;
+    }
+
+    const centerX = left + width / 2;
+    const centerY = top + height / 2;
+    const distance = Math.hypot(hoverX - centerX, (hoverY - centerY) * 0.92);
+    const strength = Math.max(0, 1 - distance / glowRadius);
+    if (strength <= 0.08) {
+      return;
+    }
+
+    traceSummaryHexPath(context, left, top, width, height);
+    const gradient = context.createRadialGradient(hoverX, hoverY, 0, hoverX, hoverY, glowRadius);
+    gradient.addColorStop(0, rgbaFromRgb(glowColor, glowStrength * strength));
+    gradient.addColorStop(0.42, rgbaFromRgb(glowColor, glowStrength * 0.48 * strength));
+    gradient.addColorStop(1, rgbaFromRgb(glowColor, 0));
+    context.strokeStyle = gradient;
+    context.lineWidth = glowLineWidth;
+    context.shadowColor = rgbaFromRgb(glowColor, glowStrength * 0.38 * strength);
+    context.shadowBlur = glowSoftness * strength;
+    context.stroke();
+  });
+
+  context.restore();
+}
+
+function handleSummaryGridPointerMove(event) {
+  if (state.viewMode !== "brief" || !grid || state.activeCardDrag || state.draggedTerminalId) {
+    clearSummaryGapGlow();
+    return;
+  }
+  _summaryGapGlowPoint = {
+    clientX: event.clientX,
+    clientY: event.clientY,
+  };
+  if (!_summaryGapGlowRafId) {
+    _summaryGapGlowRafId = requestAnimationFrame(drawSummaryGapGlow);
+  }
+}
+
+function getSummaryGridCells() {
+  return [...document.querySelectorAll(".summary-grid-cell:not(.summary-grid-cell--virtual):not(.summary-grid-cell--half)")];
+}
+
+function getSummaryCellElementAtPoint(clientX, clientY) {
+  const hit = document.elementFromPoint(clientX, clientY);
+  const directCell = hit instanceof Element ? hit.closest(".summary-grid-cell") : null;
+  if (
+    directCell
+    && !directCell.classList.contains("summary-grid-cell--virtual")
+    && !directCell.classList.contains("summary-grid-cell--half")
+    && directCell.dataset.summaryDisabled !== "true"
+  ) {
+    return directCell;
+  }
+
+  const gapAllowance = Math.max(2, getGridGapPx() / 2);
+  let nearest = null;
+  getSummaryGridCells().forEach((cell) => {
+    const rect = cell.getBoundingClientRect();
+    const dx = clientX < rect.left ? rect.left - clientX : clientX > rect.right ? clientX - rect.right : 0;
+    const dy = clientY < rect.top ? rect.top - clientY : clientY > rect.bottom ? clientY - rect.bottom : 0;
+    if (dx <= gapAllowance && dy <= gapAllowance) {
+      const score = dx + dy;
+      if (!nearest || score < nearest.score) {
+        nearest = { cell, score };
+      }
+    }
+  });
+  return nearest?.cell || null;
+}
+
+function getSummaryGridContentMetrics() {
+  const cells = getSummaryGridCells();
+  if (!grid || cells.length === 0) {
+    return null;
+  }
+  const rects = cells.map((cell) => cell.getBoundingClientRect());
+  const rows = Math.max(1, Number(grid.dataset.summaryUsableRows) || 1);
+  const columns = Math.max(1, Number(state.summaryGridColumns || grid.dataset.summaryColumns) || 1);
+  return {
+    left: Math.min(...rects.map((rect) => rect.left)),
+    right: Math.max(...rects.map((rect) => rect.right)),
+    top: Math.min(...rects.map((rect) => rect.top)),
+    bottom: Math.max(...rects.map((rect) => rect.bottom)),
+    rows,
+    columns,
+    cellWidth: rects[0]?.width || getSummaryCellWidthPx(),
+    cellHeight: rects[0]?.height || getSummaryCellHeightPx(),
+    gap: getGridGapPx(),
+    usableCells: cells,
+  };
+}
+
+function getSummaryVirtualDropTargetAtPoint(clientX, clientY) {
+  const metrics = getSummaryGridContentMetrics();
+  if (!metrics) {
+    return null;
+  }
+  const gapAllowance = Math.max(4, metrics.gap / 2);
+  if (clientY < metrics.top - gapAllowance || clientY > metrics.bottom + gapAllowance) {
+    return null;
+  }
+
+  let targetRow = null;
+  metrics.usableCells.forEach((cell) => {
+    const rect = cell.getBoundingClientRect();
+    if (clientY >= rect.top - gapAllowance && clientY <= rect.bottom + gapAllowance) {
+      const rowIndex = Number(cell.dataset.summaryUsableRow);
+      if (Number.isInteger(rowIndex) && rowIndex >= 0 && (!targetRow || rect.left > targetRow.left)) {
+        targetRow = { rowIndex, top: rect.top, left: rect.left };
+      }
+    }
+  });
+  if (!targetRow) {
+    return null;
+  }
+
+  const virtualLeft = metrics.right + metrics.gap;
+  const virtualRight = virtualLeft + metrics.cellWidth;
+  if (clientX < virtualLeft - gapAllowance || clientX > virtualRight + gapAllowance) {
+    return null;
+  }
+
+  return {
+    cell: null,
+    cellIndex: metrics.columns * metrics.rows + targetRow.rowIndex,
+    virtualRect: {
+      left: virtualLeft,
+      top: targetRow.top,
+      width: metrics.cellWidth,
+      height: metrics.cellHeight,
+    },
+  };
+}
+
+function getSummaryDropTargetAtPoint(clientX, clientY) {
+  if (!state.draggedTerminalId || state.viewMode !== "brief") {
+    return null;
+  }
+  const cell = getSummaryCellElementAtPoint(clientX, clientY);
+  if (cell) {
+    const cellIndex = Number(cell.dataset.summaryCellIndex);
+    if (Number.isInteger(cellIndex) && cellIndex >= 0) {
+      return { cell, cellIndex };
+    }
+  }
+  return getSummaryVirtualDropTargetAtPoint(clientX, clientY);
+}
+
+function renderSummaryVirtualDropTarget(target) {
+  if (!grid || !target?.virtualRect) {
+    return;
+  }
+  const gridRect = grid.getBoundingClientRect();
+  const marker = document.createElement("div");
+  marker.className = "summary-grid-cell summary-grid-cell--virtual is-summary-drop-target";
+  marker.dataset.summaryCellIndex = String(target.cellIndex);
+  marker.setAttribute("aria-hidden", "true");
+  marker.style.left = `${target.virtualRect.left - gridRect.left + grid.scrollLeft}px`;
+  marker.style.top = `${target.virtualRect.top - gridRect.top + grid.scrollTop}px`;
+  marker.style.width = `${target.virtualRect.width}px`;
+  marker.style.height = `${target.virtualRect.height}px`;
+  grid.appendChild(marker);
+}
+
+function applySummaryCellPreview(target) {
+  clearSummaryCellPreview();
+  if (!target?.cell) {
+    renderSummaryVirtualDropTarget(target);
+    return;
+  }
+  state.hoverSummaryCellIndex = target.cellIndex;
+  target.cell.classList.add("is-summary-drop-target");
+}
+
+function moveSummaryTerminalToCell(sourceId, targetIndex) {
+  if (!sourceId || !Number.isInteger(targetIndex) || targetIndex < 0) {
+    return;
+  }
+  const visibleRecords = getPagedTerminals().items;
+  if (!visibleRecords.some((record) => record.id === sourceId)) {
+    return;
+  }
+  const model = ensureSummaryCellAssignments(visibleRecords);
+  const sourceIndex = state.summaryCellAssignments[sourceId];
+  if (!Number.isInteger(sourceIndex) || sourceIndex === targetIndex) {
+    return;
+  }
+
+  const sourceRecord = state.terminals.get(sourceId);
+  const targetRecord = model.slots[targetIndex] || null;
+  state.summaryCellAssignments[sourceId] = targetIndex;
+  if (targetRecord?.id && targetRecord.id !== sourceId) {
+    state.summaryCellAssignments[targetRecord.id] = sourceIndex;
+  }
+
+  saveViewState();
+  refreshWall();
+  if (targetRecord?.id && targetRecord.id !== sourceId) {
+    setMessage(`已交换 ${sourceRecord?.name || sourceId} 和 ${targetRecord.name || targetRecord.id} 的摘要格子`);
+  } else {
+    setMessage(`已移动 ${sourceRecord?.name || sourceId} 到摘要格子`);
+  }
+}
+
+function commitSummaryCellDrag(clientX, clientY) {
+  const target = getSummaryDropTargetAtPoint(clientX, clientY);
+  if (!target) {
+    return;
+  }
+  moveSummaryTerminalToCell(state.draggedTerminalId, target.cellIndex);
 }
 
 function getProgramInfo(record) {
@@ -1308,13 +4294,34 @@ function applyLayout(_layoutFromServer = null) {
   grid.dataset.columns = String(cols);
   grid.dataset.rows = String(layout.rows || 1);
   grid.dataset.fitMode = layout.fitMode ? "true" : "false";
-  // split 引擎只在默认过滤器下生效；其他过滤器用简单卡片循环渲染，必须保持 grid 布局
-  const useSplitEngine = Boolean(state.layoutTree) && state.filter === "default";
-  grid.dataset.engine = useSplitEngine ? "split" : "grid";
+  // split 引擎只在默认过滤器下生效；摘要视图使用独立的固定格子表格。
+  const useSplitEngine = Boolean(state.layoutTree) && state.filter === "default" && state.viewMode !== "brief";
+  const useSummaryGrid = state.viewMode === "brief";
+  grid.dataset.engine = useSplitEngine ? "split" : useSummaryGrid ? "summary-grid" : "grid";
+  grid.dataset.view = state.viewMode || "live";
+  if (!useSummaryGrid) {
+    clearSummaryGapGlow();
+    delete grid.dataset.summaryRows;
+    delete grid.dataset.summaryUsableRows;
+    delete grid.dataset.summaryColumns;
+  }
+  grid.removeAttribute("role");
+  grid.removeAttribute("aria-rowcount");
+  grid.removeAttribute("aria-colcount");
   if (useSplitEngine) {
     grid.style.removeProperty("grid-template-columns");
     grid.style.removeProperty("grid-template-rows");
+    grid.style.removeProperty("grid-auto-flow");
+    grid.style.removeProperty("grid-auto-columns");
+    grid.style.removeProperty("grid-auto-rows");
+    grid.style.removeProperty("min-width");
+    grid.style.removeProperty("height");
+  } else if (useSummaryGrid) {
+    // renderSummaryGrid owns the fixed row/column templates; incremental updates keep them intact.
   } else {
+    grid.style.removeProperty("grid-auto-flow");
+    grid.style.removeProperty("grid-auto-columns");
+    grid.style.removeProperty("grid-auto-rows");
     applyGridTrackStyles();
   }
   state.nextFitMode = false;
@@ -1549,7 +4556,7 @@ function shouldIgnoreDragStart(target) {
   if (target.closest('.wall-card-drag-handle')) {
     return false;
   }
-  return Boolean(target.closest('.wall-card-terminal, button, input, textarea, details, summary, .wall-card-input, .wall-card-details-panel, .wall-card-details, .wall-card-title-input'));
+  return Boolean(target.closest('.wall-card-terminal, button, input, textarea, details, summary, .wall-card-title-input'));
 }
 
 function reorderTerminals(sourceId, targetId) {
@@ -1657,11 +4664,209 @@ async function focusTerminal(id, name) {
       browser_y: window.screenY
     })
   });
+  // 点击队列项视为“已处理”，状态不变前不再重复提醒
+  const queuedItem = state.queue.find((q) => q.id === id);
+  if (queuedItem) {
+    dismissQueueItem(id, queuedItem.status);
+  }
   // 点击队列项聚焦时，自动从队列移除
   state.queue = state.queue.filter((q) => q.id !== id);
   _lastQueueKey = "__force__";
   renderQueue();
   setMessage(`已切到 ${name}，已从队列移除`);
+}
+
+async function refreshTerminalSnapshot(record) {
+  await request(`/api/terminals/${record.id}/refresh`, { method: "POST" });
+  setMessage(`已刷新 ${record.name}`);
+}
+
+async function enterMonitorMode() {
+  await request("/api/workspace/monitor-mode", { method: "POST" });
+  setMessage("真实 iTerm 已退到后台，回到监控模式");
+}
+
+async function setTerminalDefaultFrame(record) {
+  const frameData = await request(`/api/terminals/${record.id}/frame`);
+  await request("/api/default-frame", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(frameData),
+  });
+  setMessage(`已将 ${record.name} 的位置设为默认模板`);
+}
+
+async function applyDefaultFrameToAll() {
+  const result = await request("/api/default-frame/apply-all", { method: "POST" });
+  setMessage(`已将 ${result.applied} 个终端对齐到默认位置`);
+}
+
+function getPrimaryTerminal() {
+  for (const terminalId of state.orderedTerminalIds) {
+    const record = state.terminals.get(terminalId);
+    if (record?.isPrimary && record.status !== "closed") {
+      return record;
+    }
+  }
+  for (const record of state.terminals.values()) {
+    if (record?.isPrimary && record.status !== "closed") {
+      return record;
+    }
+  }
+  return null;
+}
+
+function renderPrimaryFocus() {
+  const container = document.getElementById("topbar-primary-focus");
+  if (!container) return;
+
+  const record = getPrimaryTerminal();
+  container.innerHTML = "";
+  container.classList.toggle("is-active", Boolean(record));
+  if (!record) {
+    container.removeAttribute("data-status");
+    return;
+  }
+  container.dataset.status = record.status;
+
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = `primary-focus-pill status-${record.status}`;
+  button.title = `当前最重要任务：${displayTitle(record)}`;
+  button.innerHTML = `
+    <span class="primary-focus-pill-label" aria-hidden="true">★</span>
+    <span class="primary-focus-pill-name">${escapeHtml(displayTitle(record))}</span>
+    <span class="primary-focus-pill-status">${escapeHtml(statusLabel(record.status))}</span>
+  `;
+  button.onclick = async () => {
+    try {
+      await focusTerminal(record.id, record.name);
+    } catch (error) {
+      setMessage(error.message, true);
+    }
+  };
+  container.appendChild(button);
+}
+
+async function toggleTerminalPrimary(record) {
+  const nowPrimary = !record.isPrimary;
+  const result = await request(`/api/terminals/${record.id}/primary`, {
+    method: "POST",
+    body: JSON.stringify({ primary: nowPrimary }),
+  });
+
+  if (nowPrimary) {
+    for (const terminal of state.terminals.values()) {
+      terminal.isPrimary = terminal.id === record.id;
+    }
+  } else {
+    const current = state.terminals.get(record.id);
+    if (current) {
+      current.isPrimary = false;
+    }
+  }
+  if (result.item) {
+    state.terminals.set(result.item.id, result.item);
+  }
+
+  state._needFullRefresh = true;
+  renderPrimaryFocus();
+  scheduleRender(result.layout || null);
+  setMessage(
+    nowPrimary
+      ? `已将 ${record.name} 标记为最重要任务`
+      : `已取消 ${record.name} 的最重要任务标记`,
+  );
+}
+
+async function toggleTerminalHidden(record) {
+  const nowHidden = !state.hiddenTerminalIds.has(record.id);
+  if (nowHidden) {
+    state.hiddenTerminalIds.add(record.id);
+    setMessage(`已隐藏 ${record.name}，可在"已隐藏"筛选中找到`);
+    state.queue = state.queue.filter((q) => q.id !== record.id);
+  } else {
+    state.hiddenTerminalIds.delete(record.id);
+    setMessage(`已取消隐藏 ${record.name}`);
+    const terminal = state.terminals.get(record.id);
+    if (terminal && shouldTrackTerminalStatus(terminal) && !state.queue.some((q) => q.id === record.id)) {
+      if (ATTENTION_STATUSES.has(terminal.status)) {
+        state.queue.unshift({ id: record.id, name: terminal.name || record.id, status: terminal.status });
+      } else if (terminal.status === "done") {
+        state.queue.push({ id: record.id, name: terminal.name || record.id, status: terminal.status });
+      }
+    }
+  }
+  saveViewState();
+  refreshWall();
+  try {
+    await request(`/api/terminals/${record.id}/hidden`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ hidden: nowHidden }),
+    });
+  } catch (error) {
+    console.warn("同步隐藏状态到后端失败:", error);
+  }
+}
+
+async function toggleTerminalMuted(record) {
+  const nowMuted = !state.mutedTerminalIds.has(record.id);
+  if (nowMuted) {
+    state.mutedTerminalIds.add(record.id);
+    state.queue = state.queue.filter((q) => q.id !== record.id);
+    setMessage(`已静默 ${record.name}，状态变更不再进入队列`);
+  } else {
+    state.mutedTerminalIds.delete(record.id);
+    setMessage(`已取消静默 ${record.name}`);
+  }
+  saveViewState();
+  renderQueue();
+  try {
+    await request(`/api/terminals/${record.id}/muted`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ muted: nowMuted }),
+    });
+  } catch {
+  }
+}
+
+async function closeTerminalRecord(record) {
+  await request(`/api/terminals/${record.id}/close`, { method: "POST" });
+  setMessage(`已关闭 ${record.name}`);
+}
+
+async function detachTerminal(record) {
+  await request(`/api/terminals/${record.id}/detach`, { method: "POST" });
+  setMessage("终端已解绑");
+}
+
+async function updateTerminalTags(record, nextTags) {
+  const res = await request(`/api/terminals/${record.id}/tags`, {
+    method: "POST",
+    body: JSON.stringify({ tags: nextTags }),
+  });
+  if (res.allTags) {
+    state.allTags = res.allTags;
+    syncTagFilterSelect();
+  }
+  if (res.item) {
+    state.terminals.set(res.item.id, res.item);
+  }
+  refreshWall();
+}
+
+async function sendTextToTerminal(record, text) {
+  if (!text.trim()) {
+    return;
+  }
+  state.focusedInputTerminalId = record.id;
+  await request(`/api/terminals/${record.id}/send-text`, {
+    method: "POST",
+    body: JSON.stringify({ text }),
+  });
+  setMessage(`已向 ${record.name} 发送命令`);
 }
 
 /* ---- 顶部队列 ---- */
@@ -1692,7 +4897,7 @@ function updateQueue(terminalId, oldStatus, newStatus) {
   const dismissedStatus = state.queueDismissed.get(terminalId);
   if (dismissedStatus !== undefined) {
     if (newStatus !== dismissedStatus) {
-      state.queueDismissed.delete(terminalId); // 状态变了，解除屏蔽
+      clearDismissedQueueItem(terminalId); // 状态变了，解除屏蔽
     } else {
       return; // 状态没变，继续屏蔽
     }
@@ -1757,7 +4962,7 @@ function renderQueue() {
     pill.onclick = () => focusTerminal(item.id, item.name);
     pill.oncontextmenu = (e) => {
       e.preventDefault();
-      state.queueDismissed.set(item.id, item.status); // 记录移除时的状态
+      dismissQueueItem(item.id, item.status); // 记录移除时的状态
       state.queue = state.queue.filter((q) => q.id !== item.id);
       _lastQueueKey = "__force__";
       renderQueue();
@@ -1776,6 +4981,13 @@ function initQueueFromSnapshot() {
     if (state.hiddenTerminalIds.has(id)) continue;
     if (state.mutedTerminalIds.has(id)) continue;
     if (!shouldTrackTerminalStatus(terminal)) continue;
+    const dismissedStatus = state.queueDismissed.get(id);
+    if (dismissedStatus !== undefined) {
+      if (dismissedStatus === terminal.status) {
+        continue;
+      }
+      clearDismissedQueueItem(id);
+    }
     const name = terminal.name || id;
     if (ATTENTION_STATUSES.has(terminal.status)) {
       attentionItems.push({ id, name, status: terminal.status });
@@ -1792,6 +5004,43 @@ async function renameTerminal(id, name) {
     method: "POST",
     body: JSON.stringify({ name }),
   });
+}
+
+function syncRenamedTerminalLocally(terminalId, nextName) {
+  const terminal = state.terminals.get(terminalId);
+  if (terminal) {
+    terminal.name = nextName;
+  }
+  const qItem = state.queue.find((q) => q.id === terminalId);
+  if (qItem) {
+    qItem.name = nextName;
+    _lastQueueKey = "__force__";
+    renderQueue();
+  }
+}
+
+async function promptRenameTerminal(record) {
+  const currentName = record?.name || "";
+  const nextName = prompt("重命名终端", currentName);
+  if (nextName === null) {
+    return;
+  }
+  const cleanName = nextName.trim();
+  if (!cleanName) {
+    setMessage("名称不能为空", true);
+    return;
+  }
+  if (cleanName === currentName) {
+    return;
+  }
+  try {
+    await renameTerminal(record.id, cleanName);
+    syncRenamedTerminalLocally(record.id, cleanName);
+    refreshWall();
+    setMessage(`已将终端重命名为 ${cleanName}`);
+  } catch (error) {
+    setMessage(error.message, true);
+  }
 }
 
 function restoreInputFocus(card, record) {
@@ -1817,6 +5066,8 @@ function restoreInputFocus(card, record) {
 
 function bindCardActions(card, record) {
   card.draggable = false;
+  card.tabIndex = 0;
+  card.setAttribute("aria-label", `终端 ${displayTitle(record)}，可右键或使用 Shift+F10 打开操作菜单`);
   const startRename = () => {
     if (!title || !titleInput) return;
     state.editingTitleTerminalId = record.id;
@@ -1843,18 +5094,7 @@ function bindCardActions(card, record) {
     try {
       await renameTerminal(record.id, nextName);
       state.editingTitleTerminalId = null;
-      // 同步更新本地 state 中的名称
-      const terminal = state.terminals.get(record.id);
-      if (terminal) {
-        terminal.name = nextName;
-      }
-      // 同步更新队列中的名称
-      const qItem = state.queue.find((q) => q.id === record.id);
-      if (qItem) {
-        qItem.name = nextName;
-        _lastQueueKey = "__force__";
-        renderQueue();
-      }
+      syncRenamedTerminalLocally(record.id, nextName);
       // 刷新 UI 以退出编辑状态
       refreshWall();
       setMessage(`已将终端重命名为 ${nextName}`);
@@ -1867,16 +5107,11 @@ function bindCardActions(card, record) {
     }
   };
 
-  const terminalArea = card.querySelector(".wall-card-terminal");
+  const terminalArea = card.querySelector(".wall-card-terminal") || card.querySelector(".wall-card-brief");
   const dragHandle = card.querySelector(".wall-card-drag-handle");
-  const detailsToggle = card.querySelector(".wall-card-more-button");
   const title = card.querySelector(".wall-card-title");
   const titleInput = card.querySelector(".wall-card-title-input");
-  const detailsPanel = card.querySelector(".wall-card-details-panel");
-
-  if (detailsPanel) {
-    detailsPanel.onclick = (event) => event.stopPropagation();
-  }
+  card.__startRename = startRename;
   if (title) {
     title.ondblclick = (event) => {
       event.stopPropagation();
@@ -1911,21 +5146,29 @@ function bindCardActions(card, record) {
       beginCardPointerDrag(card, record, event);
     };
   }
-  if (detailsToggle) {
-    detailsToggle.onclick = (event) => {
-      event.stopPropagation();
-      event.preventDefault();
-      if (!detailsPanel) return;
-      const expanded = !detailsPanel.hidden;
-      detailsPanel.hidden = expanded;
-      detailsToggle.classList.toggle('is-active', !expanded);
-      card.classList.toggle("has-open-details", !expanded);
-    };
-  }
 
-  terminalArea.onclick = async (event) => {
+  card.onkeydown = (event) => {
+    if ((event.shiftKey && event.key === "F10") || event.key === "ContextMenu") {
+      event.preventDefault();
+      event.stopPropagation();
+      const rect = card.getBoundingClientRect();
+      openTerminalContextMenu(state.terminals.get(record.id) || record, rect.left + rect.width / 2, rect.top + 56);
+    }
+  };
+
+  card.oncontextmenu = (event) => {
+    if (isContextMenuEditableTarget(event.target)) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    openTerminalContextMenu(state.terminals.get(record.id) || record, event.clientX, event.clientY);
+  };
+
+  if (terminalArea) terminalArea.onclick = async (event) => {
     // 点击终端区域时主动关闭所有已展开的顶部菜单（因 stopPropagation 会阻止冒泡）
     closeAllTopbarMenus();
+    closeTerminalContextMenu();
     event.stopPropagation();
     if (state.activeCardDrag || state.draggedTerminalId) return;
     if (record.status === "closed") return;
@@ -1935,303 +5178,10 @@ function bindCardActions(card, record) {
       setMessage(error.message, true);
     }
   };
-
-  card.querySelector("[data-action='refresh']").onclick = async (event) => {
-    event.stopPropagation();
-    try {
-      await request(`/api/terminals/${record.id}/refresh`, { method: "POST" });
-      setMessage(`已刷新 ${record.name}`);
-    } catch (error) {
-      setMessage(error.message, true);
-    }
-  };
-
-  card.querySelector("[data-action='monitor-mode']").onclick = async (event) => {
-    event.stopPropagation();
-    try {
-      await request("/api/workspace/monitor-mode", { method: "POST" });
-      setMessage("真实 iTerm 已退到后台，回到监控模式");
-    } catch (error) {
-      setMessage(error.message, true);
-    }
-  };
-
-  const setDefaultFrameBtn = card.querySelector("[data-action='set-default-frame']");
-  if (setDefaultFrameBtn) {
-    setDefaultFrameBtn.onclick = async (event) => {
-      event.stopPropagation();
-      try {
-        // 先获取终端的实时位置
-        const frameData = await request(`/api/terminals/${record.id}/frame`);
-        await request("/api/default-frame", {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(frameData),
-        });
-        setMessage(`已将 ${record.name} 的位置设为默认模板`);
-      } catch (error) {
-        setMessage(error.message, true);
-      }
-    };
-  }
-
-  const applyDefaultFrameAllBtn = card.querySelector("[data-action='apply-default-frame-all']");
-  if (applyDefaultFrameAllBtn) {
-    applyDefaultFrameAllBtn.onclick = async (event) => {
-      event.stopPropagation();
-      try {
-        const result = await request("/api/default-frame/apply-all", { method: "POST" });
-        setMessage(`已将 ${result.applied} 个终端对齐到默认位置`);
-      } catch (error) {
-        setMessage(error.message, true);
-      }
-    };
-  }
-
-  const toggleHideBtn = card.querySelector("[data-action='toggle-hide']");
-  if (toggleHideBtn) {
-    toggleHideBtn.onclick = async (event) => {
-      event.stopPropagation();
-      const nowHidden = !state.hiddenTerminalIds.has(record.id);
-      if (nowHidden) {
-        state.hiddenTerminalIds.add(record.id);
-        setMessage(`已隐藏 ${record.name}，可在"已隐藏"筛选中找到`);
-        // 隐藏时从队列移除
-        state.queue = state.queue.filter((q) => q.id !== record.id);
-      } else {
-        state.hiddenTerminalIds.delete(record.id);
-        setMessage(`已取消隐藏 ${record.name}`);
-        // 取消隐藏时，检查状态决定是否入队（先去重）
-        const terminal = state.terminals.get(record.id);
-        if (terminal && shouldTrackTerminalStatus(terminal) && !state.queue.some((q) => q.id === record.id)) {
-          if (ATTENTION_STATUSES.has(terminal.status)) {
-            state.queue.unshift({ id: record.id, name: terminal.name || record.id, status: terminal.status });
-          } else if (terminal.status === "done") {
-            state.queue.push({ id: record.id, name: terminal.name || record.id, status: terminal.status });
-          }
-        }
-      }
-      saveViewState();
-      refreshWall();
-      // 同步隐藏状态到后端（写入 iTerm2 变量，重启后可恢复）
-      try {
-        await request(`/api/terminals/${record.id}/hidden`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ hidden: nowHidden }),
-        });
-      } catch (e) {
-        console.warn("同步隐藏状态到后端失败:", e);
-      }
-    };
-  }
-
-  const toggleMuteBtn = card.querySelector("[data-action='toggle-mute']");
-  if (toggleMuteBtn) {
-    toggleMuteBtn.onclick = (event) => {
-      event.stopPropagation();
-      const nowMuted = !state.mutedTerminalIds.has(record.id);
-      if (nowMuted) {
-        state.mutedTerminalIds.add(record.id);
-        // 静默时从队列移除
-        state.queue = state.queue.filter((q) => q.id !== record.id);
-        setMessage(`已静默 ${record.name}，状态变更不再进入队列`);
-      } else {
-        state.mutedTerminalIds.delete(record.id);
-        setMessage(`已取消静默 ${record.name}`);
-      }
-      // 更新按钮显示
-      syncMuteButton(toggleMuteBtn, nowMuted);
-      saveViewState();
-      renderQueue();
-      // 同步到后端持久化
-      fetch(`/api/terminals/${record.id}/muted`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ muted: nowMuted }),
-      }).catch(() => {});
-    };
-  }
-
-  const detachBtn = card.querySelector("[data-action='detach']");
-  if (detachBtn) {
-    detachBtn.onclick = async (event) => {
-      event.stopPropagation();
-      try {
-        await request(`/api/terminals/${record.id}/detach`, { method: "POST" });
-        setMessage("终端已解绑");
-      } catch (error) {
-        setMessage(error.message, true);
-      }
-    };
-  }
-
-  // 标签添加/移除事件绑定
-  const tagAddBtn = card.querySelector(".wall-card-tag-add");
-  const tagInput = card.querySelector(".wall-card-tag-input");
-  const addTagFromInput = async () => {
-    if (!tagInput || !tagInput.value.trim()) return;
-    const newTag = tagInput.value.trim();
-    const currentTags = Array.isArray(record.tags) ? [...record.tags] : [];
-    if (currentTags.includes(newTag)) {
-      tagInput.value = "";
-      return;
-    }
-    currentTags.push(newTag);
-    try {
-      const res = await request(`/api/terminals/${record.id}/tags`, {
-        method: "POST",
-        body: JSON.stringify({ tags: currentTags }),
-      });
-      tagInput.value = "";
-      // 同步后端返回的 allTags
-      if (res.allTags) {
-        state.allTags = res.allTags;
-        syncTagFilterSelect();
-      }
-      if (res.item) {
-        state.terminals.set(res.item.id, res.item);
-      }
-      refreshWall();
-    } catch (error) {
-      setMessage(error.message, true);
-    }
-  };
-  if (tagAddBtn) {
-    tagAddBtn.onclick = (event) => {
-      event.stopPropagation();
-      addTagFromInput();
-    };
-  }
-  if (tagInput) {
-    tagInput.onclick = (event) => event.stopPropagation();
-    tagInput.onkeydown = (event) => {
-      event.stopPropagation();
-      if (event.key === "Enter") {
-        event.preventDefault();
-        addTagFromInput();
-      }
-    };
-  }
-  // 候选标签快速添加
-  card.querySelectorAll(".wall-card-tag-candidate").forEach((btn) => {
-    btn.onclick = async (event) => {
-      event.stopPropagation();
-      const tagToAdd = btn.dataset.tag;
-      const currentTags = Array.isArray(record.tags) ? [...record.tags] : [];
-      if (currentTags.includes(tagToAdd)) return;
-      currentTags.push(tagToAdd);
-      try {
-        const res = await request(`/api/terminals/${record.id}/tags`, {
-          method: "POST",
-          body: JSON.stringify({ tags: currentTags }),
-        });
-        if (res.allTags) {
-          state.allTags = res.allTags;
-          syncTagFilterSelect();
-        }
-        if (res.item) {
-          state.terminals.set(res.item.id, res.item);
-        }
-        refreshWall();
-      } catch (error) {
-        setMessage(error.message, true);
-      }
-    };
-  });
-  // 标签移除按钮
-  card.querySelectorAll(".wall-card-tag-remove").forEach((btn) => {
-    btn.onclick = async (event) => {
-      event.stopPropagation();
-      const tagToRemove = btn.dataset.tag;
-      const currentTags = Array.isArray(record.tags) ? record.tags.filter(t => t !== tagToRemove) : [];
-      try {
-        const res = await request(`/api/terminals/${record.id}/tags`, {
-          method: "POST",
-          body: JSON.stringify({ tags: currentTags }),
-        });
-        if (res.allTags) {
-          state.allTags = res.allTags;
-          syncTagFilterSelect();
-        }
-        if (res.item) {
-          state.terminals.set(res.item.id, res.item);
-        }
-        refreshWall();
-      } catch (error) {
-        setMessage(error.message, true);
-      }
-    };
-  });
-
-  const inputWrap = card.querySelector(".wall-card-input-wrap");
-  const inputToggle = card.querySelector(".wall-card-input-toggle");
-  const form = card.querySelector(".wall-card-input");
-  const input = form.querySelector("input");
-
-  const expandInput = () => {
-    inputWrap.classList.add("is-expanded");
-    form.hidden = false;
-    window.requestAnimationFrame(() => {
-      input.focus();
-      const length = input.value.length;
-      input.setSelectionRange(length, length);
-    });
-  };
-
-  const collapseInput = () => {
-    inputWrap.classList.remove("is-expanded");
-    form.hidden = true;
-  };
-
-  const send = async () => {
-    if (!input.value.trim()) return;
-    try {
-      state.focusedInputTerminalId = record.id;
-      await request(`/api/terminals/${record.id}/send-text`, { method: "POST", body: JSON.stringify({ text: input.value }) });
-      input.value = "";
-      setMessage(`已向 ${record.name} 发送命令`);
-      expandInput();
-    } catch (error) {
-      setMessage(error.message, true);
-    }
-  };
-
-  inputToggle.onclick = (event) => {
-    event.stopPropagation();
-    if (inputWrap.classList.contains("is-expanded")) {
-      collapseInput();
-    } else {
-      expandInput();
-    }
-  };
-
-  form.querySelector("button").onclick = async (event) => {
-    event.stopPropagation();
-    await send();
-  };
-  input.onclick = (event) => {
-    event.stopPropagation();
-    state.focusedInputTerminalId = record.id;
-  };
-  input.onfocus = () => {
-    state.focusedInputTerminalId = record.id;
-  };
-  input.onkeydown = async (event) => {
-    if (event.key === "Enter") {
-      event.preventDefault();
-      await send();
-    }
-    if (event.key === "Escape") {
-      event.preventDefault();
-      collapseInput();
-    }
-  };
 }
 
 function renderTerminal(record) {
   let card = document.getElementById(`card-${record.id}`);
-  const isMuted = state.mutedTerminalIds.has(record.id);
   if (!card) {
     card = document.createElement("section");
     card.id = `card-${record.id}`;
@@ -2239,71 +5189,40 @@ function renderTerminal(record) {
   }
   card.dataset.terminalId = record.id;
 
+  // 摘要视图：简洁卡片
+  if (state.viewMode === "brief") {
+    if (state.editingTitleTerminalId === record.id) {
+      card.className = getCardClassName(record, {
+        brief: true,
+        extraClasses: collectTransientCardClasses(card),
+      });
+      syncAgentCardClass(card, record);
+      return card;
+    }
+    rerenderBriefCard(card, record);
+    return card;
+  }
+
   // 正在编辑此卡片标题时，跳过全卡 innerHTML 替换
   // 否则 DOM 重建会销毁聚焦中的 input，触发 blur → finishRename，打断用户输入
   if (state.editingTitleTerminalId === record.id) {
+    card.className = getCardClassName(record, {
+      extraClasses: collectTransientCardClasses(card),
+    });
     syncAgentCardClass(card, record);
     updateTerminalSnapshot(record, card.querySelector(".wall-card-terminal"));
     return card;
   }
 
-  // 面板展开时跳过全卡 innerHTML 替换，避免面板被重建关闭
-  const detailsOpen = card.querySelector(".wall-card-details-panel:not([hidden])") !== null;
-  if (detailsOpen) {
-    updateTerminalSnapshot(record, card.querySelector(".wall-card-terminal"));
-    card.className = `wall-card status-${record.status} has-open-details`;
-    updateCardMeta(card, record);
-    return card;
-  }
-
-  card.className = `wall-card status-${record.status}`;
+  card.className = getCardClassName(record);
   card.innerHTML = `
     <div class="wall-card-header">
       <div class="wall-card-title-row">
         <button type="button" class="ghost wall-card-drag-handle" title="拖拽排序" aria-label="拖拽排序"><svg width="100%" height="100%" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M12 1l-3 3.5h6L12 1z"/><path d="M12 23l-3-3.5h6L12 23z"/><path d="M1 12l3.5-3v6L1 12z"/><path d="M23 12l-3.5-3v6L23 12z"/><rect x="11.25" y="4" width="1.5" height="16" rx=".75"/><rect x="4" y="11.25" width="16" height="1.5" rx=".75"/></svg></button>
         <h2 class="wall-card-title" ${state.editingTitleTerminalId === record.id ? 'hidden' : ''}>${escapeHtml(displayTitle(record))}</h2>
         <input class="wall-card-title-input" type="text" value="${escapeHtml(record.name)}" ${state.editingTitleTerminalId === record.id ? '' : 'hidden'} />
+        <span class="wall-card-primary-badge" hidden></span>
         <span class="wall-card-program-chip" hidden></span>
-        <div class="wall-card-action-group">
-          <button type="button" class="ghost wall-card-more-button" title="更多操作" aria-label="更多操作">⋯</button>
-        </div>
-      </div>
-      <div class="wall-card-details-panel" hidden>
-        <div class="wall-card-details-actions">
-          <button type="button" data-action="toggle-hide" class="secondary wall-card-panel-action wall-card-hide-button" title="${getHideButtonTitle(record)}" aria-label="${getHideButtonTitle(record)}">${getHideButtonLabel(record)}</button>
-          <button type="button" data-action="toggle-mute" class="secondary wall-card-panel-action wall-card-mute-button" title="${getMuteButtonTitle(isMuted)}" aria-label="${getMuteButtonTitle(isMuted)}">${getMuteButtonLabel(isMuted)}</button>
-        </div>
-        <div class="wall-card-topline">
-          <span class="badge status-${record.status}">${statusLabel(record.status)}</span>
-          <span class="badge badge-program wall-card-program-badge"></span>
-        </div>
-        <div class="wall-card-meta wall-card-program-meta"></div>
-        <div class="wall-card-tools">
-          <button data-action="refresh" class="secondary">刷新</button>
-          <button data-action="monitor-mode" class="secondary">回监控模式</button>
-          ${record.status !== "closed" ? '<button data-action="set-default-frame" class="secondary">设为默认位置</button>' : ''}
-          ${record.status !== "closed" ? '<button data-action="apply-default-frame-all" class="secondary">全部对齐</button>' : ''}
-          ${record.status !== "closed" ? '<button data-action="detach" class="secondary">解绑</button>' : ''}
-          <button type="button" class="secondary wall-card-input-toggle">命令</button>
-        </div>
-        <div class="wall-card-tags">
-          ${(Array.isArray(record.tags) ? record.tags : []).map(tag => `<span class="wall-card-tag">${escapeHtml(tag)}<button class="wall-card-tag-remove" data-tag="${escapeHtml(tag)}" title="移除标签">×</button></span>`).join("")}
-        </div>
-        <div class="wall-card-tags-candidates">
-          ${state.allTags.filter(t => !(Array.isArray(record.tags) && record.tags.includes(t))).map(t => `<button class="wall-card-tag-candidate" data-tag="${escapeHtml(t)}" title="点击添加标签">+ ${escapeHtml(t)}</button>`).join("")}
-        </div>
-        <div class="wall-card-tags-input">
-          <input type="text" class="wall-card-tag-input" placeholder="新标签名称" />
-          <button type="button" class="secondary wall-card-tag-add">+</button>
-        </div>
-        ${record.lastError ? `<div class="wall-card-error">错误：${escapeHtml(record.lastError)}</div>` : ""}
-        <div class="wall-card-input-wrap">
-          <div class="wall-card-input" hidden>
-            <input type="text" placeholder="快速发命令，例如：echo done" />
-            <button type="button" class="secondary">发送</button>
-          </div>
-        </div>
-      </div>
       </div>
     </div>
     <div class="wall-card-terminal"></div>
@@ -2328,7 +5247,7 @@ function renderEmptyState() {
         <line x1="13" y1="14" x2="17" y2="14"/>
       </svg>
       <h2>还没有监控任务</h2>
-      <p>点击顶部菜单 <strong>菜单 → 启动并纳入监控</strong> 或快捷键 <strong>新建</strong> 创建第一个终端。</p>
+      <p>点击标题 <strong>Monitor Wall → 启动并纳入监控</strong> 或快捷键 <strong>新建</strong> 创建第一个终端。</p>
       <p>2 个任务自动左右布局，3-4 个四宫格，5-6 个 2x3。</p>
     </section>
   `;
@@ -2436,22 +5355,66 @@ function incrementalUpdate(layout = null, changedIds) {
     if (!record) continue;
     const card = document.getElementById(`card-${id}`);
     if (!card) continue;
-    // 更新卡片状态样式（保留拖拽和 preview 相关 class）
-    const preserveClasses = [];
-    if (card.classList.contains('is-dragging')) preserveClasses.push('is-dragging');
-    for (const cls of card.classList) {
-      if (cls.startsWith('split-preview-')) preserveClasses.push(cls);
+    const preserveClasses = collectTransientCardClasses(card);
+    if (state.viewMode === "brief") {
+      if (state.editingTitleTerminalId === record.id) {
+        syncAgentCardClass(card, record);
+        card.className = getCardClassName(record, {
+          brief: true,
+          extraClasses: preserveClasses,
+        });
+        updateCardMeta(card, record);
+      } else {
+        rerenderBriefCard(card, record);
+      }
+    } else {
+      card.className = getCardClassName(record, {
+        extraClasses: preserveClasses,
+      });
+      updateTerminalSnapshot(record, card.querySelector(".wall-card-terminal"));
+      updateCardMeta(card, record);
     }
-    card.className = `wall-card status-${record.status}${preserveClasses.length ? ' ' + preserveClasses.join(' ') : ''}`;
-    // 更新终端输出区域
-    updateTerminalSnapshot(record, card.querySelector(".wall-card-terminal"));
-    // 更新卡片元信息（标题、状态 badge 等）
-    updateCardMeta(card, record);
   }
   // 更新统计和筛选
   syncFilterTabs();
   renderStats();
+  renderPrimaryFocus();
   renderQueue();
+}
+
+function refreshBriefRelativeTimes() {
+  if (state.viewMode !== "brief") {
+    return;
+  }
+  const visibleCards = document.querySelectorAll(".wall-card--brief[data-terminal-id]");
+  visibleCards.forEach((card) => {
+    const terminalId = card.dataset.terminalId;
+    const record = terminalId ? state.terminals.get(terminalId) : null;
+    if (!record) {
+      return;
+    }
+    const briefEl = card.querySelector(".wall-card-brief");
+    if (!briefEl) {
+      return;
+    }
+    const summaryStatus = record.aiSummaryStatus || "none";
+    const reason = record.aiSummaryReason || "";
+    if (summaryStatus === "done" || summaryStatus === "fallback") {
+      const timeEl = briefEl.querySelector(".wall-card-brief-time");
+      if (timeEl) {
+        const nextLabel = formatSummaryTime(record.lastInteractionAt || 0);
+        if (timeEl.textContent !== nextLabel) {
+          timeEl.textContent = nextLabel;
+        }
+      }
+      return;
+    }
+    if (summaryStatus === "none" && reason === "cooldown") {
+      if (state.editingTitleTerminalId !== terminalId) {
+        rerenderBriefCard(card, record);
+      }
+    }
+  });
 }
 
 // 轻量更新卡片元信息：标题、状态 badge、摘要等（不重建 DOM）
@@ -2462,12 +5425,40 @@ function updateCardMeta(card, record) {
   const program = getProgramInfo(record);
   // 更新标题
   const title = card.querySelector(".wall-card-title");
-  if (title) title.textContent = displayTitle(record);
+  if (title) {
+    title.textContent = card.classList.contains("wall-card--brief")
+      ? (record.name || "")
+      : displayTitle(record);
+  }
+  const folderTitle = card.querySelector(".wall-card-folder-title");
+  if (folderTitle) {
+    const folderPath = getSummaryFolderPath(record);
+    const folderName = getSummaryFolderName(folderPath);
+    folderTitle.textContent = folderName;
+    folderTitle.title = folderPath || folderName;
+  }
   const chip = card.querySelector(".wall-card-program-chip");
   if (chip) {
     chip.className = `wall-card-program-chip program-${program.key}`;
     chip.textContent = program.label;
     chip.hidden = !shouldShowProgramChip(record);
+  }
+  const primaryBadge = card.querySelector(".wall-card-primary-badge");
+  if (primaryBadge) {
+    primaryBadge.hidden = !record.isPrimary || record.status === "closed";
+    if (!primaryBadge.hidden) {
+      primaryBadge.textContent = "★";
+      primaryBadge.setAttribute("title", "当前最重要任务");
+      primaryBadge.setAttribute("aria-label", "当前最重要任务");
+    }
+  }
+  const briefStatusChip = card.querySelector(".wall-card-brief-status-chip");
+  if (briefStatusChip) {
+    briefStatusChip.hidden = !shouldTrackTerminalStatus(record);
+    if (!briefStatusChip.hidden) {
+      briefStatusChip.className = `wall-card-brief-status-chip status-${record.status}`;
+      briefStatusChip.textContent = statusLabel(record.status);
+    }
   }
   const hideButton = card.querySelector("[data-action='toggle-hide']");
   if (hideButton) {
@@ -2525,7 +5516,7 @@ function refreshWall(layout = null) {
   let treeElement = null;
   if (pageInfo.items.length === 0 && state.orderedAppMonitorIds.length === 0) {
     renderEmptyState();
-  } else if (state.layoutTree && state.filter === "default") {
+  } else if (state.layoutTree && state.filter === "default" && state.viewMode !== "brief") {
     syncLayoutTree();
     treeElement = renderLayoutNode(state.layoutTree, new Set(pageInfo.items.map((record) => record.id)));
     if (treeElement) {
@@ -2533,6 +5524,8 @@ function refreshWall(layout = null) {
     } else {
       renderEmptyState();
     }
+  } else if (state.viewMode === "brief") {
+    renderSummaryGrid(pageInfo.items);
   } else {
     for (const record of pageInfo.items) {
       grid.appendChild(renderTerminal(record));
@@ -2551,7 +5544,11 @@ function refreshWall(layout = null) {
   renderToolbarExtras(pageInfo);
   syncFilterTabs();
   renderStats();
+  renderPrimaryFocus();
   renderQueue();
+  if (isTerminalContextMenuOpen()) {
+    renderOpenTerminalContextMenu();
+  }
 }
 
 function applySnapshot(terminals, layout = null, allTags = null) {
@@ -2587,6 +5584,13 @@ function applySnapshot(terminals, layout = null, allTags = null) {
       state.mutedTerminalIds.delete(id);
     }
   }
+  // 清理 queueDismissed 中不再存在的旧 ID
+  for (const id of state.queueDismissed.keys()) {
+    if (!state.terminals.has(id)) {
+      state.queueDismissed.delete(id);
+    }
+  }
+  pruneSummaryCellAssignments(new Set(terminals.map((record) => record.id)));
   syncTerminalOrder(terminals);
   syncLayoutTree();
   initQueueFromSnapshot();
@@ -2916,6 +5920,7 @@ async function loadUiSettings() {
 }
 
 async function loadInitialState() {
+  loadSavedIdeas();
   loadViewState();
   // loadViewState 恢复了 selectedTag，需要同步加载该标签的独立布局
   loadTagLayout();
@@ -2931,11 +5936,24 @@ async function loadInitialState() {
 
 function connectWebSocket() {
   setWebSocketStatus("connecting");
+  setConnectionDialogStatus("connecting");
   const protocol = window.location.protocol === "https:" ? "wss" : "ws";
   const socket = new WebSocket(`${protocol}://${window.location.host}/ws`);
+  let reconnectMarked = false;
   // 每个终端 ID 的限速状态：{ timer, lastTime, pending }
   const _termThrottle = new Map();
   const THROTTLE_MS = 200;
+
+  function markSocketReconnecting() {
+    const nextAttempt = reconnectMarked
+      ? state.connectionDialog.attempt
+      : state.connectionDialog.attempt + 1;
+    reconnectMarked = true;
+    setConnectionDialogStatus("reconnecting", {
+      attempt: nextAttempt,
+      nextRetryAt: Date.now() + CONNECTION_RETRY_DELAY_MS,
+    });
+  }
 
   // 处理一条 terminal-updated 消息（限速后实际执行）
   function _applyTerminalUpdate(payload) {
@@ -2972,6 +5990,8 @@ function connectWebSocket() {
     if (payload.terminal.status === "closed") {
       state.terminals.delete(payload.terminal.id);
       state.orderedTerminalIds = state.orderedTerminalIds.filter((id) => id !== payload.terminal.id);
+      delete state.summaryCellAssignments[payload.terminal.id];
+      saveViewState();
       state._needFullRefresh = true;
       // 终端关闭后清理限速状态
       const th = _termThrottle.get(payload.terminal.id);
@@ -2984,7 +6004,12 @@ function connectWebSocket() {
     if (window._refreshCaptureTerminalList) window._refreshCaptureTerminalList();
   }
 
-  socket.onopen = () => { setWebSocketStatus("connected"); clearTransientErrorMessage(); socket.send("ready"); };
+  socket.onopen = () => {
+    setWebSocketStatus("connected");
+    setConnectionDialogStatus("restoring");
+    clearTransientErrorMessage();
+    socket.send("ready");
+  };
   socket.onmessage = (event) => {
     const payload = JSON.parse(event.data);
     if (payload.type === "snapshot") {
@@ -2993,6 +6018,7 @@ function connectWebSocket() {
         applyAppMonitorSnapshot(payload.appMonitors);
       }
       applySnapshot(payload.terminals || [], payload.layout || null, payload.allTags || null);
+      setConnectionDialogStatus("connected");
       return;
     }
     if (payload.type === "terminal-updated") {
@@ -3088,11 +6114,13 @@ function connectWebSocket() {
   };
   socket.onerror = () => {
     setWebSocketStatus("disconnected", "WebSocket 异常");
+    markSocketReconnecting();
   };
   socket.onclose = () => {
     setWebSocketStatus("reconnecting", "WebSocket 重连中");
+    markSocketReconnecting();
     setMessage("WebSocket 已断开，3 秒后重连", true);
-    window.setTimeout(connectWebSocket, 3000);
+    window.setTimeout(connectWebSocket, CONNECTION_RETRY_DELAY_MS);
   };
 }
 
@@ -3123,43 +6151,47 @@ document.getElementById("quick-create").onclick = async () => {
   }
 };
 
-// 顶部栏一键接管按钮
-document.getElementById("quick-adopt-all").onclick = async () => {
-  const btn = document.getElementById("quick-adopt-all");
+async function handleAdoptAllSessions(btn) {
+  if (!btn) {
+    return;
+  }
   btn.disabled = true;
   btn.textContent = "扫描中...";
   try {
-    const data = await request("/api/iterm2/sessions");
-    const sessions = data.items || [];
-    if (sessions.length === 0) {
+    const result = await request("/api/terminals/adopt-all", { method: "POST" });
+    const scanned = Number(result.scanned || 0);
+    const adopted = Number(result.adopted || 0);
+    const errors = Array.isArray(result.errors) ? result.errors : [];
+    if (Array.isArray(result.items)) {
+      applySnapshot(result.items, result.layout || null, result.allTags || null);
+    }
+    if (scanned === 0) {
       setMessage("没有发现可接管的终端");
       return;
     }
-    btn.textContent = `接管中 0/${sessions.length}`;
-    let count = 0;
-    for (const s of sessions) {
-      try {
-        await request("/api/terminals/adopt", {
-          method: "POST",
-          body: JSON.stringify({ session_id: s.session_id }),
-        });
-        count++;
-        btn.textContent = `接管中 ${count}/${sessions.length}`;
-      } catch (_e) {
-        // 单个失败不阻断其余
-      }
+    if (errors.length > 0) {
+      const firstError = errors[0];
+      const failedName = firstError.name || firstError.sessionId || "未知终端";
+      setMessage(`已接管 ${adopted}/${scanned} 个终端，${errors.length} 个失败：${failedName} ${firstError.error || ""}`, true);
+      return;
     }
-    setMessage(`已接管 ${count} 个终端`);
+    setMessage(`已接管 ${adopted} 个终端`);
   } catch (error) {
     setMessage(error.message, true);
   } finally {
     btn.disabled = false;
     btn.textContent = "一键接管";
   }
-};
+}
 
 // 顶部栏 App 监控按钮
-document.getElementById("app-monitor-btn").onclick = () => openAppMonitorDialog();
+const appMonitorButton = document.getElementById("app-monitor-btn");
+if (appMonitorButton) {
+  appMonitorButton.onclick = () => {
+    closeAllTopbarMenus();
+    openAppMonitorDialog();
+  };
+}
 document.getElementById("app-monitor-dialog-close").onclick = () => closeAppMonitorDialog();
 document.getElementById("app-monitor-dialog").onclick = (e) => {
   if (e.target === e.currentTarget) closeAppMonitorDialog();
@@ -3255,41 +6287,13 @@ async function doScanSessions() {
 
 document.getElementById("scan-sessions").onclick = () => doScanSessions();
 
-document.getElementById("adopt-all-sessions").onclick = async () => {
-  const btn = document.getElementById("adopt-all-sessions");
-  btn.disabled = true;
-  btn.textContent = "扫描中...";
-  try {
-    const data = await request("/api/iterm2/sessions");
-    const sessions = data.items || [];
-    if (sessions.length === 0) {
-      setMessage("没有发现可接管的终端");
-      return;
-    }
-    btn.textContent = `接管中 0/${sessions.length}`;
-    let count = 0;
-    for (const s of sessions) {
-      try {
-        await request("/api/terminals/adopt", {
-          method: "POST",
-          body: JSON.stringify({ session_id: s.session_id }),
-        });
-        count++;
-        btn.textContent = `接管中 ${count}/${sessions.length}`;
-      } catch (_e) {
-        // 单个失败不阻断其余
-      }
-    }
-    setMessage(`已接管 ${count} 个终端`);
-    // 刷新扫描列表
+const adoptAllSessionsButton = document.getElementById("adopt-all-sessions");
+if (adoptAllSessionsButton) {
+  adoptAllSessionsButton.onclick = async () => {
+    await handleAdoptAllSessions(adoptAllSessionsButton);
     doScanSessions();
-  } catch (error) {
-    setMessage(error.message, true);
-  } finally {
-    btn.disabled = false;
-    btn.textContent = "一键接管";
-  }
-};
+  };
+}
 
 closeAllButton.onclick = async () => {
   try {
@@ -3315,7 +6319,11 @@ if (uiSettingsForm) {
       const payload = Object.fromEntries(
         Object.keys(DEFAULT_UI_SETTINGS).map((key) => {
           const field = uiSettingsForm.elements.namedItem(key);
-          return [key, Number(field?.value ?? DEFAULT_UI_SETTINGS[key])];
+          const fallback = state.uiSettings?.[key] ?? DEFAULT_UI_SETTINGS[key];
+          if (typeof DEFAULT_UI_SETTINGS[key] === "string") {
+            return [key, String(field?.value ?? fallback)];
+          }
+          return [key, Number(field?.value ?? fallback)];
         })
       );
       _uiSaving = true;
@@ -3778,6 +6786,66 @@ async function loadScreenConfigs() {
 // 初始化屏幕配置管理 UI
 injectScreenConfigPanel();
 initTopbarMenus();
+bindTopbarNumberInputWheelGuard();
+bindTerminalContextMenu();
+bindIdeaDialog();
+
+// ── 视图切换 ──
+syncViewModeButtons();
+viewModeButtons.forEach((btn) => {
+  btn.addEventListener("click", () => {
+    setViewMode(btn.dataset.view);
+  });
+});
+
+// ── 摘要配置表单 ──
+const summaryForm = document.getElementById("summary-config-form");
+if (summaryForm) {
+  // 加载现有配置
+  fetch("/api/summary-config").then(r => r.json()).then((data) => {
+    summaryForm.api_base.value = data.apiBase || "";
+    summaryForm.api_key.value = "";
+    summaryForm.api_key.placeholder = data.hasApiKey ? "已保存 API Key，留空则不修改" : "输入 API Key";
+    summaryForm.model.value = data.model || "glm-4.6";
+    summaryForm.interval_seconds.value = data.intervalSeconds || 30;
+    summaryForm.active_interval.value = data.activeInterval || 10;
+    summaryForm.fallback_retry_interval.value = data.fallbackRetryInterval || 30;
+    // 缓存配置到 state，供 cooldown 倒计时计算使用
+    state.summaryConfig = data;
+  }).catch(() => {});
+  // 保存配置
+  summaryForm.addEventListener("submit", (e) => {
+    e.preventDefault();
+    fetch("/api/summary-config", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        api_base: summaryForm.api_base.value,
+        api_key: summaryForm.api_key.value,
+        model: summaryForm.model.value || "glm-4.6",
+        interval_seconds: parseFloat(summaryForm.interval_seconds.value) || 30,
+        active_interval: parseFloat(summaryForm.active_interval.value) || 10,
+        fallback_retry_interval: parseFloat(summaryForm.fallback_retry_interval.value) || 30,
+      }),
+    }).then(r => r.json()).then((data) => {
+      if (data.ok) {
+        const triggered = Number(data.triggered || 0);
+        setMessage(triggered > 0 ? `摘要配置已保存，已触发 ${triggered} 个终端重新总结` : "摘要配置已保存");
+        // 更新本地缓存的配置
+        state.summaryConfig.apiBase = summaryForm.api_base.value;
+        state.summaryConfig.model = summaryForm.model.value || "glm-4.6";
+        state.summaryConfig.intervalSeconds = parseFloat(summaryForm.interval_seconds.value) || 30;
+        state.summaryConfig.activeInterval = parseFloat(summaryForm.active_interval.value) || 10;
+        state.summaryConfig.fallbackRetryInterval = parseFloat(summaryForm.fallback_retry_interval.value) || 30;
+        if (summaryForm.api_key.value) {
+          summaryForm.api_key.value = "";
+          summaryForm.api_key.placeholder = "已保存 API Key，留空则不修改";
+          state.summaryConfig.hasApiKey = true;
+        }
+      }
+    }).catch((e) => setMessage("保存失败: " + e.message, true));
+  });
+}
 
 // 刷新屏幕列表按钮
 const refreshScreenBtn = document.getElementById("refresh-screen-list");
@@ -3816,10 +6884,36 @@ document.querySelectorAll("#topbar-filters .filter-tab").forEach((tab) => {
 // 标签筛选事件已在 syncTagFilterSelect 中通过事件委托绑定
 
 window.addEventListener("resize", () => {
+  if (state.viewMode === "brief") {
+    state._needFullRefresh = true;
+    scheduleRender();
+    return;
+  }
   if (state.layout.count > 0) {
     renderGridResizers();
   }
 });
+
+if ("ResizeObserver" in window && grid?.parentElement) {
+  let summaryResizeTimer = null;
+  const summaryResizeObserver = new ResizeObserver(() => {
+    if (state.viewMode !== "brief") {
+      return;
+    }
+    clearTimeout(summaryResizeTimer);
+    summaryResizeTimer = setTimeout(() => {
+      state._needFullRefresh = true;
+      scheduleRender();
+    }, 80);
+  });
+  summaryResizeObserver.observe(grid.parentElement);
+}
+
+if (grid) {
+  grid.addEventListener("pointermove", handleSummaryGridPointerMove);
+  grid.addEventListener("pointerleave", clearSummaryGapGlow);
+  grid.addEventListener("pointercancel", clearSummaryGapGlow);
+}
 
 // 记录 mousedown 起始目标，防止从面板内拖选文字到外部松开时误关闭面板
 let mousedownTarget = null;
@@ -3834,28 +6928,34 @@ document.addEventListener("click", (e) => {
       closeTopbarMenu(menu);
     }
   });
-  document.querySelectorAll(".wall-card-details-panel:not([hidden])").forEach((panel) => {
-    if (!panel.contains(e.target) && !panel.contains(mousedownTarget) && !e.target.closest(".wall-card-more-button")) {
-      panel.hidden = true;
-      const card = panel.closest(".wall-card");
-      card?.classList.remove("has-open-details");
-      const btn = card?.querySelector(".wall-card-more-button");
-      if (btn) btn.classList.remove("is-active");
-    }
-  });
+  if (isTerminalContextMenuOpen()
+    && !terminalContextMenu.contains(e.target)
+    && !terminalContextMenu.contains(mousedownTarget)) {
+    closeTerminalContextMenu();
+  }
 });
 
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
     closeAllTopbarMenus();
-    document.querySelectorAll(".wall-card-details-panel:not([hidden])").forEach((panel) => {
-      panel.hidden = true;
-      const card = panel.closest(".wall-card");
-      card?.classList.remove("has-open-details");
-      const btn = card?.querySelector(".wall-card-more-button");
-      if (btn) btn.classList.remove("is-active");
-    });
+    closeTerminalContextMenu();
+    return;
   }
+  if (e.key !== "Tab" || e.shiftKey || e.altKey || e.ctrlKey || e.metaKey) {
+    return;
+  }
+  if (e.defaultPrevented || e.isComposing) {
+    return;
+  }
+  if (hasOpenTopbarMenu() || isTerminalContextMenuOpen() || isKeyboardShortcutEditableTarget(e.target)) {
+    return;
+  }
+  e.preventDefault();
+  toggleViewMode();
+});
+
+window.addEventListener("resize", () => {
+  closeTerminalContextMenu();
 });
 
 /* --- 系统监控轮询 --- */
@@ -3876,6 +6976,7 @@ function applyStatLevel(el, level) {
 }
 
 let _systemStatsTimer = null;
+let _summaryRelativeTimeTimer = null;
 
 async function fetchSystemStats() {
   try {
@@ -3914,6 +7015,14 @@ function startSystemStatsPolling() {
   _systemStatsTimer = setInterval(fetchSystemStats, 5000);
 }
 
+function startSummaryRelativeTimeRefresh() {
+  if (_summaryRelativeTimeTimer !== null) {
+    return;
+  }
+  refreshBriefRelativeTimes();
+  _summaryRelativeTimeTimer = setInterval(refreshBriefRelativeTimes, 1000);
+}
+
 function setStatusbarMetric(el, percent, color) {
   if (!el) {
     return;
@@ -3935,11 +7044,10 @@ function setStatusbarLabel(el, text) {
   }
 }
 
-loadInitialState().then(() => {
-  connectWebSocket();
-  startSystemStatsPolling();
-}).catch((error) => {
+loadInitialState().catch((error) => {
   setMessage(error.message, true);
+}).finally(() => {
   connectWebSocket();
   startSystemStatsPolling();
+  startSummaryRelativeTimeRefresh();
 });

@@ -28,6 +28,50 @@ def test_analyze_screen_text_matches_codex_working_indicator() -> None:
     assert "Working" in summary
 
 
+def test_analyze_screen_text_maps_codex_ready_statusline_to_done() -> None:
+    config = _load_config()
+    text = (
+        "gpt-5.5 xhigh · ~/githubProject/muti-iterm2-manager · Context 27% used · "
+        "0.125.0 · Fast on · 380K window · Ready · "
+        "019dc9b8-a26d-7ac0-9730-f17c57727b91"
+    )
+
+    status, markers, summary = analyze_screen_text(text, 0.0, config)
+
+    assert status == TerminalStatus.done
+    assert markers == ["codex-statusline-ready"]
+    assert "Ready" in summary
+
+
+def test_analyze_screen_text_maps_codex_active_statuslines_to_running() -> None:
+    config = _load_config()
+
+    for raw_status in ("Starting", "Working"):
+        text = (
+            "gpt-5.5 xhigh · ~/githubProject/muti-iterm2-manager · Context 27% used · "
+            f"0.125.0 · Fast on · 380K window · {raw_status} · "
+            "019dc9b8-a26d-7ac0-9730-f17c57727b91"
+        )
+
+        status, markers, _ = analyze_screen_text(text, 0.0, config)
+
+        assert status == TerminalStatus.running
+        assert markers == [f"codex-statusline-{raw_status.casefold()}"]
+
+
+def test_analyze_screen_text_prefers_latest_codex_statusline() -> None:
+    config = _load_config()
+    text = "\n".join([
+        "gpt-5.5 xhigh · ~/repo · Context 27% used · 0.125.0 · Fast on · 380K window · Working · 019dc9b8-a26d-7ac0-9730-f17c57727b91",
+        "gpt-5.5 xhigh · ~/repo · Context 27% used · 0.125.0 · Fast on · 380K window · Ready · 019dc9b8-a26d-7ac0-9730-f17c57727b91",
+    ])
+
+    status, markers, _ = analyze_screen_text(text, 0.0, config)
+
+    assert status == TerminalStatus.done
+    assert markers == ["codex-statusline-ready"]
+
+
 def test_analyze_screen_text_does_not_tag_generic_working_text_as_codex() -> None:
     config = _load_config()
 

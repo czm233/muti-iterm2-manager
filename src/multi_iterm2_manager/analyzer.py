@@ -6,6 +6,7 @@ from pathlib import Path
 
 import yaml
 
+from multi_iterm2_manager.codex_statusline import find_codex_statusline
 from multi_iterm2_manager.models import TerminalStatus
 
 
@@ -152,6 +153,11 @@ def analyze_screen_text(
     normalized = text.strip()
     if not normalized:
         return TerminalStatus.idle, [], "暂无输出"
+
+    codex_statusline = find_codex_statusline(normalized)
+    if codex_statusline is not None:
+        marker = f"codex-statusline-{codex_statusline.raw_status.casefold()}"
+        return codex_statusline.status, [marker], summarize_text(normalized)
 
     for rule in config.rules:
         matched = False

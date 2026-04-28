@@ -113,6 +113,8 @@ class TerminalRuntimeInfo:
     command_line: str | None = None
     job_pid: int | None = None
     process_title: str | None = None
+    terminal_title: str | None = None
+    session_name: str | None = None
     tty: str | None = None
     session_pid: int | None = None
 
@@ -166,6 +168,7 @@ class TerminalHandle:
     adopted_muted: bool = False  # 接管时从 iTerm2 读取的静默状态
     adopted_hidden: bool = False  # 接管时从 iTerm2 读取的隐藏状态
     adopted_tags: list[str] = field(default_factory=list)  # 接管时从 iTerm2 读取的标签
+    adopted_primary: bool = False  # 接管时从 iTerm2 读取的最重要任务状态
 
 
 @dataclass
@@ -188,9 +191,18 @@ class TerminalRecord:
     hidden: bool = False
     muted: bool = False  # 静默状态，不进入通知队列
     tags: list[str] = field(default_factory=list)  # 终端标签列表
+    is_primary: bool = False  # 当前唯一最重要任务标记
     program: TerminalProgramInfo = field(default_factory=TerminalProgramInfo)
     content_hash: str = ""
     content_stable_since: float = 0.0
+    ai_summary: str = ""
+    ai_summary_at: float = 0.0
+    ai_summary_status: str = "none"  # "none" | "summarizing" | "done" | "fallback"
+    ai_summary_reason: str = ""  # 状态原因："" | "no_api" | "cooldown" | "idle" | "content_changing" | "api_error" | "empty_response"
+    ai_summary_error_detail: str = ""
+    ai_summary_first: bool = True  # 首次总结标记（启动后立即执行）
+    last_interaction_at: float = 0.0  # 首次接管只建基线；后续 LLM 屏幕内容变化才更新
+    interaction_content_hash: str = ""  # 过滤状态行后的 LLM 内容指纹，不对外展示
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -214,7 +226,14 @@ class TerminalRecord:
             "hidden": self.hidden,
             "muted": self.muted,
             "tags": self.tags,
+            "isPrimary": self.is_primary,
             "program": self.program.to_dict(),
+            "aiSummary": self.ai_summary,
+            "aiSummaryAt": self.ai_summary_at,
+            "aiSummaryStatus": self.ai_summary_status,
+            "aiSummaryReason": self.ai_summary_reason,
+            "aiSummaryErrorDetail": self.ai_summary_error_detail,
+            "lastInteractionAt": self.last_interaction_at,
         }
 
 
@@ -223,9 +242,17 @@ class CreateTerminalParams:
     name: str
     command: str | None = None
     profile: str | None = None
+    cwd: str | None = None
     frame: TerminalFrame | None = None
     browser_x: float | None = None
     browser_y: float | None = None
+
+
+@dataclass
+class SplitTerminalParams:
+    vertical: bool
+    cwd: str | None = None
+    profile: str | None = None
 
 
 @dataclass

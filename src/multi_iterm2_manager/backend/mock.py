@@ -6,7 +6,7 @@ from datetime import datetime
 from itertools import count
 
 from multi_iterm2_manager.display import build_maximized_frame
-from multi_iterm2_manager.models import CreateTerminalParams, TerminalFrame, TerminalHandle, TerminalRuntimeInfo
+from multi_iterm2_manager.models import CreateTerminalParams, SplitTerminalParams, TerminalFrame, TerminalHandle, TerminalRuntimeInfo
 
 
 class MockTerminalBackend:
@@ -34,6 +34,9 @@ class MockTerminalBackend:
     async def create_terminal(self, params: CreateTerminalParams) -> TerminalHandle:
         index = next(self._counter)
         session_id = f"mock-session-{index}"
+        while session_id in self._items:
+            index = next(self._counter)
+            session_id = f"mock-session-{index}"
         handle = TerminalHandle(
             window_id=f"mock-window-{index}",
             session_id=session_id,
@@ -45,8 +48,32 @@ class MockTerminalBackend:
             "command": params.command or "",
             "text": f"[{datetime.now().strftime('%H:%M:%S')}] 已创建模拟终端 {params.name}\n",
             "frame": frame,
+            "cwd": params.cwd,
         }
         return handle
+
+    async def split_terminal(self, handle: TerminalHandle, params: SplitTerminalParams) -> TerminalHandle:
+        index = next(self._counter)
+        session_id = f"mock-session-{index}"
+        while session_id in self._items:
+            index = next(self._counter)
+            session_id = f"mock-session-{index}"
+        source_item = self._items.get(handle.session_id, {})
+        source_frame = source_item.get("frame")
+        frame = source_frame if isinstance(source_frame, TerminalFrame) else build_maximized_frame()
+        new_handle = TerminalHandle(
+            window_id=handle.window_id,
+            session_id=session_id,
+            tab_id=handle.tab_id or f"mock-tab-{index}",
+        )
+        self._items[session_id] = {
+            "name": f"split-{index}",
+            "command": "",
+            "text": f"[{datetime.now().strftime('%H:%M:%S')}] 已创建模拟 split pane {session_id}\n",
+            "frame": frame,
+            "cwd": params.cwd or source_item.get("cwd"),
+        }
+        return new_handle
 
     async def get_screen_render(self, handle: TerminalHandle) -> tuple[str, str]:
         item = self._items[handle.session_id]
@@ -99,8 +126,11 @@ class MockTerminalBackend:
     async def detach(self, handle: TerminalHandle) -> None:
         self._items.pop(handle.session_id, None)
 
-    async def scan_unmanaged_sessions(self) -> list[dict]:
+    async def scan_unmanaged_sessions(self, known_session_ids: set[str] | None = None) -> list[dict]:
         return []
+
+    async def list_session_ids(self) -> set[str]:
+        return set(self._items.keys())
 
     async def adopt(self, session_id: str, name: str | None = None) -> TerminalHandle:
         index = next(self._counter)
@@ -129,7 +159,9 @@ class MockTerminalBackend:
         return frame if isinstance(frame, TerminalFrame) else None
 
     async def get_cwd(self, handle: TerminalHandle) -> str | None:
-        return None
+        item = self._items.get(handle.session_id, {})
+        cwd = item.get("cwd")
+        return cwd if isinstance(cwd, str) and cwd else None
 
     async def get_runtime_info(self, handle: TerminalHandle) -> TerminalRuntimeInfo:
         item = self._items.get(handle.session_id, {})
@@ -152,6 +184,9 @@ class MockTerminalBackend:
         pass
 
     async def set_muted(self, handle: TerminalHandle, muted: bool) -> None:
+        pass
+
+    async def set_primary(self, handle: TerminalHandle, primary: bool) -> None:
         pass
 
     async def unmark_all_managed(self) -> int:

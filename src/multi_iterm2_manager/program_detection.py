@@ -4,6 +4,7 @@ import os
 import re
 from typing import Iterable
 
+from multi_iterm2_manager.codex_statusline import find_codex_statusline
 from multi_iterm2_manager.models import TerminalProgramInfo, TerminalRuntimeInfo
 
 try:
@@ -63,9 +64,19 @@ _CODEX_MODEL_SCREEN_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _CODEX_CONTEXT_SCREEN_PATTERN = re.compile(
-    r"\bContext\s+\d+%\s+left\b",
+    r"\bContext\s+\d+%\s+(?:used|left)\b",
     re.IGNORECASE,
 )
+
+
+def _is_process_alive(pid: int | None) -> bool:
+    """检查给定 PID 的进程是否仍在运行。保守策略：无法判断时返回 True。"""
+    if pid is None or psutil is None:
+        return True
+    try:
+        return psutil.pid_exists(pid) and psutil.Process(pid).is_running()
+    except Exception:
+        return True
 
 
 def detect_terminal_program(runtime_info: TerminalRuntimeInfo, screen_text: str) -> TerminalProgramInfo:
@@ -75,7 +86,8 @@ def detect_terminal_program(runtime_info: TerminalRuntimeInfo, screen_text: str)
         pid=runtime_info.job_pid or runtime_info.session_pid,
         command_line=runtime_info.command_line,
     )
-    if direct_match is not None:
+    # 直接匹配成功后，验证对应进程是否仍存活
+    if direct_match is not None and _is_process_alive(direct_match.pid):
         return direct_match
 
     process_tree_match = _detect_from_process_tree(runtime_info.job_pid or runtime_info.session_pid)
@@ -88,7 +100,9 @@ def detect_terminal_program(runtime_info: TerminalRuntimeInfo, screen_text: str)
             screen_match.pid = runtime_info.job_pid or runtime_info.session_pid
         if not screen_match.command_line:
             screen_match.command_line = runtime_info.command_line
-        return screen_match
+        # 屏幕文本匹配成功后，验证对应进程是否仍存活
+        if _is_process_alive(screen_match.pid):
+            return screen_match
 
     if _looks_like_shell(runtime_info):
         return TerminalProgramInfo(
@@ -206,6 +220,9 @@ def _detect_from_screen(screen_text: str) -> TerminalProgramInfo | None:
 
 
 def _looks_like_codex_screen(text: str) -> bool:
+    if find_codex_statusline(text) is not None:
+        return True
+
     if any(pattern.search(text) for pattern in _CODEX_SCREEN_PATTERNS):
         return True
 
@@ -223,6 +240,8 @@ def _looks_like_shell(runtime_info: TerminalRuntimeInfo) -> bool:
     candidates = [
         runtime_info.job_name,
         runtime_info.process_title,
+        runtime_info.terminal_title,
+        runtime_info.session_name,
     ]
     if runtime_info.command_line:
         candidates.append(runtime_info.command_line.split()[0])
@@ -230,10 +249,16 @@ def _looks_like_shell(runtime_info: TerminalRuntimeInfo) -> bool:
     for candidate in candidates:
         if not candidate:
             continue
-        executable = os.path.basename(candidate.strip()).lower()
+        executable = _normalize_shell_candidate(candidate)
         if executable in _SHELL_NAMES:
             return True
     return False
+
+
+def _normalize_shell_candidate(candidate: str) -> str:
+    executable = os.path.basename(candidate.strip()).lower()
+    # iTerm2/macOS often exposes login shells as "-zsh" in titles/process names.
+    return executable.lstrip("-")
 
 
 def _safe_process_name(proc) -> str | None:

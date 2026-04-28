@@ -7,6 +7,8 @@ from uuid import uuid4
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
+from typing import Literal
+
 from pydantic import BaseModel, Field
 from starlette.types import ASGIApp, Receive, Scope, Send
 
@@ -18,8 +20,11 @@ from multi_iterm2_manager.config import (
     get_default_layout_for_screen,
     get_screen_layout,
     get_screen_layouts,
+    is_masked_secret,
     load_settings,
+    mask_secret,
     save_screen_layout,
+    save_ui_settings,
     set_default_layout,
 )
 from multi_iterm2_manager.display import get_current_screen_config
@@ -207,12 +212,34 @@ class AdoptPayload(BaseModel):
     name: str | None = Field(default=None, max_length=60)
 
 
+class SplitTerminalPayload(BaseModel):
+    direction: Literal["vertical", "horizontal"]
+
+
+class HookStatusPayload(BaseModel):
+    iterm_session_id: str  # 完整的 ITERM_SESSION_ID，如 w2t0p0:GUID
+    status: Literal["running", "done"]
+
+
+class SummaryConfigPayload(BaseModel):
+    api_base: str = ""
+    api_key: str = ""
+    model: str = "glm-4.6"
+    interval_seconds: float = 30.0
+    active_interval: float = 10.0
+    fallback_retry_interval: float = 30.0
+
+
 class SetHiddenPayload(BaseModel):
     hidden: bool
 
 
 class SetMutedPayload(BaseModel):
     muted: bool
+
+
+class SetPrimaryPayload(BaseModel):
+    primary: bool
 
 
 class SetTagsPayload(BaseModel):
@@ -236,6 +263,17 @@ class UiSettingsPayload(BaseModel):
     statusbar_meter_height_px: int = Field(default=10, ge=6, le=14)
     filter_tab_slide_duration_ms: int = Field(default=420, ge=50, le=5000)
     terminal_font_size_px: int = Field(default=10, ge=6, le=24)
+    summary_grid_gap_px: int = Field(default=10, ge=0, le=48)
+    summary_hex_side_px: int = Field(default=96, ge=42, le=180)
+    summary_card_width_px: int = Field(default=320, ge=220, le=640)
+    summary_card_min_height_px: int = Field(default=140, ge=96, le=360)
+    summary_card_padding_px: int = Field(default=10, ge=0, le=48)
+    summary_card_border_radius_px: int = Field(default=14, ge=0, le=48)
+    summary_gap_glow_color: str = Field(default="#ff70db", pattern=r"^#[0-9a-fA-F]{6}$")
+    summary_gap_glow_radius_px: int = Field(default=285, ge=80, le=640)
+    summary_gap_glow_strength: float = Field(default=0.88, ge=0.0, le=1.5)
+    summary_gap_glow_softness_px: int = Field(default=14, ge=0, le=40)
+    summary_gap_glow_line_width_px: int = Field(default=0, ge=0, le=24)
 
 
 @app.on_event("startup")
@@ -423,6 +461,19 @@ async def set_terminal_muted(terminal_id: str, payload: SetMutedPayload) -> dict
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+@app.post("/api/terminals/{terminal_id}/primary")
+async def set_terminal_primary(terminal_id: str, payload: SetPrimaryPayload) -> dict:
+    """设置当前唯一的最重要任务"""
+    try:
+        return {"item": await service.set_primary(terminal_id, payload.primary), "layout": service.monitor_layout()}
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @app.get("/api/tags")
 async def list_all_tags() -> dict:
     """获取所有终端的标签列表（去重排序）"""
@@ -437,6 +488,18 @@ async def focus_terminal(terminal_id: str, payload: FocusTerminalPayload | None 
         return {"item": await service.focus_terminal(terminal_id, browser_x, browser_y), "layout": service.monitor_layout()}
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/terminals/{terminal_id}/split")
+async def split_terminal(terminal_id: str, payload: SplitTerminalPayload) -> dict:
+    try:
+        return {"item": await service.split_terminal(terminal_id, payload.direction), "layout": service.monitor_layout()}
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -483,6 +546,24 @@ async def adopt_terminal(payload: AdoptPayload) -> dict:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+@app.post("/api/terminals/adopt-all")
+async def adopt_all_terminals() -> dict:
+    try:
+        return await service.adopt_all_terminals()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/terminals/hook-status")
+async def hook_status(payload: HookStatusPayload) -> dict:
+    """接收 Claude Code hook 通知，更新终端状态"""
+    terminal_id = await service.update_hook_status(payload.iterm_session_id, payload.status)
+    if terminal_id is None:
+        # 静默返回，hook 环境可能不在管理的终端中
+        return {"matched": False}
+    return {"matched": True, "terminalId": terminal_id}
+
+
 @app.post("/api/terminals/{terminal_id}/refresh")
 async def refresh_terminal(terminal_id: str) -> dict:
     try:
@@ -491,6 +572,89 @@ async def refresh_terminal(terminal_id: str) -> dict:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+# ── 摘要配置 API ──
+
+@app.get("/api/summary-config")
+async def get_summary_config() -> dict:
+    ui = service.ui_settings
+    return {
+        "apiBase": ui.summary_api_base,
+        "apiKey": mask_secret(ui.summary_api_key),
+        "hasApiKey": bool(ui.summary_api_key),
+        "model": ui.summary_model,
+        "intervalSeconds": ui.summary_interval_seconds,
+        "activeInterval": ui.summary_active_interval,
+        "fallbackRetryInterval": ui.summary_fallback_retry_interval,
+    }
+
+
+@app.put("/api/summary-config")
+async def put_summary_config(payload: SummaryConfigPayload) -> dict:
+    from dataclasses import replace
+    s = service.settings
+    # 更新内存中的配置
+    s.summary_api_base = payload.api_base
+    if payload.api_key and not is_masked_secret(payload.api_key):
+        s.summary_api_key = payload.api_key
+    s.summary_model = payload.model
+    s.summary_interval_seconds = payload.interval_seconds
+    s.summary_active_interval = payload.active_interval
+    s.summary_fallback_retry_interval = payload.fallback_retry_interval
+    # 同步更新 ui_settings 并持久化到文件
+    service.ui_settings = replace(
+        service.ui_settings,
+        summary_api_base=s.summary_api_base,
+        summary_api_key=s.summary_api_key,
+        summary_model=s.summary_model,
+        summary_interval_seconds=s.summary_interval_seconds,
+        summary_active_interval=s.summary_active_interval,
+        summary_fallback_retry_interval=s.summary_fallback_retry_interval,
+    )
+    service.settings.ui_settings = service.ui_settings
+    save_ui_settings(service.settings.ui_settings_file, service.ui_settings)
+    # 重建 summarizer
+    if s.summary_api_base and s.summary_api_key:
+        from multi_iterm2_manager.summarizer import SummaryConfig, TerminalSummarizer
+        if service._summarizer:
+            await service._summarizer.close()
+        service._summarizer = TerminalSummarizer(SummaryConfig(
+            api_base=s.summary_api_base,
+            api_key=s.summary_api_key,
+            model=s.summary_model,
+            interval_seconds=s.summary_interval_seconds,
+        ))
+        if not service._summary_task or service._summary_task.done():
+            service._summary_task = asyncio.create_task(service._summary_loop())
+    triggered = service.trigger_all_summaries()
+    return {"ok": True, "triggered": triggered}
+
+
+@app.post("/api/terminals/{terminal_id}/summarize")
+async def trigger_summarize(terminal_id: str) -> dict:
+    import time
+    if terminal_id not in service.records:
+        raise HTTPException(status_code=404, detail="终端不存在")
+    record = service.records[terminal_id]
+    if not record.screen_text.strip():
+        return {"summary": "暂无输出"}
+    if service._summarizer:
+        result = await service._summarizer.summarize(terminal_id, record.screen_text)
+        record.ai_summary = result.text
+        record.ai_summary_at = time.time()
+        record.ai_summary_status = "done" if result.used_ai else "fallback"
+        record.ai_summary_reason = "" if result.used_ai else result.reason
+        record.ai_summary_error_detail = "" if result.used_ai else result.error_detail
+        return {"summary": result.text}
+    from multi_iterm2_manager.summarizer import TerminalSummarizer
+    fallback = TerminalSummarizer.fallback_text(record.screen_text)
+    record.ai_summary = fallback
+    record.ai_summary_at = time.time()
+    record.ai_summary_status = "fallback"
+    record.ai_summary_reason = "no_api"
+    record.ai_summary_error_detail = "未配置 API"
+    return {"summary": fallback}
 
 
 @app.post("/api/terminals/{terminal_id}/send-text")

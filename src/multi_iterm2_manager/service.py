@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import os
 import re
+import shlex
 import time
 from contextlib import suppress
 from datetime import datetime
@@ -26,7 +28,11 @@ from multi_iterm2_manager.display import (
 )
 from multi_iterm2_manager.models import CreateTerminalParams, GridLayoutParams, TerminalFrame, TerminalRecord, TerminalStatus, new_terminal_id
 from multi_iterm2_manager.app_monitor import AppMonitorService
+from multi_iterm2_manager.codex_statusline import parse_codex_statusline
 from multi_iterm2_manager.program_detection import detect_terminal_program
+from multi_iterm2_manager.summarizer import SUMMARY_MAX_CONCURRENCY, SummaryConfig, TerminalSummarizer
+
+logger = logging.getLogger(__name__)
 
 
 class DashboardService:
@@ -35,7 +41,7 @@ class DashboardService:
         self.records: dict[str, TerminalRecord] = {}
         self.monitor_tasks: dict[str, asyncio.Task[None]] = {}
         self._subscribers: set[asyncio.Queue[dict]] = set()
-        self._lock = asyncio.Lock()
+        self._lock: asyncio.Lock | None = None
         self._last_snapshot_time: float = 0.0
         self.backend: Any = self._build_backend()
         self._watchdog_task: asyncio.Task[None] | None = None
@@ -53,6 +59,27 @@ class DashboardService:
             pass
         # App 监控服务
         self.app_monitor = AppMonitorService(broadcast_fn=self._broadcast)
+        # hook done 延迟计时器（防抖）
+        self._hook_done_timers: dict[str, asyncio.Task[None]] = {}
+        # 摘要引擎
+        self._summarizer: TerminalSummarizer | None = None
+        if settings.summary_api_base and settings.summary_api_key:
+            self._summarizer = TerminalSummarizer(SummaryConfig(
+                api_base=settings.summary_api_base,
+                api_key=settings.summary_api_key,
+                model=settings.summary_model,
+                interval_seconds=settings.summary_interval_seconds,
+            ))
+        self._summary_queue: asyncio.Queue[str] | None = None
+        self._summary_task: asyncio.Task[None] | None = None
+        self._summary_trigger_task: asyncio.Task[None] | None = None
+        # 上次总结时的终端状态（用于检测状态变更），不需要序列化
+        self._last_summary_status: dict[str, str] = {}
+        # 新建终端的初始内容基线：内容未变化前不做首次摘要
+        self._summary_skipped_initial_hash: dict[str, str] = {}
+        # 新建/拆分终端默认暂停自动摘要，避免 shell prompt 初始重绘触发 LLM
+        self._summary_suspended_terminal_ids: set[str] = set()
+        self._missing_session_scan_counts: dict[str, int] = {}
 
     async def start(self) -> None:
         await self.backend.start()
@@ -95,10 +122,33 @@ class DashboardService:
                 print(f"[service] 焦点监控启动失败（不影响核心功能）: {exc}", flush=True)
         # 启动 App 监控服务
         await self.app_monitor.start()
+        # 启动摘要循环（即使 summarizer 未配置也需要运行，以便设置 reason="no_api"）
+        self._summary_work_queue()
+        self._summary_task = asyncio.create_task(self._summary_loop())
 
     async def stop(self) -> None:
         # 停止 App 监控服务
         await self.app_monitor.stop()
+        # 取消所有 hook done 延迟计时器
+        for timer_task in self._hook_done_timers.values():
+            timer_task.cancel()
+        for timer_task in self._hook_done_timers.values():
+            with suppress(asyncio.CancelledError):
+                await timer_task
+        self._hook_done_timers.clear()
+        # 取消摘要任务
+        if self._summary_task:
+            self._summary_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._summary_task
+            self._summary_task = None
+        if self._summary_trigger_task:
+            self._summary_trigger_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._summary_trigger_task
+            self._summary_trigger_task = None
+        if self._summarizer:
+            await self._summarizer.close()
         if self._watchdog_task is not None:
             self._watchdog_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -184,6 +234,39 @@ class DashboardService:
 
     def static_dir(self) -> Path:
         return Path(__file__).with_name("static")
+
+    def _records_lock(self) -> asyncio.Lock:
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        return self._lock
+
+    def _summary_work_queue(self) -> asyncio.Queue[str]:
+        if self._summary_queue is None:
+            self._summary_queue = asyncio.Queue()
+        return self._summary_queue
+
+    def trigger_all_summaries(self) -> int:
+        """后台强制重跑所有可摘要终端，统一并发上限。"""
+        terminal_ids = [
+            terminal_id
+            for terminal_id, record in self.records.items()
+            if record.status != TerminalStatus.closed and record.screen_text.strip()
+        ]
+        if not terminal_ids:
+            return 0
+        if self._summary_trigger_task and not self._summary_trigger_task.done():
+            self._summary_trigger_task.cancel()
+        self._summary_trigger_task = asyncio.create_task(self._run_forced_summaries(terminal_ids))
+        return len(terminal_ids)
+
+    async def _run_forced_summaries(self, terminal_ids: list[str]) -> None:
+        semaphore = asyncio.Semaphore(SUMMARY_MAX_CONCURRENCY)
+
+        async def run_one(terminal_id: str) -> None:
+            async with semaphore:
+                await self._generate_summary(terminal_id, force=True)
+
+        await asyncio.gather(*(run_one(terminal_id) for terminal_id in terminal_ids))
 
     async def subscribe(self) -> asyncio.Queue[dict]:
         queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=100)
@@ -428,11 +511,71 @@ class DashboardService:
             await self.backend.set_terminal_id(handle, record.id)
         except Exception:
             pass
-        async with self._lock:
+        async with self._records_lock():
             self.records[record.id] = record
         # 对齐窗口大小到其他可见终端
         await self._align_frame_to_siblings(record)
-        await self.refresh_terminal(record.id)
+        await self.refresh_terminal(record.id, queue_summary=False)
+        self._skip_initial_summary_until_content_changes(record)
+        self._start_monitor(record.id)
+        await self.enter_monitor_mode()
+        await self._broadcast(self.record_event(record.id))
+        return record.to_dict()
+
+    async def split_terminal(self, terminal_id: str, direction: str) -> dict:
+        source_record = self._get_record(terminal_id)
+        if source_record.status == TerminalStatus.closed:
+            raise ValueError("终端已关闭，无法拆分")
+        if direction not in {"vertical", "horizontal"}:
+            raise ValueError(f"不支持的拆分方向: {direction}")
+
+        source_cwd = source_record.cwd or await self.backend.get_cwd(source_record.handle)
+        if source_cwd is not None:
+            source_record.cwd = source_cwd
+
+        final_name = self._next_default_name()
+        handle = await self.backend.create_terminal(
+            CreateTerminalParams(
+                name=final_name,
+                profile=source_record.profile,
+                cwd=source_cwd,
+            ),
+        )
+        frame = await self.backend.get_frame(handle)
+        record = TerminalRecord(
+            id=new_terminal_id(),
+            name=final_name,
+            handle=handle,
+            profile=source_record.profile,
+            frame=frame,
+        )
+        try:
+            await self.backend.set_terminal_id(handle, record.id)
+        except Exception:
+            pass
+        async with self._records_lock():
+            self.records[record.id] = record
+
+        last_refresh_error: Exception | None = None
+        for attempt in range(3):
+            try:
+                await self.refresh_terminal(record.id, queue_summary=False)
+                last_refresh_error = None
+                break
+            except Exception as exc:
+                last_refresh_error = exc
+                await asyncio.sleep(0.12 * (attempt + 1))
+        if last_refresh_error is not None:
+            raise last_refresh_error
+
+        # create_terminal 未必能在所有终端配置下直接继承 cwd，必要时补发一次 cd 兜底。
+        if source_cwd and record.cwd != source_cwd:
+            await self.backend.send_text(handle, f"cd {shlex.quote(source_cwd)}\n")
+            await asyncio.sleep(0.05)
+            await self.refresh_terminal(record.id, queue_summary=False)
+
+        self._skip_initial_summary_until_content_changes(record)
+
         self._start_monitor(record.id)
         await self.enter_monitor_mode()
         await self._broadcast(self.record_event(record.id))
@@ -475,10 +618,36 @@ class DashboardService:
                         await self.backend.set_frame(record.handle, new_frame)
                         record.frame = new_frame
 
+    @staticmethod
+    def _frames_match(left: TerminalFrame, right: TerminalFrame, *, tolerance: float = 1.0) -> bool:
+        return (
+            abs(left.x - right.x) <= tolerance
+            and abs(left.y - right.y) <= tolerance
+            and abs(left.width - right.width) <= tolerance
+            and abs(left.height - right.height) <= tolerance
+        )
+
+    def _build_screen_target_frame(
+        self,
+        screen_name: str | None,
+        bounds,
+        current_frame: TerminalFrame,
+    ) -> tuple[TerminalFrame, bool]:
+        default_frame = self.get_default_frame(screen_name)
+        if default_frame is not None:
+            return TerminalFrame(**default_frame), True
+        return TerminalFrame(
+            x=round(bounds.x + 18.0, 2),
+            y=round(bounds.y + 18.0, 2),
+            width=current_frame.width,
+            height=current_frame.height,
+        ), False
+
     async def focus_terminal(self, terminal_id: str, browser_x: float | None = None, browser_y: float | None = None) -> dict:
         record = self._get_record(terminal_id)
         try:
             await self.backend.focus(record.handle)
+            self._resume_auto_summary_after_user_activation(record)
             screen_index, screen_name = self._resolve_preferred_screen(
                 browser_x=browser_x,
                 browser_y=browser_y,
@@ -489,25 +658,21 @@ class DashboardService:
                 if bounds is not None:
                     current_frame = await self.backend.get_frame(record.handle)
                     if current_frame is not None:
-                        # 检查窗口是否已经在目标屏幕范围内，避免覆盖用户手动移动的位置
+                        target_frame, has_default_frame = self._build_screen_target_frame(
+                            screen_name,
+                            bounds,
+                            current_frame,
+                        )
                         in_screen = (bounds.x <= current_frame.x < bounds.x + bounds.width
                                      and bounds.y <= current_frame.y < bounds.y + bounds.height)
-                        if not in_screen:
-                            # 优先使用用户设置的默认位置（按屏幕名称查找）
-                            default_frame = self.get_default_frame(screen_name)
-                            if default_frame is not None:
-                                new_frame = TerminalFrame(**default_frame)
-                            else:
-                                new_frame = TerminalFrame(
-                                    x=round(bounds.x + 18.0, 2),
-                                    y=round(bounds.y + 18.0, 2),
-                                    width=current_frame.width,
-                                    height=current_frame.height,
-                                )
-                            await self.backend.set_frame(record.handle, new_frame)
-                            record.frame = new_frame
+                        should_move = not in_screen or (
+                            has_default_frame and not self._frames_match(current_frame, target_frame)
+                        )
+                        if should_move:
+                            await self.backend.set_frame(record.handle, target_frame)
+                            record.frame = target_frame
                     # 让其他可见终端也跟随移动到同一屏幕
-                    await self._move_siblings_to_screen(record, bounds)
+                    await self._move_siblings_to_screen(record, screen_name, bounds)
         except Exception as exc:
             if self._is_missing_terminal_error(exc):
                 return await self._mark_terminal_closed(record, reason="真实窗口已被手动关闭")
@@ -583,6 +748,40 @@ class DashboardService:
         await self._broadcast(self.record_event(terminal_id))
         return record.to_dict()
 
+    async def set_primary(self, terminal_id: str, primary: bool) -> dict:
+        """设置当前唯一的最重要任务。"""
+        record = self._get_record(terminal_id)
+        if record.status == TerminalStatus.closed:
+            raise ValueError("终端已关闭，无法设置最重要任务")
+
+        if primary:
+            changed = await self._set_primary_terminal(record.id)
+        else:
+            if not record.is_primary:
+                return record.to_dict()
+            changed = await self._set_primary_terminal(None)
+
+        if changed:
+            await self._broadcast(self.snapshot_event())
+        return self._get_record(terminal_id).to_dict()
+
+    async def _set_primary_terminal(self, target_id: str | None) -> list[str]:
+        changed_ids: list[str] = []
+        now = self._now()
+        for current in self.records.values():
+            next_is_primary = current.id == target_id
+            if current.is_primary == next_is_primary:
+                continue
+            current.is_primary = next_is_primary
+            current.updated_at = now
+            changed_ids.append(current.id)
+            try:
+                await self.backend.set_primary(current.handle, next_is_primary)
+            except Exception:
+                # 持久化失败不阻塞主流程；内存态仍以后端广播为准
+                pass
+        return changed_ids
+
     def list_all_tags(self) -> list[str]:
         """遍历所有非关闭终端，收集去重排序的标签列表"""
         all_tags: set[str] = set()
@@ -591,8 +790,8 @@ class DashboardService:
                 all_tags.update(record.tags)
         return sorted(all_tags)
 
-    async def _move_siblings_to_screen(self, source_record: TerminalRecord, bounds) -> None:
-        """将其他可见终端移动到与源终端相同的屏幕"""
+    async def _move_siblings_to_screen(self, source_record: TerminalRecord, screen_name: str | None, bounds) -> None:
+        """将其他可见终端移动到与源终端相同的屏幕，并优先对齐到默认模板。"""
         for sibling in self.records.values():
             if sibling.id == source_record.id:
                 continue
@@ -601,18 +800,19 @@ class DashboardService:
             try:
                 current_frame = await self.backend.get_frame(sibling.handle)
                 if current_frame is not None:
-                    # 检查是否已经在目标屏幕内
+                    target_frame, has_default_frame = self._build_screen_target_frame(
+                        screen_name,
+                        bounds,
+                        current_frame,
+                    )
                     in_screen = (bounds.x <= current_frame.x < bounds.x + bounds.width
                                  and bounds.y <= current_frame.y < bounds.y + bounds.height)
-                    if not in_screen:
-                        new_frame = TerminalFrame(
-                            x=round(bounds.x + 18.0, 2),
-                            y=round(bounds.y + 18.0, 2),
-                            width=current_frame.width,
-                            height=current_frame.height,
-                        )
-                        await self.backend.set_frame(sibling.handle, new_frame)
-                        sibling.frame = new_frame
+                    should_move = not in_screen or (
+                        has_default_frame and not self._frames_match(current_frame, target_frame)
+                    )
+                    if should_move:
+                        await self.backend.set_frame(sibling.handle, target_frame)
+                        sibling.frame = target_frame
             except Exception:
                 pass
 
@@ -676,11 +876,16 @@ class DashboardService:
         record = self._get_record(terminal_id)
         if record.status == TerminalStatus.closed:
             raise ValueError("终端已关闭，无法解绑")
+        if record.is_primary:
+            try:
+                await self.backend.set_primary(record.handle, False)
+            except Exception:
+                pass
         await self.backend.detach(record.handle)
         task = self.monitor_tasks.pop(record.id, None)
         if task is not None:
             task.cancel()
-        async with self._lock:
+        async with self._records_lock():
             del self.records[record.id]
         await self._broadcast(self.snapshot_event())
         return {"detached": True, "terminalId": terminal_id}
@@ -690,6 +895,35 @@ class DashboardService:
         # 孤儿托管 = 有 mitm_managed 标记，但服务重启后 records 已清空的旧终端
         known_ids = {r.handle.session_id for r in self.records.values()}
         return await self.backend.scan_unmanaged_sessions(known_session_ids=known_ids)
+
+    async def adopt_all_terminals(self) -> dict:
+        sessions = await self.scan_sessions()
+        adopted: list[dict] = []
+        errors: list[dict] = []
+
+        for session in sessions:
+            session_id = session.get("session_id")
+            if not session_id:
+                errors.append({"sessionId": "", "name": session.get("name", ""), "error": "缺少 session_id"})
+                continue
+            try:
+                adopted.append(await self.adopt_terminal(session_id))
+            except Exception as exc:
+                errors.append({
+                    "sessionId": session_id,
+                    "name": session.get("name", session_id),
+                    "error": str(exc),
+                })
+
+        await self._broadcast(self.snapshot_event())
+        return {
+            "scanned": len(sessions),
+            "adopted": len(adopted),
+            "errors": errors,
+            "items": self.list_terminals(),
+            "layout": self.monitor_layout(),
+            "allTags": self.list_all_tags(),
+        }
 
     async def adopt_terminal(self, session_id: str, name: str | None = None) -> dict:
         explicit_name = (name or '').strip() if name else None
@@ -710,21 +944,27 @@ class DashboardService:
             hidden=handle.adopted_hidden,
             muted=handle.adopted_muted,
             tags=handle.adopted_tags,
+            is_primary=handle.adopted_primary,
         )
         # 将最终 ID 写回 iTerm2 session 变量，确保下次重启可复用
         try:
             await self.backend.set_terminal_id(handle, record.id)
         except Exception:
             pass
-        async with self._lock:
+        async with self._records_lock():
             self.records[record.id] = record
+        if record.is_primary:
+            await self._set_primary_terminal(record.id)
         # 仅对首次接管的外部终端做兄弟窗口对齐；安全重启恢复的托管终端保留原布局。
         if not record.hidden and not restored_managed_terminal:
             await self._align_frame_to_siblings(record)
         await self.refresh_terminal(record.id)
         self._start_monitor(record.id)
         await self.enter_monitor_mode()
-        await self._broadcast(self.record_event(record.id))
+        if record.is_primary:
+            await self._broadcast(self.snapshot_event())
+        else:
+            await self._broadcast(self.record_event(record.id))
         return record.to_dict()
 
     async def close_all_terminals(self) -> list[dict]:
@@ -734,14 +974,14 @@ class DashboardService:
             result.append(await self.close_terminal(terminal_id))
         # 清理所有已关闭的记录，避免状态残留
         closed_ids = [rid for rid, rec in self.records.items() if rec.status == TerminalStatus.closed]
-        async with self._lock:
+        async with self._records_lock():
             for rid in closed_ids:
                 self.records.pop(rid, None)
         # 广播 snapshot 确保前端拿到一致状态
         await self._broadcast(self.snapshot_event())
         return result
 
-    async def refresh_terminal(self, terminal_id: str) -> dict:
+    async def refresh_terminal(self, terminal_id: str, *, queue_summary: bool = True) -> dict:
         record = self._get_record(terminal_id)
         try:
             text, screen_html = await self.backend.get_screen_render(record.handle)
@@ -749,7 +989,7 @@ class DashboardService:
             if self._is_missing_terminal_error(exc):
                 return await self._mark_terminal_closed(record, reason="真实窗口已被手动关闭")
             raise
-        self._apply_screen_text(record, text, screen_html, is_live=False)
+        self._apply_screen_text(record, text, screen_html, is_live=False, queue_summary=queue_summary)
         # 获取当前工作目录
         cwd = await self.backend.get_cwd(record.handle)
         if cwd is not None:
@@ -758,9 +998,32 @@ class DashboardService:
         await self._broadcast(self.record_event(terminal_id))
         return record.to_dict()
 
+    def _skip_initial_summary_until_content_changes(self, record: TerminalRecord) -> None:
+        record.ai_summary_first = False
+        record.ai_summary_status = "none"
+        record.ai_summary_reason = "idle"
+        record.ai_summary_error_detail = ""
+        self._last_summary_status[record.id] = record.status.value
+        self._summary_skipped_initial_hash[record.id] = record.content_hash
+        self._summary_suspended_terminal_ids.add(record.id)
+
+    def _resume_auto_summary_for_terminal(self, record: TerminalRecord) -> None:
+        self._summary_suspended_terminal_ids.discard(record.id)
+        self._summary_skipped_initial_hash.pop(record.id, None)
+
+    def _resume_auto_summary_after_user_activation(self, record: TerminalRecord) -> None:
+        was_suspended = (
+            record.id in self._summary_suspended_terminal_ids
+            or record.id in self._summary_skipped_initial_hash
+        )
+        self._resume_auto_summary_for_terminal(record)
+        if was_suspended and self._summarizer and record.screen_text.strip():
+            self._summary_work_queue().put_nowait(record.id)
+
     async def send_text(self, terminal_id: str, text: str) -> dict:
         record = self._get_record(terminal_id)
         payload = text if text.endswith("\n") or text.endswith("\r") else f"{text}\n"
+        self._resume_auto_summary_for_terminal(record)
         try:
             await self.backend.send_text(record.handle, payload)
         except Exception as exc:
@@ -1027,13 +1290,14 @@ class DashboardService:
 
     async def _mark_terminal_closed(self, record: TerminalRecord, reason: str | None = None) -> dict:
         record.status = TerminalStatus.closed
+        record.is_primary = False
         record.updated_at = self._now()
         record.is_live = False
         record.last_error = None
         if reason:
             record.summary = reason
         task = self.monitor_tasks.pop(record.id, None)
-        if task is not None:
+        if task is not None and task is not asyncio.current_task():
             task.cancel()
         await self._broadcast(self.record_event(record.id))
         await self.enter_monitor_mode()
@@ -1057,8 +1321,34 @@ class DashboardService:
     _PROMPT_CHAR_RE = re.compile(r'[$%❯#]\s')
     # 空闲态集合
     _IDLE_STATUSES = frozenset({TerminalStatus.done, TerminalStatus.idle, TerminalStatus.waiting})
+    _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+    _CODEX_WORKING_LINE_RE = re.compile(
+        r"^\s*[│|]?\s*Working\s*\([^)]*esc\s+to\s+interrupt[^)]*\)\s*$",
+        re.IGNORECASE,
+    )
+    _CODEX_CONTEXT_LINE_RE = re.compile(
+        r"^\s*[│|]?\s*Context\s+\d+%\s+(?:used|left)\s*$",
+        re.IGNORECASE,
+    )
+    _CODEX_MODEL_LINE_RE = re.compile(
+        r"^\s*[│|]?\s*gpt-\d+(?:\.\d+)*(?:-[a-z0-9]+)?\s+(?:low|medium|high|xhigh)\s*$",
+        re.IGNORECASE,
+    )
+    _AGENT_PROGRESS_LINE_RE = re.compile(
+        r"^\s*[│|]?\s*(?:Thinking|Working|Reading|Editing|Searching|Running|Applying|Compacting)\b.*"
+        r"(?:esc|ctrl|tokens?|context|interrupt|\d+s)\s*$",
+        re.IGNORECASE,
+    )
 
-    def _apply_screen_text(self, record: TerminalRecord, text: str, screen_html: str, is_live: bool) -> None:
+    def _apply_screen_text(
+        self,
+        record: TerminalRecord,
+        text: str,
+        screen_html: str,
+        is_live: bool,
+        *,
+        queue_summary: bool = True,
+    ) -> None:
         # 已关闭的终端不再更新状态
         if record.status == TerminalStatus.closed:
             return
@@ -1066,8 +1356,17 @@ class DashboardService:
         # 计算内容哈希，判断内容是否变化
         new_hash = hashlib.md5(text.encode()).hexdigest()
         if new_hash != record.content_hash:
+            had_content_baseline = bool(record.content_hash)
             record.content_hash = new_hash
             record.content_stable_since = time.time()
+            self._track_agent_interaction_change(
+                record,
+                text,
+                had_content_baseline=had_content_baseline,
+            )
+            self._summary_skipped_initial_hash.pop(record.id, None)
+            if queue_summary and self._summarizer:
+                self._summary_work_queue().put_nowait(record.id)
 
         # 计算停滞时间
         stable_seconds = 0.0
@@ -1076,6 +1375,14 @@ class DashboardService:
 
         old_status = record.status
         status, markers, summary = analyze_screen_text(text, stable_seconds, self._rule_config)
+
+        # 状态变更时，立即触发摘要（如果还没有在队列中）
+        status_changed = (status != old_status) and (old_status != TerminalStatus.closed)
+        if queue_summary and status_changed and self._summarizer:
+            try:
+                self._summary_work_queue().put_nowait(record.id)
+            except asyncio.QueueFull:
+                pass
 
         # ── 状态守卫链（顺序不可调换）──
         # 1. 焦点守卫：终端有焦点时（用户正在交互），不要从空闲变为运行中
@@ -1126,6 +1433,66 @@ class DashboardService:
         if hasattr(self.backend, 'is_session_focused'):
             return self.backend.is_session_focused(record.handle.session_id)
         return False
+
+    def _track_agent_interaction_change(
+        self,
+        record: TerminalRecord,
+        text: str,
+        *,
+        had_content_baseline: bool,
+    ) -> None:
+        if not record.program.is_agent:
+            return
+
+        interaction_hash = self._agent_interaction_hash(text)
+        if not interaction_hash:
+            return
+
+        if not record.interaction_content_hash:
+            record.interaction_content_hash = interaction_hash
+            if had_content_baseline:
+                record.last_interaction_at = time.time()
+            return
+
+        if interaction_hash != record.interaction_content_hash:
+            record.interaction_content_hash = interaction_hash
+            record.last_interaction_at = time.time()
+
+    def _sync_agent_interaction_baseline(self, record: TerminalRecord) -> None:
+        if not record.program.is_agent:
+            record.interaction_content_hash = ""
+            return
+        if record.interaction_content_hash:
+            return
+        record.interaction_content_hash = self._agent_interaction_hash(record.screen_text)
+
+    def _agent_interaction_hash(self, text: str) -> str:
+        interaction_text = self._agent_interaction_text(text)
+        if not interaction_text:
+            return ""
+        return hashlib.md5(interaction_text.encode()).hexdigest()
+
+    def _agent_interaction_text(self, text: str) -> str:
+        lines: list[str] = []
+        for raw_line in (text or "").splitlines():
+            line = self._ANSI_RE.sub("", raw_line).strip()
+            if not line or self._is_agent_status_noise_line(line):
+                continue
+            lines.append(line)
+        return "\n".join(lines[-120:]).strip()
+
+    def _is_agent_status_noise_line(self, line: str) -> bool:
+        if parse_codex_statusline(line) is not None:
+            return True
+        return any(
+            pattern.search(line)
+            for pattern in (
+                self._CODEX_WORKING_LINE_RE,
+                self._CODEX_CONTEXT_LINE_RE,
+                self._CODEX_MODEL_LINE_RE,
+                self._AGENT_PROGRESS_LINE_RE,
+            )
+        )
 
     async def _focus_recheck_loop(self) -> None:
         """定期检查焦点抑制的终端，失焦后重新评估状态"""
@@ -1193,11 +1560,12 @@ class DashboardService:
                 closed_ids = [rid for rid, r in self.records.items() if r.status == TerminalStatus.closed]
                 if closed_ids:
                     print(f"[watchdog] 清理 {len(closed_ids)} 个已关闭的终端记录", flush=True)
-                    async with self._lock:
+                    async with self._records_lock():
                         for rid in closed_ids:
                             self.records.pop(rid, None)
                     await self._broadcast(self.snapshot_event())
             if alive:
+                await self._close_records_missing_from_session_scan()
                 continue
             active = [r for r in self.records.values() if r.status != TerminalStatus.closed]
             if not active:
@@ -1212,6 +1580,36 @@ class DashboardService:
                 if task is not None:
                     task.cancel()
             await self._broadcast(self.snapshot_event())
+
+    async def _close_records_missing_from_session_scan(self) -> None:
+        if not hasattr(self.backend, "list_session_ids"):
+            return
+        active = [r for r in self.records.values() if r.status != TerminalStatus.closed]
+        if not active:
+            self._missing_session_scan_counts.clear()
+            return
+        try:
+            live_session_ids = set(await self.backend.list_session_ids())
+        except Exception as exc:
+            print(f"[watchdog] session 存活扫描失败: {exc}", flush=True)
+            return
+
+        active_ids = {record.id for record in active}
+        for record_id in list(self._missing_session_scan_counts.keys()):
+            if record_id not in active_ids:
+                self._missing_session_scan_counts.pop(record_id, None)
+
+        for record in active:
+            if record.handle.session_id in live_session_ids:
+                self._missing_session_scan_counts.pop(record.id, None)
+                continue
+            missed = self._missing_session_scan_counts.get(record.id, 0) + 1
+            if missed < 2:
+                self._missing_session_scan_counts[record.id] = missed
+                continue
+            print(f"[watchdog] session 已不存在，关闭终端记录: {record.id} ({record.handle.session_id})", flush=True)
+            self._missing_session_scan_counts.pop(record.id, None)
+            await self._mark_terminal_closed(record, reason="真实窗口已被手动关闭")
 
     async def _timeout_check_loop(self) -> None:
         """定时扫描所有活跃终端，只检查超时规则"""
@@ -1255,3 +1653,276 @@ class DashboardService:
     async def _refresh_runtime_metadata(self, record: TerminalRecord) -> None:
         runtime_info = await self.backend.get_runtime_info(record.handle)
         record.program = detect_terminal_program(runtime_info, record.screen_text)
+        self._sync_agent_interaction_baseline(record)
+
+    async def update_hook_status(self, iterm_session_id: str, status: str) -> str | None:
+        """根据 hook 通知更新终端状态。
+
+        Args:
+            iterm_session_id: 完整的 ITERM_SESSION_ID，格式 w2t0p0:GUID
+            status: "running" 或 "done"
+
+        Returns:
+            匹配到的 terminal_id，未匹配返回 None
+        """
+        # 提取 GUID 部分
+        guid = iterm_session_id.split(":")[-1] if ":" in iterm_session_id else iterm_session_id
+
+        # 遍历查找匹配的终端
+        matched_record: TerminalRecord | None = None
+        for record in self.records.values():
+            if record.handle.session_id == guid:
+                matched_record = record
+                break
+
+        if matched_record is None or matched_record.status == TerminalStatus.closed:
+            return None
+
+        terminal_id = matched_record.id
+
+        if status == "running":
+            # 取消已有的 done 延迟计时器
+            existing_timer = self._hook_done_timers.pop(terminal_id, None)
+            if existing_timer is not None:
+                existing_timer.cancel()
+
+            # 更新状态为 running
+            matched_record.status = TerminalStatus.running
+            matched_record.summary = "Claude Code 工作中"
+            matched_record.updated_at = self._now()
+            await self._broadcast(self.record_event(terminal_id))
+
+        elif status == "done":
+            # 取消已有的 done 延迟计时器（防抖）
+            existing_timer = self._hook_done_timers.pop(terminal_id, None)
+            if existing_timer is not None:
+                existing_timer.cancel()
+
+            # 创建延迟计时器，10s 后更新为 done
+            async def _delayed_done(rec: TerminalRecord, tid: str) -> None:
+                await asyncio.sleep(10)
+                self._hook_done_timers.pop(tid, None)
+                if rec.status != TerminalStatus.closed and rec.id in self.records:
+                    rec.status = TerminalStatus.done
+                    rec.summary = "Claude Code 已完成"
+                    rec.updated_at = self._now()
+                    await self._broadcast(self.record_event(tid))
+
+            self._hook_done_timers[terminal_id] = asyncio.create_task(
+                _delayed_done(matched_record, terminal_id)
+            )
+
+        return terminal_id
+
+    async def _summary_loop(self) -> None:
+        """后台循环：为活跃终端生成 AI 摘要"""
+        while True:
+            try:
+                # 优先处理队列中的变更终端
+                try:
+                    terminal_id = await asyncio.wait_for(self._summary_work_queue().get(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    # 队列空，遍历所有活跃终端
+                    for tid, record in list(self.records.items()):
+                        if record.status == TerminalStatus.closed or not record.screen_text.strip():
+                            continue
+                        await self._generate_summary(tid)
+                    continue
+
+                if terminal_id in self.records:
+                    await self._generate_summary(terminal_id)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning("摘要循环异常: %s", e)
+                await asyncio.sleep(5)
+
+    async def _generate_summary(self, terminal_id: str, *, force: bool = False) -> None:
+        """根据调度策略为终端生成 AI 摘要
+
+        调度优先级：
+        1. summarizer 未配置 → 设置 reason="no_api"
+        2. 首次总结（ai_summary_first） → 立即总结
+        3. 终端状态变更 → 立即总结
+        4. 运行中终端 → 按 active_interval 间隔总结
+        5. 空闲终端 → 内容稳定后总结
+        """
+        record = self.records.get(terminal_id)
+        if not record or record.status == TerminalStatus.closed:
+            return
+
+        # 没有 screen_text 的终端
+        if not record.screen_text.strip():
+            record.ai_summary_status = "none"
+            record.ai_summary_reason = "idle"
+            record.ai_summary_error_detail = ""
+            await self._broadcast(self.record_event(terminal_id))
+            return
+
+        # 1. summarizer 未配置
+        if not self._summarizer:
+            record.ai_summary_status = "none"
+            record.ai_summary_reason = "no_api"
+            record.ai_summary_error_detail = ""
+            await self._broadcast(self.record_event(terminal_id))
+            return
+
+        current_status = record.status.value
+        last_status = self._last_summary_status.get(terminal_id, "")
+
+        if force:
+            self._resume_auto_summary_for_terminal(record)
+
+        if not force and terminal_id in self._summary_suspended_terminal_ids:
+            return
+
+        skipped_initial_hash = self._summary_skipped_initial_hash.get(terminal_id)
+        if not force and skipped_initial_hash and skipped_initial_hash == record.content_hash:
+            return
+
+        # 2. 首次总结 → 立即执行
+        if force:
+            await self._run_summary_attempt(record, terminal_id, force_announce=True)
+            record.ai_summary_first = False
+            self._last_summary_status[terminal_id] = current_status
+            return
+
+        if record.ai_summary_first:
+            await self._run_summary_attempt(record, terminal_id)
+            record.ai_summary_first = False
+            self._last_summary_status[terminal_id] = current_status
+            return
+
+        # 3. 终端状态变更 → 立即总结
+        if current_status != last_status:
+            await self._run_summary_attempt(record, terminal_id)
+            self._last_summary_status[terminal_id] = current_status
+            return
+
+        # 4. 运行中终端 → 按 active_interval 间隔总结
+        if current_status == "running":
+            if self._is_failed_summary_retry_cooling_down(record):
+                return
+            if self._is_retryable_failed_summary(record):
+                await self._run_summary_attempt(record, terminal_id)
+                return
+            active_interval = self.settings.summary_active_interval
+            elapsed = time.time() - record.ai_summary_at if record.ai_summary_at > 0 else active_interval + 1
+            if elapsed >= active_interval:
+                await self._run_summary_attempt(record, terminal_id)
+            # 冷却期内跳过，不覆盖已有的摘要状态
+            return
+
+        # 5. 空闲终端（idle/done/waiting）
+        # 检查内容是否稳定（至少 10 秒无变化）
+        stable_seconds = time.time() - record.content_stable_since if record.content_stable_since > 0 else 999
+        if stable_seconds < 10:
+            # 内容还在变化，只在从未总结过时才设置 reason
+            if record.ai_summary_status == "none" and not record.ai_summary:
+                record.ai_summary_reason = "content_changing"
+                record.ai_summary_error_detail = ""
+                await self._broadcast(self.record_event(terminal_id))
+            return
+
+        # 内容稳定，执行总结
+        if self._is_failed_summary_retry_cooling_down(record):
+            return
+        await self._run_summary_attempt(record, terminal_id)
+
+    def _should_announce_summary_start(self, record: TerminalRecord) -> bool:
+        return (
+            record.ai_summary_first
+            or record.ai_summary_status == "fallback"
+            or (record.ai_summary_status == "none" and not record.ai_summary)
+        )
+
+    def _summary_retry_interval(self) -> float:
+        return max(5.0, float(self.settings.summary_fallback_retry_interval))
+
+    def _is_failed_summary_retry_cooling_down(self, record: TerminalRecord) -> bool:
+        if not self._is_retryable_failed_summary(record):
+            return False
+        if record.ai_summary_at <= 0:
+            return False
+        elapsed = time.time() - record.ai_summary_at
+        return elapsed < self._summary_retry_interval()
+
+    @staticmethod
+    def _is_retryable_failed_summary(record: TerminalRecord) -> bool:
+        return (
+            record.ai_summary_status == "fallback"
+            and record.ai_summary_reason in {"api_error", "empty_response"}
+        )
+
+    async def _set_summary_in_progress(self, record: TerminalRecord, terminal_id: str) -> bool:
+        if record.ai_summary_status == "summarizing":
+            return False
+        record.ai_summary_status = "summarizing"
+        record.ai_summary_reason = ""
+        record.ai_summary_error_detail = ""
+        await self._broadcast(self.record_event(terminal_id))
+        return True
+
+    async def _run_summary_attempt(self, record: TerminalRecord, terminal_id: str, *, force_announce: bool = False) -> None:
+        previous_status = record.ai_summary_status
+        previous_reason = record.ai_summary_reason
+        previous_error_detail = record.ai_summary_error_detail
+        restore_on_cache = False
+
+        if force_announce or self._should_announce_summary_start(record):
+            restore_on_cache = await self._set_summary_in_progress(record, terminal_id)
+
+        await self._do_summarize(
+            record,
+            terminal_id,
+            previous_status=previous_status,
+            previous_reason=previous_reason,
+            previous_error_detail=previous_error_detail,
+            restore_on_cache=restore_on_cache,
+        )
+
+    async def _do_summarize(
+        self,
+        record: TerminalRecord,
+        terminal_id: str,
+        *,
+        previous_status: str = "none",
+        previous_reason: str = "",
+        previous_error_detail: str = "",
+        restore_on_cache: bool = False,
+    ) -> None:
+        """实际调用 summarizer 生成摘要"""
+        try:
+            result = await self._summarizer.summarize(terminal_id, record.screen_text)
+            # 仅在切换到 summarizing 后，需要用缓存结果恢复真实状态。
+            if result.from_cache:
+                if not restore_on_cache:
+                    return
+                record.ai_summary = result.text
+                if record.ai_summary_at <= 0:
+                    record.ai_summary_at = time.time()
+                if result.used_ai:
+                    record.ai_summary_status = "done"
+                    record.ai_summary_reason = ""
+                    record.ai_summary_error_detail = ""
+                else:
+                    record.ai_summary_status = "fallback"
+                    record.ai_summary_reason = result.reason or previous_reason or "api_error"
+                    record.ai_summary_error_detail = result.error_detail or previous_error_detail
+                await self._broadcast(self.record_event(terminal_id))
+                return
+            record.ai_summary = result.text
+            record.ai_summary_at = time.time()
+            record.ai_summary_status = "done" if result.used_ai else "fallback"
+            record.ai_summary_reason = "" if result.used_ai else (result.reason or previous_reason or "api_error")
+            record.ai_summary_error_detail = "" if result.used_ai else (result.error_detail or previous_error_detail)
+        except Exception as exc:
+            # API 调用失败 → 降级为截断文本
+            record.ai_summary_status = "fallback"
+            record.ai_summary_reason = "api_error"
+            record.ai_summary_error_detail = " ".join(str(exc).split()).strip()[:120]
+            # 使用截断文本作为降级内容
+            from multi_iterm2_manager.summarizer import TerminalSummarizer
+            record.ai_summary = TerminalSummarizer.fallback_text(record.screen_text)
+            record.ai_summary_at = time.time()
+        await self._broadcast(self.record_event(terminal_id))

@@ -10,6 +10,19 @@ import yaml
 
 from .models import ScreenLayoutConfig, TerminalLayout
 
+MASKED_SECRET_SUFFIX = "..."
+MASKED_SECRET_PREFIX_CHARS = 8
+
+
+def mask_secret(value: str) -> str:
+    """Return the UI-safe representation for a saved secret."""
+    return value[:MASKED_SECRET_PREFIX_CHARS] + MASKED_SECRET_SUFFIX if len(value) > MASKED_SECRET_PREFIX_CHARS else ""
+
+
+def is_masked_secret(value: str) -> bool:
+    """Detect the masked placeholder returned to the UI, e.g. abcdefgh..."""
+    return bool(value) and len(value) == MASKED_SECRET_PREFIX_CHARS + len(MASKED_SECRET_SUFFIX) and value.endswith(MASKED_SECRET_SUFFIX)
+
 
 @dataclass
 class UiSettings:
@@ -29,15 +42,37 @@ class UiSettings:
     statusbar_meter_height_px: int = 10
     filter_tab_slide_duration_ms: int = 420
     terminal_font_size_px: int = 10
+    summary_grid_gap_px: int = 10
+    summary_hex_side_px: int = 96
+    summary_card_width_px: int = 320
+    summary_card_min_height_px: int = 140
+    summary_card_padding_px: int = 10
+    summary_card_border_radius_px: int = 14
+    summary_gap_glow_color: str = "#ff70db"
+    summary_gap_glow_radius_px: int = 285
+    summary_gap_glow_strength: float = 0.88
+    summary_gap_glow_softness_px: int = 14
+    summary_gap_glow_line_width_px: int = 0
     # 屏幕设置
     target_screen: int = -1  # -1 表示"跟随当前/不指定"，0 表示屏幕1，1 表示屏幕2...
     target_screen_id: int | None = None  # 稳定的显示器 ID，优先于 target_screen
     target_screen_name: str | None = None  # 最后一次选择时的屏幕名称，作为 ID 缺失时的兜底
     # 默认窗口位置模板（按屏幕名称存储，键是屏幕名称，值是 {"x":..., "y":..., "width":..., "height":...}）
     default_frames_by_screen: dict | None = None
+    # 摘要 API 配置
+    summary_api_base: str = ""
+    summary_api_key: str = ""
+    summary_model: str = "glm-4.6"
+    summary_interval_seconds: float = 30.0
+    summary_active_interval: float = 10.0  # 运行中终端的总结间隔（秒）
+    summary_fallback_retry_interval: float = 30.0  # fallback 后重试间隔（秒）
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        d = asdict(self)
+        # 返回给前端时脱敏 api_key，不暴露完整密钥
+        if d.get("summary_api_key"):
+            d["summary_api_key"] = mask_secret(d["summary_api_key"])
+        return d
 
 
 @dataclass
@@ -50,6 +85,12 @@ class Settings:
     rules_file: str = "rules.yaml"
     ui_settings_file: str = "ui-settings.yaml"
     ui_settings: UiSettings = field(default_factory=UiSettings)
+    summary_api_base: str = ""
+    summary_api_key: str = ""
+    summary_model: str = "glm-4.6"
+    summary_interval_seconds: float = 30.0
+    summary_active_interval: float = 10.0
+    summary_fallback_retry_interval: float = 30.0
 
 
 def _resolve_project_file(path_value: str) -> Path:
@@ -122,12 +163,30 @@ def save_ui_settings(path_value: str, ui_settings: UiSettings) -> Path:
             "statusbar_meter_height_px": ui_settings.statusbar_meter_height_px,
             "filter_tab_slide_duration_ms": ui_settings.filter_tab_slide_duration_ms,
             "terminal_font_size_px": ui_settings.terminal_font_size_px,
+            "summary_grid_gap_px": ui_settings.summary_grid_gap_px,
+            "summary_hex_side_px": ui_settings.summary_hex_side_px,
+            "summary_card_width_px": ui_settings.summary_card_width_px,
+            "summary_card_min_height_px": ui_settings.summary_card_min_height_px,
+            "summary_card_padding_px": ui_settings.summary_card_padding_px,
+            "summary_card_border_radius_px": ui_settings.summary_card_border_radius_px,
+            "summary_gap_glow_color": ui_settings.summary_gap_glow_color,
+            "summary_gap_glow_radius_px": ui_settings.summary_gap_glow_radius_px,
+            "summary_gap_glow_strength": ui_settings.summary_gap_glow_strength,
+            "summary_gap_glow_softness_px": ui_settings.summary_gap_glow_softness_px,
+            "summary_gap_glow_line_width_px": ui_settings.summary_gap_glow_line_width_px,
             # 屏幕设置
             "target_screen": ui_settings.target_screen,
             "target_screen_id": ui_settings.target_screen_id,
             "target_screen_name": ui_settings.target_screen_name,
             # 默认窗口位置模板（按屏幕名称）
             "default_frames_by_screen": ui_settings.default_frames_by_screen,
+            # 摘要 API 配置
+            "summary_api_base": ui_settings.summary_api_base,
+            "summary_api_key": ui_settings.summary_api_key,
+            "summary_model": ui_settings.summary_model,
+            "summary_interval_seconds": ui_settings.summary_interval_seconds,
+            "summary_active_interval": ui_settings.summary_active_interval,
+            "summary_fallback_retry_interval": ui_settings.summary_fallback_retry_interval,
         }
     })
     path.write_text(
@@ -139,6 +198,19 @@ def save_ui_settings(path_value: str, ui_settings: UiSettings) -> Path:
 
 def load_settings() -> Settings:
     ui_settings_file = os.getenv("MITERM_UI_SETTINGS_FILE", "ui-settings.yaml")
+    ui_settings = load_ui_settings(ui_settings_file)
+    # 摘要配置优先级：文件中已持久化的值 > 环境变量 > 默认值
+    summary_api_base = ui_settings.summary_api_base or os.getenv("MITERM_SUMMARY_API_BASE", "")
+    env_summary_api_key = os.getenv("MITERM_SUMMARY_API_KEY", "")
+    if is_masked_secret(ui_settings.summary_api_key):
+        summary_api_key = env_summary_api_key
+        ui_settings.summary_api_key = env_summary_api_key
+    else:
+        summary_api_key = ui_settings.summary_api_key or env_summary_api_key
+    summary_model = ui_settings.summary_model or os.getenv("MITERM_SUMMARY_MODEL", "glm-4.6")
+    summary_interval = ui_settings.summary_interval_seconds or float(os.getenv("MITERM_SUMMARY_INTERVAL", "30"))
+    summary_active_interval = ui_settings.summary_active_interval or float(os.getenv("MITERM_SUMMARY_ACTIVE_INTERVAL", "10"))
+    summary_fallback_retry_interval = ui_settings.summary_fallback_retry_interval or float(os.getenv("MITERM_SUMMARY_FALLBACK_RETRY_INTERVAL", "30"))
     return Settings(
         host=os.getenv("MITERM_HOST", "127.0.0.1"),
         port=int(os.getenv("MITERM_PORT", "8765")),
@@ -147,7 +219,13 @@ def load_settings() -> Settings:
         demo_layout_rows=int(os.getenv("MITERM_DEMO_ROWS", "2")),
         rules_file=os.getenv("MITERM_RULES_FILE", "rules.yaml"),
         ui_settings_file=ui_settings_file,
-        ui_settings=load_ui_settings(ui_settings_file),
+        ui_settings=ui_settings,
+        summary_api_base=summary_api_base,
+        summary_api_key=summary_api_key,
+        summary_model=summary_model,
+        summary_interval_seconds=summary_interval,
+        summary_active_interval=summary_active_interval,
+        summary_fallback_retry_interval=summary_fallback_retry_interval,
     )
 
 

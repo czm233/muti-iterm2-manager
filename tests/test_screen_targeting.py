@@ -246,3 +246,105 @@ def test_align_frame_to_siblings_keeps_explicit_target_screen(monkeypatch) -> No
     assert new_record.frame is not None
     assert new_record.frame.x == external_frame.x
     assert new_record.frame.y == external_frame.y
+
+
+def test_focus_terminal_realigns_source_and_siblings_to_default_frame(monkeypatch) -> None:
+    settings = Settings(
+        backend="mock",
+        ui_settings=UiSettings(
+            target_screen=1,
+            default_frames_by_screen={
+                "外接屏幕 1": {
+                    "x": 1760.0,
+                    "y": 32.0,
+                    "width": 900.0,
+                    "height": 560.0,
+                }
+            },
+        ),
+    )
+    service = DashboardService(settings)
+    monkeypatch.setattr(service, "get_screens", lambda: _mock_screens())
+    monkeypatch.setattr(
+        display,
+        "get_screen_bounds",
+        lambda screen_index: display.DisplayBounds(x=1710.0, y=0.0, width=2560.0, height=1440.0)
+        if screen_index == 1
+        else None,
+    )
+
+    selected_handle = TerminalHandle(window_id="mock-window-1", session_id="mock-session-1", tab_id="mock-tab-1")
+    sibling_handle = TerminalHandle(window_id="mock-window-2", session_id="mock-session-2", tab_id="mock-tab-2")
+    selected_frame = TerminalFrame(x=1880.0, y=84.0, width=1100.0, height=700.0)
+    sibling_frame = TerminalFrame(x=24.0, y=24.0, width=780.0, height=520.0)
+
+    service.backend._items[selected_handle.session_id] = {
+        "name": "selected",
+        "command": "",
+        "text": "",
+        "frame": selected_frame,
+    }
+    service.backend._items[sibling_handle.session_id] = {
+        "name": "sibling",
+        "command": "",
+        "text": "",
+        "frame": sibling_frame,
+    }
+
+    selected_record = TerminalRecord(id="task-1", name="selected", handle=selected_handle, frame=selected_frame)
+    sibling_record = TerminalRecord(id="task-2", name="sibling", handle=sibling_handle, frame=sibling_frame)
+    service.records = {
+        selected_record.id: selected_record,
+        sibling_record.id: sibling_record,
+    }
+
+    asyncio.run(service.focus_terminal(selected_record.id))
+
+    expected = TerminalFrame(x=1760.0, y=32.0, width=900.0, height=560.0)
+    assert selected_record.frame == expected
+    assert sibling_record.frame == expected
+
+
+def test_split_terminal_creates_new_window_and_reuses_cwd(monkeypatch) -> None:
+    settings = Settings(backend="mock")
+    service = DashboardService(settings)
+
+    async def _noop_async(*args, **kwargs):
+        return {}
+
+    async def _noop_broadcast(_payload):
+        return None
+
+    monkeypatch.setattr(service, "enter_monitor_mode", _noop_async)
+    monkeypatch.setattr(service, "_broadcast", _noop_broadcast)
+    monkeypatch.setattr(service, "_start_monitor", lambda _terminal_id: None)
+
+    source_handle = TerminalHandle(window_id="mock-window-1", session_id="mock-session-1", tab_id="mock-tab-1")
+    source_frame = TerminalFrame(x=24.0, y=24.0, width=800.0, height=500.0)
+    source_cwd = "/Users/czm/githubProject/muti-iterm2-manager"
+
+    service.backend._items[source_handle.session_id] = {
+        "name": "source",
+        "command": "",
+        "text": "",
+        "frame": source_frame,
+        "cwd": source_cwd,
+    }
+
+    source_record = TerminalRecord(
+        id="task-source",
+        name="source",
+        handle=source_handle,
+        frame=source_frame,
+        cwd=source_cwd,
+    )
+    service.records = {source_record.id: source_record}
+
+    created = asyncio.run(service.split_terminal(source_record.id, "vertical"))
+
+    assert created["id"] != source_record.id
+    assert created["windowId"] != source_handle.window_id
+    assert created["sessionId"] != source_handle.session_id
+    assert created["cwd"] == source_cwd
+    assert created["name"] == "终端 1"
+    assert service.records[created["id"]].cwd == source_cwd
