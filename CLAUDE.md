@@ -41,8 +41,21 @@
   - `src/multi_iterm2_manager/__init__.py` → `__version__ = "x.x.x"`
 - 采用 patch 递增（如 0.1.1 → 0.1.2 → 0.1.3）
 
+## 多 Claude 环境规则（强制执行）
+
+- **本机有 4 个 Claude Code 环境需要同时支持**：
+  - `claude`（官方 Claude Code）
+  - `claude-glm`
+  - `claude-glm51`
+  - `claude-glmt5t`
+- **所有涉及 Claude Code 配置的改动（如 hooks 注入）必须对这 4 个环境全部生效**
+- 对应的配置目录可能各不相同，修改前必须先确认每个环境的 settings.json 位置
+- 典型路径格式：`~/.claude/settings.json`、`~/.claude-glm/settings.json` 等
+
 ## 验收提示规则（强制执行）
 
 - **每次修改完代码，等待用户验收时，必须告知：**
-  1. 需不需要重启后端（改了 Python 后端代码才需要）
+  1. 需不需要重启后端
+     - 只有改了 Python 后端功能代码、影响运行时行为时才需要
+     - 如果只是因为版本号规则修改了 `pyproject.toml` 和 `src/multi_iterm2_manager/__init__.py` 的版本号，不需要要求用户重启后端
   2. 需不需要强制刷新前端（改了 JS/CSS/HTML 静态文件需要刷新浏览器）

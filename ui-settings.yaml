@@ -1,34 +1,56 @@
 ui:
   dashboard_padding_px: 0
-  monitor_stage_padding_px: 12
+  monitor_stage_padding_px: 0
   dashboard_gap_px: 0
-  monitor_grid_gap_px: 1
-  wall_card_padding_px: 1
+  monitor_grid_gap_px: 0
+  wall_card_padding_px: 0
   wall_card_border_radius_px: 22
   wall_card_border_width_px: 1.0
   split_resizer_hit_area_px: 12
-  split_resizer_line_width_px: 8
-  grid_resizer_hit_area_px: 12
-  grid_resizer_line_width_px: 8
+  split_resizer_line_width_px: 0
+  grid_resizer_hit_area_px: 8
+  grid_resizer_line_width_px: 4
   statusbar_font_size_px: 12
-  statusbar_meter_width_px: 70
+  statusbar_meter_width_px: 64
   statusbar_meter_height_px: 12
   filter_tab_slide_duration_ms: 1000
-  terminal_font_size_px: 14
+  terminal_font_size_px: 9
+  summary_grid_gap_px: 5
+  summary_hex_side_px: 144
+  summary_card_width_px: 300
+  summary_card_min_height_px: 200
+  summary_card_padding_px: 0
+  summary_card_border_radius_px: 15
+  summary_gap_glow_color: '#80d4ff'
+  summary_gap_glow_radius_px: 285
+  summary_gap_glow_strength: 0.88
+  summary_gap_glow_softness_px: 14
+  summary_gap_glow_line_width_px: 0
   target_screen: 1
-  target_screen_id: null
-  target_screen_name: null
+  target_screen_id: 2
+  target_screen_name: Mi Monitor
   default_frames_by_screen:
     Mi Monitor:
-      x: 1717.0
-      y: 19.0
-      width: 2531.0
-      height: 890.0
+      x: 1711.0
+      y: -105.0
+      width: 2547.0
+      height: 1006.0
     H27T13:
       x: 0.0
       y: 166.0
       width: 2560.0
       height: 1074.0
+    Color LCD:
+      x: 0.0
+      y: 113.0
+      width: 1691.0
+      height: 785.0
+  summary_api_base: https://open.bigmodel.cn/api/anthropic
+  summary_api_key: 3b039947d94245698522b5012d93c15f.Fdctp63zkFFedJHb
+  summary_model: GLM-4.5
+  summary_interval_seconds: 30.0
+  summary_active_interval: 10.0
+  summary_fallback_retry_interval: 30.0
 screen_layouts:
   H27T13:
     layouts:
@@ -36,48 +58,102 @@ screen_layouts:
         configName: 家
         createdAt: '2026-04-15T05:06:18'
         terminals:
-          task-f32d9fca:
-            terminalId: task-f32d9fca
-            x: 1
-            y: 191
-            width: 2555
-            height: 1057
-          task-bae75e74:
-            terminalId: task-bae75e74
-            x: 1
-            y: 191
-            width: 2555
-            height: 1057
-          task-77827b4f:
-            terminalId: task-77827b4f
-            x: 1
-            y: 191
-            width: 2555
-            height: 1057
-          task-eba029fa:
-            terminalId: task-eba029fa
-            x: 1
-            y: 191
-            width: 2555
-            height: 1057
-          task-d20db943:
-            terminalId: task-d20db943
-            x: 1
-            y: 191
-            width: 2555
-            height: 1057
+          task-21461dc0:
+            terminalId: task-21461dc0
+            x: 0
+            y: 166
+            width: 2560
+            height: 1074
+          task-2f7deac0:
+            terminalId: task-2f7deac0
+            x: 0
+            y: 166
+            width: 2560
+            height: 1074
+          task-25ea4e0a:
+            terminalId: task-25ea4e0a
+            x: 0
+            y: 166
+            width: 2560
+            height: 1074
+          task-8baa2004:
+            terminalId: task-8baa2004
+            x: 0
+            y: 166
+            width: 2560
+            height: 1074
+          task-66f43975:
+            terminalId: task-66f43975
+            x: 0
+            y: 166
+            width: 2560
+            height: 1074
+          task-a4c92cbe:
+            terminalId: task-a4c92cbe
+            x: 0
+            y: 166
+            width: 2560
+            height: 1074
+          task-f3589093:
+            terminalId: task-f3589093
+            x: 0
+            y: 166
+            width: 2560
+            height: 1074
+          task-d7c4ce35:
+            terminalId: task-d7c4ce35
+            x: 0
+            y: 166
+            width: 2560
+            height: 1074
         isPreset: false
         isDefault: true
         layoutId: user_5c20a19b
   Color LCD:
     layouts:
-      __preset__:
-        configName: 系统预设
-        createdAt: '2026-04-15T04:19:54'
-        terminals: {}
-        isPreset: true
+      user_824fe157:
+        configName: macbook单屏幕
+        createdAt: '2026-04-19T16:57:52'
+        terminals:
+          task-21461dc0:
+            terminalId: task-21461dc0
+            x: 0
+            y: 113
+            width: 1691
+            height: 785
+          task-2f7deac0:
+            terminalId: task-2f7deac0
+            x: 0
+            y: 113
+            width: 1691
+            height: 785
+          task-25ea4e0a:
+            terminalId: task-25ea4e0a
+            x: 0
+            y: 113
+            width: 1691
+            height: 785
+          task-8baa2004:
+            terminalId: task-8baa2004
+            x: 0
+            y: 113
+            width: 1691
+            height: 785
+          task-66f43975:
+            terminalId: task-66f43975
+            x: 0
+            y: 113
+            width: 1691
+            height: 785
+          task-a4c92cbe:
+            terminalId: task-a4c92cbe
+            x: 0
+            y: 113
+            width: 1691
+            height: 785
+        isPreset: false
         isDefault: true
-        layoutId: ''
+        layoutId: user_824fe157
   Mi Monitor:
     layouts:
       user_7283040c:
@@ -86,33 +162,33 @@ screen_layouts:
         terminals:
           task-21461dc0:
             terminalId: task-21461dc0
-            x: 171
-            y: 111
-            width: 1368
+            x: 1717
+            y: 19
+            width: 2531
             height: 890
           task-2f7deac0:
             terminalId: task-2f7deac0
-            x: 171
-            y: 111
-            width: 1368
+            x: 1717
+            y: 19
+            width: 2531
             height: 890
           task-25ea4e0a:
             terminalId: task-25ea4e0a
-            x: 171
-            y: 111
-            width: 1368
+            x: 1717
+            y: 19
+            width: 2531
             height: 890
           task-8baa2004:
             terminalId: task-8baa2004
-            x: 171
-            y: 111
-            width: 1368
+            x: 1717
+            y: 19
+            width: 2531
             height: 890
-          task-201352b8:
-            terminalId: task-201352b8
-            x: 171
-            y: 111
-            width: 1368
+          task-c953b41d:
+            terminalId: task-c953b41d
+            x: 1717
+            y: 19
+            width: 2531
             height: 890
         isPreset: false
         isDefault: true
