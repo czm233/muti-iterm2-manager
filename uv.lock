@@ -303,7 +303,7 @@ wheels = [
 
 [[package]]
 name = "multi-iterm2-manager"
-version = "0.8.259"
+version = "0.8.263"
 source = { editable = "." }
 dependencies = [
     { name = "eval-type-backport" },

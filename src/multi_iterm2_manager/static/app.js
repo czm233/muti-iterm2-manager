@@ -63,6 +63,10 @@ const state = {
     draft: "",
     editingId: null,
     editDraft: "",
+    dragEnabledId: null,
+    dragId: null,
+    dragOverId: null,
+    dropPlacement: "after",
   },
   contextMenu: {
     terminalId: null,
@@ -496,6 +500,10 @@ function getIdeaDialogState() {
       draft: "",
       editingId: null,
       editDraft: "",
+      dragEnabledId: null,
+      dragId: null,
+      dragOverId: null,
+      dropPlacement: "after",
     };
   }
   return state.ideaDialog;
@@ -623,16 +631,31 @@ function renderIdeaFolderButton(folder, selectedKey) {
   `;
 }
 
-function renderIdeaDialogIdeaRow(idea, dialogState) {
+function renderIdeaDialogIdeaRow(idea, dialogState, options = {}) {
   const isEditing = idea.id === dialogState.editingId;
   const createdAt = formatIdeaCreatedAt(idea.createdAt);
+  const isFirst = Boolean(options.isFirst);
+  const isLast = Boolean(options.isLast);
+  const moveUpDisabledAttr = isFirst ? " disabled" : "";
+  const moveDownDisabledAttr = isLast ? " disabled" : "";
   return `
-    <div class="idea-dialog-idea-row" data-idea-id="${escapeHtml(idea.id)}">
+    <div class="idea-dialog-idea-row" data-idea-row data-idea-id="${escapeHtml(idea.id)}" draggable="false">
+      <button
+        type="button"
+        class="idea-dialog-drag-handle"
+        data-idea-drag-handle="${escapeHtml(idea.id)}"
+        aria-label="拖拽排序 ${escapeHtml(idea.text)}"
+        title="拖拽排序"
+      >
+        ≡
+      </button>
       <div class="idea-dialog-idea-copy" title="${escapeHtml(idea.text)}">
         <div class="idea-dialog-idea-text">${escapeHtml(idea.text)}</div>
         ${createdAt ? `<div class="idea-dialog-idea-time">${escapeHtml(createdAt)}</div>` : ""}
       </div>
       <div class="idea-dialog-idea-actions">
+        <button type="button" class="idea-dialog-button idea-dialog-icon-button" data-idea-move-up="${escapeHtml(idea.id)}" aria-label="上移这条想法" title="上移"${moveUpDisabledAttr}>↑</button>
+        <button type="button" class="idea-dialog-button idea-dialog-icon-button" data-idea-move-down="${escapeHtml(idea.id)}" aria-label="下移这条想法" title="下移"${moveDownDisabledAttr}>↓</button>
         <button type="button" class="idea-dialog-button" data-idea-copy="${escapeHtml(idea.id)}">复制</button>
         <button type="button" class="idea-dialog-button${isEditing ? " is-active" : ""}" data-idea-edit="${escapeHtml(idea.id)}">编辑</button>
         <button type="button" class="idea-dialog-button is-destructive" data-idea-delete="${escapeHtml(idea.id)}">删除</button>
@@ -656,7 +679,10 @@ function renderIdeaDialog() {
     `
     : "";
   const ideasMarkup = ideas.length > 0
-    ? ideas.map((idea) => renderIdeaDialogIdeaRow(idea, dialogState)).join("")
+    ? ideas.map((idea, index) => renderIdeaDialogIdeaRow(idea, dialogState, {
+      isFirst: index === 0,
+      isLast: index === ideas.length - 1,
+    })).join("")
     : '<div class="idea-dialog-empty">这个项目还没有想法</div>';
   ideaDialogContent.innerHTML = `
     <div class="idea-dialog-layout">
@@ -690,7 +716,7 @@ function renderIdeaDialog() {
             <button type="submit" class="idea-dialog-submit"${createDisabledAttr}>创建想法</button>
           </div>
         </form>
-        <div class="idea-dialog-ideas">
+        <div class="idea-dialog-ideas" data-idea-list>
           ${ideasMarkup}
         </div>
       </section>
@@ -765,8 +791,60 @@ function clearIdeaDialogEditState() {
   dialogState.editDraft = "";
 }
 
+function clearIdeaDialogDropIndicator() {
+  if (!ideaDialogContent) {
+    return;
+  }
+  ideaDialogContent
+    .querySelectorAll("[data-idea-row]")
+    .forEach((row) => row.classList.remove("is-dragging", "is-drop-before", "is-drop-after"));
+  ideaDialogContent
+    .querySelector("[data-idea-list]")
+    ?.classList.remove("is-drop-at-end");
+}
+
+function syncIdeaDialogDropIndicator(targetIdeaId = null, placement = "after") {
+  clearIdeaDialogDropIndicator();
+  const dialogState = getIdeaDialogState();
+  dialogState.dragOverId = targetIdeaId;
+  dialogState.dropPlacement = placement;
+  if (!ideaDialogContent) {
+    return;
+  }
+  if (!targetIdeaId) {
+    if (state.savedIdeas.length > 0) {
+      ideaDialogContent
+        .querySelector("[data-idea-list]")
+        ?.classList.add("is-drop-at-end");
+    }
+    return;
+  }
+  const targetRow = [...ideaDialogContent.querySelectorAll("[data-idea-row]")]
+    .find((row) => row.dataset.ideaId === targetIdeaId);
+  if (!targetRow) {
+    return;
+  }
+  targetRow.classList.add(placement === "before" ? "is-drop-before" : "is-drop-after");
+}
+
+function clearIdeaDialogDragState() {
+  const dialogState = getIdeaDialogState();
+  dialogState.dragEnabledId = null;
+  dialogState.dragId = null;
+  dialogState.dragOverId = null;
+  dialogState.dropPlacement = "after";
+  if (!ideaDialogContent) {
+    return;
+  }
+  ideaDialogContent
+    .querySelectorAll("[data-idea-row]")
+    .forEach((row) => row.setAttribute("draggable", "false"));
+  clearIdeaDialogDropIndicator();
+}
+
 function clearIdeaDialogSelectionState(options = {}) {
   clearIdeaDialogEditState();
+  clearIdeaDialogDragState();
   if (options.clearDraft) {
     getIdeaDialogState().draft = "";
   }
@@ -817,6 +895,24 @@ function beginIdeaDialogEditing(ideaId) {
   dialogState.draft = idea.text;
   renderIdeaDialog();
   focusIdeaDialogField("draft");
+}
+
+function moveSavedIdeaInFolder(ideaId, folderKey, direction) {
+  const ideas = getSavedIdeasForFolder(folderKey);
+  const currentIndex = ideas.findIndex((idea) => idea.id === ideaId);
+  if (currentIndex === -1) {
+    return false;
+  }
+  const targetIndex = direction === "up" ? currentIndex - 1 : currentIndex + 1;
+  const targetIdea = ideas[targetIndex];
+  if (!targetIdea) {
+    return false;
+  }
+  return reorderSavedIdeas(
+    ideaId,
+    targetIdea.id,
+    direction === "up" ? "before" : "after",
+  );
 }
 
 function bindIdeaDialog() {
@@ -894,6 +990,28 @@ function bindIdeaDialog() {
         setMessage("想法已复制，可直接发给 Codex");
       } catch (error) {
         setMessage(error.message, true);
+      }
+      return;
+    }
+    const moveUpButton = target.closest("[data-idea-move-up]");
+    if (moveUpButton) {
+      const dialogState = getIdeaDialogState();
+      const changed = moveSavedIdeaInFolder(moveUpButton.dataset.ideaMoveUp, dialogState.selectedFolderKey, "up");
+      if (changed) {
+        clearIdeaDialogDragState();
+        renderIdeaDialog();
+        setMessage("想法顺序已更新");
+      }
+      return;
+    }
+    const moveDownButton = target.closest("[data-idea-move-down]");
+    if (moveDownButton) {
+      const dialogState = getIdeaDialogState();
+      const changed = moveSavedIdeaInFolder(moveDownButton.dataset.ideaMoveDown, dialogState.selectedFolderKey, "down");
+      if (changed) {
+        clearIdeaDialogDragState();
+        renderIdeaDialog();
+        setMessage("想法顺序已更新");
       }
       return;
     }
@@ -995,6 +1113,116 @@ function bindIdeaDialog() {
     clearIdeaDialogEditState();
     renderIdeaDialog();
     focusIdeaDialogField("draft");
+  });
+  ideaDialogContent.addEventListener("pointerdown", (event) => {
+    const target = event.target instanceof Element ? event.target : null;
+    const handle = target?.closest("[data-idea-drag-handle]");
+    if (!handle) {
+      return;
+    }
+    const row = handle.closest("[data-idea-row]");
+    if (!row) {
+      return;
+    }
+    const dialogState = getIdeaDialogState();
+    dialogState.dragEnabledId = row.dataset.ideaId;
+    row.setAttribute("draggable", "true");
+  });
+  ideaDialogContent.addEventListener("pointerup", () => {
+    if (getIdeaDialogState().dragId) {
+      return;
+    }
+    ideaDialogContent
+      .querySelectorAll("[data-idea-row]")
+      .forEach((row) => row.setAttribute("draggable", "false"));
+    getIdeaDialogState().dragEnabledId = null;
+  });
+  ideaDialogContent.addEventListener("pointercancel", () => {
+    if (getIdeaDialogState().dragId) {
+      return;
+    }
+    ideaDialogContent
+      .querySelectorAll("[data-idea-row]")
+      .forEach((row) => row.setAttribute("draggable", "false"));
+    getIdeaDialogState().dragEnabledId = null;
+  });
+  ideaDialogContent.addEventListener("dragstart", (event) => {
+    const target = event.target instanceof Element ? event.target : null;
+    const row = target?.closest("[data-idea-row]");
+    if (!row) {
+      return;
+    }
+    const dialogState = getIdeaDialogState();
+    const ideaId = row.dataset.ideaId;
+    if (!ideaId || dialogState.dragEnabledId !== ideaId) {
+      event.preventDefault();
+      return;
+    }
+    dialogState.dragId = ideaId;
+    row.classList.add("is-dragging");
+    if (event.dataTransfer) {
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", ideaId);
+    }
+  });
+  ideaDialogContent.addEventListener("dragover", (event) => {
+    const dialogState = getIdeaDialogState();
+    if (!dialogState.dragId) {
+      return;
+    }
+    const target = event.target instanceof Element ? event.target : null;
+    const list = target?.closest("[data-idea-list]");
+    if (!list) {
+      return;
+    }
+    event.preventDefault();
+    const row = target.closest("[data-idea-row]");
+    if (!row) {
+      syncIdeaDialogDropIndicator(null, "after");
+      return;
+    }
+    if (row.dataset.ideaId === dialogState.dragId) {
+      clearIdeaDialogDropIndicator();
+      return;
+    }
+    const rect = row.getBoundingClientRect();
+    const placement = event.clientY <= rect.top + rect.height / 2 ? "before" : "after";
+    syncIdeaDialogDropIndicator(row.dataset.ideaId, placement);
+  });
+  ideaDialogContent.addEventListener("drop", (event) => {
+    const dialogState = getIdeaDialogState();
+    if (!dialogState.dragId) {
+      return;
+    }
+    const target = event.target instanceof Element ? event.target : null;
+    const list = target?.closest("[data-idea-list]");
+    if (!list) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    const row = target.closest("[data-idea-row]");
+    const targetIdeaId = row?.dataset.ideaId || null;
+    if (targetIdeaId === dialogState.dragId) {
+      clearIdeaDialogDragState();
+      return;
+    }
+    const placement = targetIdeaId && targetIdeaId !== dialogState.dragId
+      ? dialogState.dropPlacement || "after"
+      : "after";
+    const changed = reorderSavedIdeas(
+      dialogState.dragId,
+      targetIdeaId && targetIdeaId !== dialogState.dragId ? targetIdeaId : null,
+      placement,
+    );
+    clearIdeaDialogDragState();
+    if (changed) {
+      renderIdeaDialog();
+      setMessage("想法顺序已更新");
+    }
+  });
+  ideaDialogContent.addEventListener("dragend", () => {
+    clearIdeaDialogDragState();
   });
 }
 
@@ -1847,8 +2075,12 @@ function bindTerminalContextMenu() {
     }
     event.preventDefault();
     const row = event.target.closest("[data-context-idea-row]");
-    if (!row || row.dataset.ideaId === ideaDragId) {
+    if (!row) {
       syncIdeaDropIndicator(null, "after");
+      return;
+    }
+    if (row.dataset.ideaId === ideaDragId) {
+      clearIdeaDropIndicator();
       return;
     }
     const rect = row.getBoundingClientRect();
@@ -1868,6 +2100,10 @@ function bindTerminalContextMenu() {
     event.stopPropagation();
     const row = event.target.closest("[data-context-idea-row]");
     const targetIdeaId = row?.dataset.ideaId || null;
+    if (targetIdeaId === contextMenuState.ideaDragId) {
+      clearContextMenuIdeaDragState();
+      return;
+    }
     const placement = targetIdeaId && targetIdeaId !== contextMenuState.ideaDragId
       ? contextMenuState.ideaDropPlacement || "after"
       : "after";

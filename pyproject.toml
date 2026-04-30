@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "multi-iterm2-manager"
-version = "0.8.259"
+version = "0.8.263"
 description = "本地多 iTerm2 窗口控制与 Web 监控面板"
 readme = "README.md"
 requires-python = ">=3.9"
