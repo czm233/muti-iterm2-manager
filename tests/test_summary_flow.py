@@ -330,6 +330,49 @@ def test_last_interaction_uses_agent_content_changes_after_baseline() -> None:
     assert record.last_interaction_at == previous_interaction_at
 
 
+def test_focused_codex_working_bypasses_idle_to_running_focus_guard() -> None:
+    service = build_service()
+    record = build_record()
+    record.status = TerminalStatus.done
+    record.screen_text = "$ "
+    service.backend.is_session_focused = lambda session_id: True
+
+    service._apply_screen_text(
+        record,
+        "\n".join([
+            "Working (9s • Ctrl+C to interrupt)",
+            "gpt-5.5 xhigh",
+            "Context 27% left",
+        ]),
+        "<pre>working</pre>",
+        is_live=True,
+        queue_summary=False,
+    )
+
+    assert record.status == TerminalStatus.running
+    assert record.markers == ["codex-working-indicator"]
+    assert record.id not in service._focus_suppressed
+
+
+def test_focused_shell_typing_still_does_not_flip_idle_to_running() -> None:
+    service = build_service()
+    record = build_record()
+    record.status = TerminalStatus.done
+    record.screen_text = "$ "
+    service.backend.is_session_focused = lambda session_id: True
+
+    service._apply_screen_text(
+        record,
+        "$ python",
+        "<pre>$ python</pre>",
+        is_live=True,
+        queue_summary=False,
+    )
+
+    assert record.status == TerminalStatus.done
+    assert record.id in service._focus_suppressed
+
+
 @pytest.mark.anyio
 async def test_focus_terminal_resumes_suspended_summary_and_queues_work() -> None:
     service = build_service()

@@ -28,6 +28,21 @@ def test_analyze_screen_text_matches_codex_working_indicator() -> None:
     assert "Working" in summary
 
 
+def test_analyze_screen_text_matches_codex_ctrl_c_working_indicator() -> None:
+    config = _load_config()
+    text = "\n".join([
+        "Working (9s • Ctrl+C to interrupt)",
+        "gpt-5.5 xhigh",
+        "Context 27% left",
+    ])
+
+    status, markers, summary = analyze_screen_text(text, 0.0, config)
+
+    assert status == TerminalStatus.running
+    assert markers == ["codex-working-indicator"]
+    assert "Ctrl+C" in summary
+
+
 def test_analyze_screen_text_maps_codex_ready_statusline_to_done() -> None:
     config = _load_config()
     text = (

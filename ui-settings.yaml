@@ -16,7 +16,7 @@ ui:
   filter_tab_slide_duration_ms: 1000
   terminal_font_size_px: 9
   summary_grid_gap_px: 5
-  summary_hex_side_px: 144
+  summary_hex_side_px: 129
   summary_card_width_px: 300
   summary_card_min_height_px: 200
   summary_card_padding_px: 0

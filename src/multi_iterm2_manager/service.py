@@ -30,6 +30,7 @@ from multi_iterm2_manager.models import CreateTerminalParams, GridLayoutParams, 
 from multi_iterm2_manager.app_monitor import AppMonitorService
 from multi_iterm2_manager.codex_statusline import parse_codex_statusline
 from multi_iterm2_manager.program_detection import detect_terminal_program
+from multi_iterm2_manager.state_store import TerminalStateStore
 from multi_iterm2_manager.summarizer import SUMMARY_MAX_CONCURRENCY, SummaryConfig, TerminalSummarizer
 
 logger = logging.getLogger(__name__)
@@ -80,6 +81,12 @@ class DashboardService:
         # 新建/拆分终端默认暂停自动摘要，避免 shell prompt 初始重绘触发 LLM
         self._summary_suspended_terminal_ids: set[str] = set()
         self._missing_session_scan_counts: dict[str, int] = {}
+        self._terminal_state_store: TerminalStateStore | None = (
+            None if isinstance(self.backend, MockTerminalBackend) else TerminalStateStore.default()
+        )
+        self._terminal_state_save_task: asyncio.Task[None] | None = None
+        self._safe_restart_restored_from_cache = False
+        self._orphan_adopt_task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
         await self.backend.start()
@@ -88,20 +95,11 @@ class DashboardService:
             print("[service] 安全重启模式：跳过 iTerm2 终端清理", flush=True)
             # 启动完成后清理标志文件（旧进程 stop 已用完或不存在）
             self._remove_safe_restart_flag()
-            # 自动接管所有孤儿终端（带管理标记但不在 records 中的 session）
-            try:
-                orphans = await self.scan_sessions()
-                adopted_count = 0
-                for orphan in orphans:
-                    try:
-                        await self.adopt_terminal(orphan["session_id"])
-                        adopted_count += 1
-                    except Exception as exc:
-                        print(f"[service] 自动接管失败 session={orphan['session_id']}: {exc}", flush=True)
-                if adopted_count > 0:
-                    print(f"[service] 自动接管 {adopted_count} 个终端", flush=True)
-            except Exception as exc:
-                print(f"[service] 自动接管扫描失败: {exc}", flush=True)
+            restored_count = await self._restore_cached_records_fast()
+            if restored_count > 0:
+                print(f"[service] 已从本地缓存快速恢复 {restored_count} 个终端", flush=True)
+            # 扫描/接管 iTerm2 属于慢路径，放到后台，避免阻塞服务启动。
+            self._orphan_adopt_task = asyncio.create_task(self._adopt_orphan_sessions_background())
         else:
             try:
                 await asyncio.wait_for(self.backend.cleanup_managed_terminals(), timeout=6)
@@ -127,6 +125,18 @@ class DashboardService:
         self._summary_task = asyncio.create_task(self._summary_loop())
 
     async def stop(self) -> None:
+        self._persist_terminal_state_now()
+        if self._orphan_adopt_task is not None:
+            self._orphan_adopt_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._orphan_adopt_task
+            self._orphan_adopt_task = None
+        if self._terminal_state_save_task is not None:
+            self._terminal_state_save_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._terminal_state_save_task
+            self._terminal_state_save_task = None
+            self._persist_terminal_state_now()
         # 停止 App 监控服务
         await self.app_monitor.stop()
         # 取消所有 hook done 延迟计时器
@@ -200,7 +210,12 @@ class DashboardService:
             with suppress(asyncio.CancelledError):
                 await task
         self.monitor_tasks.clear()
+        self._persist_terminal_state_now()
         await self.backend.stop()
+
+    @property
+    def used_fast_start_restore(self) -> bool:
+        return self._safe_restart_restored_from_cache
 
     @staticmethod
     def _safe_restart_flag_path() -> Path:
@@ -244,6 +259,95 @@ class DashboardService:
         if self._summary_queue is None:
             self._summary_queue = asyncio.Queue()
         return self._summary_queue
+
+    async def _restore_cached_records_fast(self) -> int:
+        if self._terminal_state_store is None or not hasattr(self.backend, "list_session_ids"):
+            return 0
+        cached_records = self._terminal_state_store.load()
+        if not cached_records:
+            return 0
+        try:
+            live_session_ids = set(await asyncio.wait_for(self.backend.list_session_ids(), timeout=3))
+        except Exception as exc:
+            print(f"[service] 快速恢复校验失败，回退后台接管: {exc}", flush=True)
+            return 0
+
+        restored: list[TerminalRecord] = []
+        seen_ids: set[str] = set()
+        async with self._records_lock():
+            for record in cached_records:
+                if record.handle.session_id not in live_session_ids:
+                    continue
+                if record.id in self.records or record.id in seen_ids:
+                    continue
+                record.is_live = False
+                record.last_error = None
+                self.records[record.id] = record
+                restored.append(record)
+                seen_ids.add(record.id)
+
+        for record in restored:
+            self._start_monitor(record.id)
+
+        if restored:
+            self._safe_restart_restored_from_cache = True
+            self._persist_terminal_state_now()
+        return len(restored)
+
+    async def _adopt_orphan_sessions_background(self) -> None:
+        try:
+            orphans = await self.scan_sessions()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print(f"[service] 自动接管扫描失败: {exc}", flush=True)
+            return
+
+        adopted_count = 0
+        for orphan in orphans:
+            session_id = orphan.get("session_id")
+            if not session_id:
+                continue
+            if any(record.handle.session_id == session_id for record in self.records.values()):
+                continue
+            try:
+                await self.adopt_terminal(session_id)
+                adopted_count += 1
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                print(f"[service] 自动接管失败 session={session_id}: {exc}", flush=True)
+        if adopted_count > 0:
+            print(f"[service] 后台自动接管 {adopted_count} 个终端", flush=True)
+
+    def _persist_terminal_state_now(self) -> None:
+        if self._terminal_state_store is None:
+            return
+        try:
+            self._terminal_state_store.save(self.records.values())
+        except Exception as exc:
+            print(f"[service] 保存终端状态缓存失败: {exc}", flush=True)
+
+    def _schedule_terminal_state_save(self, delay: float = 1.0) -> None:
+        if self._terminal_state_store is None:
+            return
+        if self._terminal_state_save_task is not None and not self._terminal_state_save_task.done():
+            return
+
+        async def _delayed_save() -> None:
+            try:
+                await asyncio.sleep(delay)
+                self._persist_terminal_state_now()
+            finally:
+                if self._terminal_state_save_task is asyncio.current_task():
+                    self._terminal_state_save_task = None
+
+        save_coro = _delayed_save()
+        try:
+            self._terminal_state_save_task = asyncio.create_task(save_coro)
+        except RuntimeError:
+            save_coro.close()
+            self._persist_terminal_state_now()
 
     def trigger_all_summaries(self) -> int:
         """后台强制重跑所有可摘要终端，统一并发上限。"""
@@ -520,6 +624,7 @@ class DashboardService:
         self._start_monitor(record.id)
         await self.enter_monitor_mode()
         await self._broadcast(self.record_event(record.id))
+        self._persist_terminal_state_now()
         return record.to_dict()
 
     async def split_terminal(self, terminal_id: str, direction: str) -> dict:
@@ -579,6 +684,7 @@ class DashboardService:
         self._start_monitor(record.id)
         await self.enter_monitor_mode()
         await self._broadcast(self.record_event(record.id))
+        self._persist_terminal_state_now()
         return record.to_dict()
 
     async def create_demo_terminals(self, count: int = 4) -> list[dict]:
@@ -677,6 +783,7 @@ class DashboardService:
             if self._is_missing_terminal_error(exc):
                 return await self._mark_terminal_closed(record, reason="真实窗口已被手动关闭")
             raise
+        self._persist_terminal_state_now()
         await self._broadcast(self.record_event(terminal_id))
         return record.to_dict()
 
@@ -699,6 +806,7 @@ class DashboardService:
         await self.backend.rename(record.handle, clean_name)
         record.name = clean_name
         record.updated_at = self._now()
+        self._persist_terminal_state_now()
         await self._broadcast(self.record_event(terminal_id))
         return record.to_dict()
 
@@ -709,6 +817,7 @@ class DashboardService:
         # 取消隐藏时，将窗口大小对齐到其他可见终端
         if not hidden:
             await self._align_frame_to_siblings(record)
+        self._persist_terminal_state_now()
         await self._broadcast(self.record_event(terminal_id))
         return record.to_dict()
 
@@ -736,6 +845,7 @@ class DashboardService:
         record.tags = clean_tags
         record.updated_at = self._now()
         await self.backend.set_tags(record.handle, clean_tags)
+        self._persist_terminal_state_now()
         await self._broadcast(self.record_event(terminal_id))
         return record.to_dict()
 
@@ -745,6 +855,7 @@ class DashboardService:
         record.muted = muted
         record.updated_at = self._now()
         await self.backend.set_muted(record.handle, muted)
+        self._persist_terminal_state_now()
         await self._broadcast(self.record_event(terminal_id))
         return record.to_dict()
 
@@ -762,6 +873,7 @@ class DashboardService:
             changed = await self._set_primary_terminal(None)
 
         if changed:
+            self._persist_terminal_state_now()
             await self._broadcast(self.snapshot_event())
         return self._get_record(terminal_id).to_dict()
 
@@ -887,6 +999,7 @@ class DashboardService:
             task.cancel()
         async with self._records_lock():
             del self.records[record.id]
+        self._persist_terminal_state_now()
         await self._broadcast(self.snapshot_event())
         return {"detached": True, "terminalId": terminal_id}
 
@@ -965,6 +1078,7 @@ class DashboardService:
             await self._broadcast(self.snapshot_event())
         else:
             await self._broadcast(self.record_event(record.id))
+        self._persist_terminal_state_now()
         return record.to_dict()
 
     async def close_all_terminals(self) -> list[dict]:
@@ -978,6 +1092,7 @@ class DashboardService:
             for rid in closed_ids:
                 self.records.pop(rid, None)
         # 广播 snapshot 确保前端拿到一致状态
+        self._persist_terminal_state_now()
         await self._broadcast(self.snapshot_event())
         return result
 
@@ -995,6 +1110,7 @@ class DashboardService:
         if cwd is not None:
             record.cwd = cwd
         await self._refresh_runtime_metadata(record)
+        self._persist_terminal_state_now()
         await self._broadcast(self.record_event(terminal_id))
         return record.to_dict()
 
@@ -1057,6 +1173,7 @@ class DashboardService:
             raise
         record.frame = frame
         record.updated_at = self._now()
+        self._persist_terminal_state_now()
         await self._broadcast(self.record_event(terminal_id))
         return record.to_dict()
 
@@ -1139,6 +1256,7 @@ class DashboardService:
                 errors.append({"terminalId": record.id, "error": str(e)})
 
         await self._broadcast(self.snapshot_event())
+        self._persist_terminal_state_now()
         return {"applied": applied, "skipped": skipped, "errors": errors}
 
     async def apply_grid_layout(self, params: GridLayoutParams) -> dict:
@@ -1210,27 +1328,31 @@ class DashboardService:
         last_broadcast_time: float = 0.0
         min_interval: float = 0.3  # 最小广播间隔 300ms
         pending_broadcast: asyncio.Task[None] | None = None
+        first_sample = True
         try:
             async for text, screen_html in self.backend.stream_screen(record.handle):
                 old_hash = record.content_hash
                 old_status = record.status
                 old_program = record.program
+                old_is_live = record.is_live
                 self._apply_screen_text(record, text, screen_html, is_live=True)
 
                 status_changed = record.status != old_status
                 content_changed = record.content_hash != old_hash
 
-                # 内容变化时才更新工作目录，避免无意义的 API 调用
-                if content_changed:
+                # 内容变化或缓存恢复后的第一帧，才补齐工作目录和前台进程。
+                if content_changed or first_sample:
                     cwd = await self.backend.get_cwd(record.handle)
                     if cwd is not None:
                         record.cwd = cwd
                     await self._refresh_runtime_metadata(record)
+                    first_sample = False
 
                 program_changed = record.program != old_program
+                live_changed = record.is_live != old_is_live
 
-                # 状态或识别结果变了但内容没变，立即广播不限速
-                if (status_changed or program_changed) and not content_changed:
+                # 状态、识别结果或实时连接状态变了但内容没变，立即广播不限速
+                if (status_changed or program_changed or live_changed) and not content_changed:
                     if pending_broadcast is not None and not pending_broadcast.done():
                         pending_broadcast.cancel()
                         pending_broadcast = None
@@ -1239,7 +1361,7 @@ class DashboardService:
                     continue
 
                 # 内容、状态、识别结果都没变，跳过广播
-                if not content_changed and not program_changed:
+                if not content_changed and not program_changed and not live_changed:
                     continue
 
                 now = time.time()
@@ -1299,6 +1421,7 @@ class DashboardService:
         task = self.monitor_tasks.pop(record.id, None)
         if task is not None and task is not asyncio.current_task():
             task.cancel()
+        self._persist_terminal_state_now()
         await self._broadcast(self.record_event(record.id))
         await self.enter_monitor_mode()
         return record.to_dict()
@@ -1323,7 +1446,7 @@ class DashboardService:
     _IDLE_STATUSES = frozenset({TerminalStatus.done, TerminalStatus.idle, TerminalStatus.waiting})
     _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
     _CODEX_WORKING_LINE_RE = re.compile(
-        r"^\s*[│|]?\s*Working\s*\([^)]*esc\s+to\s+interrupt[^)]*\)\s*$",
+        r"^\s*[│|]?\s*Working\s*\([^)]*(?:esc|ctrl\s*[+-]?\s*c|control\s*[+-]?\s*c|interrupt)[^)]*\)\s*$",
         re.IGNORECASE,
     )
     _CODEX_CONTEXT_LINE_RE = re.compile(
@@ -1339,6 +1462,12 @@ class DashboardService:
         r"(?:esc|ctrl|tokens?|context|interrupt|\d+s)\s*$",
         re.IGNORECASE,
     )
+    _FOCUS_SUPPRESSION_BYPASS_MARKERS = frozenset({
+        "codex-working-indicator",
+        "codex-statusline-working",
+        "codex-statusline-starting",
+        "claude-code-team-running",
+    })
 
     def _apply_screen_text(
         self,
@@ -1387,8 +1516,10 @@ class DashboardService:
         # ── 状态守卫链（顺序不可调换）──
         # 1. 焦点守卫：终端有焦点时（用户正在交互），不要从空闲变为运行中
         #    等终端失焦后由 _focus_recheck_loop 重新评估
+        has_agent_running_evidence = self._has_agent_running_evidence(status, markers)
         if (old_status in self._IDLE_STATUSES
                 and status == TerminalStatus.running
+                and not has_agent_running_evidence
                 and self._is_terminal_focused(record)):
             status = old_status
             self._focus_suppressed.add(record.id)
@@ -1397,6 +1528,7 @@ class DashboardService:
         #    用户在 shell 提示符打字时，只有最后一行变化且提示符仍可见
         if (old_status in self._IDLE_STATUSES
                 and status == TerminalStatus.running
+                and not has_agent_running_evidence
                 and record.screen_text
                 and self._is_likely_typing(record.screen_text, text)):
             status = old_status
@@ -1410,6 +1542,7 @@ class DashboardService:
         record.is_live = is_live
         if record.status != TerminalStatus.error:
             record.last_error = None
+        self._schedule_terminal_state_save()
 
     @classmethod
     def _is_likely_typing(cls, old_text: str, new_text: str) -> bool:
@@ -1433,6 +1566,13 @@ class DashboardService:
         if hasattr(self.backend, 'is_session_focused'):
             return self.backend.is_session_focused(record.handle.session_id)
         return False
+
+    @classmethod
+    def _has_agent_running_evidence(cls, status: TerminalStatus, markers: list[str]) -> bool:
+        """识别高置信度 agent 正在工作的证据，避免被交互守卫压回空闲。"""
+        return status == TerminalStatus.running and any(
+            marker in cls._FOCUS_SUPPRESSION_BYPASS_MARKERS for marker in markers
+        )
 
     def _track_agent_interaction_change(
         self,
@@ -1654,6 +1794,7 @@ class DashboardService:
         runtime_info = await self.backend.get_runtime_info(record.handle)
         record.program = detect_terminal_program(runtime_info, record.screen_text)
         self._sync_agent_interaction_baseline(record)
+        self._schedule_terminal_state_save()
 
     async def update_hook_status(self, iterm_session_id: str, status: str) -> str | None:
         """根据 hook 通知更新终端状态。
@@ -1690,6 +1831,7 @@ class DashboardService:
             matched_record.status = TerminalStatus.running
             matched_record.summary = "Claude Code 工作中"
             matched_record.updated_at = self._now()
+            self._schedule_terminal_state_save()
             await self._broadcast(self.record_event(terminal_id))
 
         elif status == "done":
@@ -1706,6 +1848,7 @@ class DashboardService:
                     rec.status = TerminalStatus.done
                     rec.summary = "Claude Code 已完成"
                     rec.updated_at = self._now()
+                    self._schedule_terminal_state_save()
                     await self._broadcast(self.record_event(tid))
 
             self._hook_done_timers[terminal_id] = asyncio.create_task(
@@ -1909,6 +2052,7 @@ class DashboardService:
                     record.ai_summary_status = "fallback"
                     record.ai_summary_reason = result.reason or previous_reason or "api_error"
                     record.ai_summary_error_detail = result.error_detail or previous_error_detail
+                self._schedule_terminal_state_save()
                 await self._broadcast(self.record_event(terminal_id))
                 return
             record.ai_summary = result.text
@@ -1925,4 +2069,5 @@ class DashboardService:
             from multi_iterm2_manager.summarizer import TerminalSummarizer
             record.ai_summary = TerminalSummarizer.fallback_text(record.screen_text)
             record.ai_summary_at = time.time()
+        self._schedule_terminal_state_save()
         await self._broadcast(self.record_event(terminal_id))

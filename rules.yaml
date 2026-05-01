@@ -10,7 +10,7 @@ rules:
     priority: 110
     last_n_lines: 8
     patterns:
-      - "\\bWorking\\s*\\([^\\n)]*esc\\s+to\\s+interrupt\\)"
+      - "\\bWorking\\s*\\([^\\n)]*(?:esc|ctrl\\s*[+-]?\\s*c|control\\s*[+-]?\\s*c|interrupt)[^\\n)]*\\)"
 
   # --- 内容规则：等待人类（Claude Code 特征） ---
   - name: claude-code-permission

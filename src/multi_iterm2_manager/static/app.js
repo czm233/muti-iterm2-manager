@@ -27,6 +27,7 @@ const state = {
   activeGridResize: null,
   activeSplitResize: null,
   activeCardDrag: null,
+  suppressNextTerminalClickId: null,
   editingTitleTerminalId: null,
   filter: "default",
   page: 1,
@@ -3505,6 +3506,12 @@ function handleCardPointerUp(event) {
   const shouldCommit = session.started;
   if (shouldCommit) {
     event.preventDefault();
+    state.suppressNextTerminalClickId = session.terminalId;
+    window.setTimeout(() => {
+      if (state.suppressNextTerminalClickId === session.terminalId) {
+        state.suppressNextTerminalClickId = null;
+      }
+    }, 200);
     commitCardPointerDrag(event.clientX, event.clientY);
   }
   stopCardPointerDrag();
@@ -3768,9 +3775,6 @@ function rerenderBriefCard(card, record) {
       data-summary-error-detail="${escapeHtml(record.aiSummaryErrorDetail || "")}"
     >
 	      <div class="wall-card-brief-shell">
-	        <div class="wall-card-brief-drag-zone">
-	          <button type="button" class="ghost wall-card-drag-handle" title="拖拽排序" aria-label="拖拽排序"><svg width="100%" height="100%" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M12 1l-3 3.5h6L12 1z"/><path d="M12 23l-3-3.5h6L12 23z"/><path d="M1 12l3.5-3v6L1 12z"/><path d="M23 12l-3.5-3v6L23 12z"/><rect x="11.25" y="4" width="1.5" height="16" rx=".75"/><rect x="4" y="11.25" width="16" height="1.5" rx=".75"/></svg></button>
-	        </div>
 	        <div class="wall-card-brief-folder-line">
 	          <span class="wall-card-folder-title" title="${escapeHtml(getSummaryFolderPath(record) || folderName)}">${escapeHtml(folderName)}</span>
         </div>
@@ -4006,9 +4010,9 @@ function buildSummaryGridModel(records) {
   let columns = Math.max(
     fitColumns,
     Math.ceil(records.length / usableRows),
+    Math.ceil((maxAssignedIndex + 1) / usableRows),
     1,
   );
-  columns = Math.min(columns, fitColumns);
   const slots = Array.from({ length: columns * usableRows }, () => null);
   const unassignedRecords = [];
 
@@ -4783,8 +4787,16 @@ function getNextAttentionTerminal() {
 
 function syncTerminalOrder(terminals) {
   const incomingIds = terminals.map((record) => record.id);
-  const existing = state.orderedTerminalIds.filter((id) => incomingIds.includes(id));
-  const appended = incomingIds.filter((id) => !existing.includes(id));
+  const seen = new Set();
+  const existing = [];
+  for (const id of state.orderedTerminalIds) {
+    if (typeof id !== "string" || !id || seen.has(id)) {
+      continue;
+    }
+    existing.push(id);
+    seen.add(id);
+  }
+  const appended = incomingIds.filter((id) => !seen.has(id));
   state.orderedTerminalIds = [...existing, ...appended];
 }
 
@@ -5303,7 +5315,13 @@ function restoreInputFocus(card, record) {
 function bindCardActions(card, record) {
   card.draggable = false;
   card.tabIndex = 0;
-  card.setAttribute("aria-label", `终端 ${displayTitle(record)}，可右键或使用 Shift+F10 打开操作菜单`);
+  const isBriefCard = state.viewMode === "brief" || card.classList.contains("wall-card--brief");
+  card.setAttribute(
+    "aria-label",
+    isBriefCard
+      ? `终端 ${displayTitle(record)}，左键点击打开，按住拖动移动，右键或使用 Shift+F10 打开操作菜单`
+      : `终端 ${displayTitle(record)}，可右键或使用 Shift+F10 打开操作菜单`
+  );
   const startRename = () => {
     if (!title || !titleInput) return;
     state.editingTitleTerminalId = record.id;
@@ -5382,6 +5400,11 @@ function bindCardActions(card, record) {
       beginCardPointerDrag(card, record, event);
     };
   }
+  if (terminalArea && isBriefCard) {
+    terminalArea.onpointerdown = (event) => {
+      beginCardPointerDrag(card, record, event);
+    };
+  }
 
   card.onkeydown = (event) => {
     if ((event.shiftKey && event.key === "F10") || event.key === "ContextMenu") {
@@ -5406,6 +5429,11 @@ function bindCardActions(card, record) {
     closeAllTopbarMenus();
     closeTerminalContextMenu();
     event.stopPropagation();
+    if (state.suppressNextTerminalClickId === record.id) {
+      state.suppressNextTerminalClickId = null;
+      event.preventDefault();
+      return;
+    }
     if (state.activeCardDrag || state.draggedTerminalId) return;
     if (record.status === "closed") return;
     try {
@@ -5792,6 +5820,13 @@ function applySnapshot(terminals, layout = null, allTags = null) {
   for (const record of terminals) {
     state.terminals.set(record.id, record);
   }
+  const closedIds = new Set(terminals.filter((record) => record.status === "closed").map((record) => record.id));
+  if (closedIds.size > 0) {
+    state.orderedTerminalIds = state.orderedTerminalIds.filter((id) => !closedIds.has(id));
+    for (const id of closedIds) {
+      delete state.summaryCellAssignments[id];
+    }
+  }
   // 从后端数据恢复隐藏状态（优先级高于 localStorage）
   for (const record of terminals) {
     if (record.hidden) {
@@ -5826,7 +5861,8 @@ function applySnapshot(terminals, layout = null, allTags = null) {
       state.queueDismissed.delete(id);
     }
   }
-  pruneSummaryCellAssignments(new Set(terminals.map((record) => record.id)));
+  // 后端重启早期可能先返回空/部分 snapshot，再由后台接管陆续补回终端。
+  // 蜂巢位置是用户手动布局，不能因为这类瞬时缺席就删除。
   syncTerminalOrder(terminals);
   syncLayoutTree();
   initQueueFromSnapshot();
@@ -6220,6 +6256,7 @@ function connectWebSocket() {
     }
     if (!state.orderedTerminalIds.includes(payload.terminal.id)) {
       state.orderedTerminalIds.push(payload.terminal.id);
+      saveViewState();
     }
     syncLayoutTree();
     updateQueue(payload.terminal.id, oldStatus, payload.terminal.status);

@@ -279,6 +279,16 @@ class UiSettingsPayload(BaseModel):
 @app.on_event("startup")
 async def on_startup() -> None:
     await service.start()
+    if service.used_fast_start_restore:
+        asyncio.create_task(_apply_target_screen_default_layout_background())
+        return
+    try:
+        await _apply_target_screen_default_layout()
+    except Exception as exc:
+        print(f"[startup] 应用默认屏幕布局失败: {exc}", flush=True)
+
+
+async def _apply_target_screen_default_layout_background() -> None:
     try:
         await _apply_target_screen_default_layout()
     except Exception as exc:
