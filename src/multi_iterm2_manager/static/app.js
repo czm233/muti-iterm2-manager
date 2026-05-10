@@ -3999,18 +3999,9 @@ function buildSummaryGridModel(records) {
   const usableRows = usableRowEntries.length;
   state.summaryCellAssignments = normalizeSummaryCellAssignments(state.summaryCellAssignments);
 
-  let maxAssignedIndex = -1;
-  for (const record of records) {
-    const assignedIndex = state.summaryCellAssignments[record.id];
-    if (Number.isInteger(assignedIndex) && assignedIndex >= 0) {
-      maxAssignedIndex = Math.max(maxAssignedIndex, assignedIndex);
-    }
-  }
-
   let columns = Math.max(
     fitColumns,
     Math.ceil(records.length / usableRows),
-    Math.ceil((maxAssignedIndex + 1) / usableRows),
     1,
   );
   const slots = Array.from({ length: columns * usableRows }, () => null);
@@ -6500,6 +6491,31 @@ refreshAllButton.onclick = async () => {
 
 const adoptSessionList = document.getElementById("adopt-session-list");
 
+function managedAdoptSessionRows() {
+  return [...state.terminals.values()]
+    .filter((record) => record && record.status !== "closed" && record.sessionId)
+    .map((record) => ({
+      session_id: record.sessionId,
+      name: record.name || record.sessionId,
+      title: record.program?.label || "已接管",
+      managed: true,
+    }));
+}
+
+function renderAdoptSessionItem(session) {
+  const isManaged = session.managed === true;
+  const action = isManaged
+    ? '<span class="adopt-session-status">已在监控墙</span>'
+    : `<button class="secondary adopt-btn" data-session-id="${escapeHtml(session.session_id)}">接管</button>`;
+  return `
+    <div class="adopt-session-item${isManaged ? ' is-managed' : ''}">
+      <span class="adopt-session-name">${escapeHtml(session.name || session.session_id)}</span>
+      ${session.title ? `<span class="adopt-session-title">${escapeHtml(session.title)}</span>` : ''}
+      ${action}
+    </div>
+  `;
+}
+
 async function doScanSessions() {
   const scanBtn = adoptSessionList.querySelector("#scan-sessions");
   if (scanBtn) {
@@ -6509,19 +6525,19 @@ async function doScanSessions() {
   try {
     const data = await request("/api/iterm2/sessions");
     const sessions = data.items || [];
-    if (sessions.length === 0) {
+    const managedSessions = managedAdoptSessionRows();
+    if (sessions.length === 0 && managedSessions.length === 0) {
       adoptSessionList.innerHTML = `
         <span class="adopt-empty">未发现可接管的终端</span>
         <button id="scan-sessions" class="secondary">重新扫描</button>
       `;
     } else {
-      adoptSessionList.innerHTML = sessions.map((s) => `
-        <div class="adopt-session-item">
-          <span class="adopt-session-name">${escapeHtml(s.name || s.session_id)}</span>
-          ${s.title ? `<span class="adopt-session-title">${escapeHtml(s.title)}</span>` : ''}
-          <button class="secondary adopt-btn" data-session-id="${escapeHtml(s.session_id)}">接管</button>
-        </div>
-      `).join('') + '<button id="scan-sessions" class="secondary">重新扫描</button>';
+      const emptyHint = sessions.length === 0
+        ? '<span class="adopt-empty">没有未接管终端；下面这些已经在监控墙中</span>'
+        : '';
+      adoptSessionList.innerHTML = emptyHint
+        + [...sessions, ...managedSessions].map((s) => renderAdoptSessionItem(s)).join('')
+        + '<button id="scan-sessions" class="secondary">重新扫描</button>';
     }
     // 绑定重建后的扫描按钮
     const newScanBtn = adoptSessionList.querySelector("#scan-sessions");

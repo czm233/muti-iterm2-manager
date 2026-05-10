@@ -77,7 +77,13 @@ async def test_fast_restore_uses_cached_records_and_prunes_missing_sessions(tmp_
         handle=TerminalHandle(window_id="window-missing", session_id="session-missing"),
         status=TerminalStatus.running,
     )
-    store.save([live_record, missing_record])
+    duplicate_live_record = TerminalRecord(
+        id="task-live-duplicate",
+        name="Live Duplicate",
+        handle=TerminalHandle(window_id="window-live", session_id="session-live"),
+        status=TerminalStatus.running,
+    )
+    store.save([live_record, duplicate_live_record, missing_record])
 
     class RestoreBackend:
         async def list_session_ids(self) -> set[str]:

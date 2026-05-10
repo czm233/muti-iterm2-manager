@@ -540,6 +540,9 @@ class ITerm2Backend:
             for window in list(app.terminal_windows):
                 for tab in list(window.tabs):
                     for session in list(tab.sessions):
+                        session_id = getattr(session, "session_id", None)
+                        if known_session_ids is not None and session_id in known_session_ids:
+                            continue
                         try:
                             role = await session.async_get_variable(ANCHOR_ROLE_VAR)
                         except Exception:
@@ -550,7 +553,7 @@ class ITerm2Backend:
                         if is_managed:
                             # 若服务传入了已知 session 集合，则"有标记但不在集合里"的
                             # 属于孤儿托管（服务重启后遗留），应包含进扫描结果
-                            if known_session_ids is not None and session.session_id not in known_session_ids:
+                            if known_session_ids is not None and session_id not in known_session_ids:
                                 pass  # 孤儿，继续加入结果
                             else:
                                 continue  # 当前服务已知的管理终端，跳过
@@ -565,7 +568,7 @@ class ITerm2Backend:
                         except Exception:
                             title = ""
                         results.append({
-                            "session_id": session.session_id,
+                            "session_id": session_id or session.session_id,
                             "window_id": window.window_id,
                             "tab_id": tab.tab_id,
                             "name": name,

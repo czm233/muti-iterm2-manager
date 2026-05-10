@@ -3397,6 +3397,11 @@ body.is-resizing-split * {
   border: 1px solid rgba(148, 163, 184, 0.08);
 }
 
+.adopt-session-item.is-managed {
+  background: rgba(15, 20, 29, 0.68);
+  border-color: rgba(52, 211, 153, 0.16);
+}
+
 .adopt-session-name {
   flex: 1;
   font-size: 0.82rem;
@@ -3412,6 +3417,17 @@ body.is-resizing-split * {
   max-width: 120px;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.adopt-session-status {
+  flex: 0 0 auto;
+  font-size: 0.72rem;
+  color: #86efac;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: rgba(34, 197, 94, 0.12);
+  border: 1px solid rgba(34, 197, 94, 0.18);
   white-space: nowrap;
 }
 

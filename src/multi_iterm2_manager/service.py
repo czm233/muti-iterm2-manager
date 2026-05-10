@@ -35,6 +35,26 @@ from multi_iterm2_manager.summarizer import SUMMARY_MAX_CONCURRENCY, SummaryConf
 
 logger = logging.getLogger(__name__)
 
+_AUTO_TITLE_PREFIX_RE = re.compile(r"^[\s⠁-⣿]+")
+_AUTO_AGENT_SUFFIX_RE = re.compile(
+    r"""\s+\((?:codex|claude(?:-[\w-]+)?|zsh|bash|fish|sh)["']?\)\s*$""",
+    re.IGNORECASE,
+)
+
+
+def _normalize_terminal_name(name: str | None) -> str:
+    original = (name or "").strip()
+    if not original:
+        return ""
+    normalized = original
+    has_auto_prefix = bool(re.match(r"^[⠁-⣿]", normalized))
+    if has_auto_prefix:
+        normalized = _AUTO_TITLE_PREFIX_RE.sub("", normalized).strip()
+    suffix_match = _AUTO_AGENT_SUFFIX_RE.search(normalized)
+    if suffix_match and (has_auto_prefix or '"' in suffix_match.group(0) or "'" in suffix_match.group(0)):
+        normalized = normalized[:suffix_match.start()].strip()
+    return normalized or original
+
 
 class DashboardService:
     def __init__(self, settings: Settings) -> None:
@@ -81,6 +101,7 @@ class DashboardService:
         # 新建/拆分终端默认暂停自动摘要，避免 shell prompt 初始重绘触发 LLM
         self._summary_suspended_terminal_ids: set[str] = set()
         self._missing_session_scan_counts: dict[str, int] = {}
+        self._pending_name_sync_terminal_ids: set[str] = set()
         self._terminal_state_store: TerminalStateStore | None = (
             None if isinstance(self.backend, MockTerminalBackend) else TerminalStateStore.default()
         )
@@ -274,17 +295,23 @@ class DashboardService:
 
         restored: list[TerminalRecord] = []
         seen_ids: set[str] = set()
+        seen_session_ids: set[str] = set()
         async with self._records_lock():
             for record in cached_records:
                 if record.handle.session_id not in live_session_ids:
                     continue
                 if record.id in self.records or record.id in seen_ids:
                     continue
+                if record.handle.session_id in seen_session_ids:
+                    continue
+                if self._find_active_record_by_session(record.handle.session_id) is not None:
+                    continue
                 record.is_live = False
                 record.last_error = None
                 self.records[record.id] = record
                 restored.append(record)
                 seen_ids.add(record.id)
+                seen_session_ids.add(record.handle.session_id)
 
         for record in restored:
             self._start_monitor(record.id)
@@ -382,12 +409,17 @@ class DashboardService:
         self._subscribers.discard(queue)
 
     def list_terminals(self) -> list[dict]:
+        self._normalize_record_names()
+        self._deduplicate_active_records_by_session()
         return [record.to_dict() for record in self.records.values()]
 
     def list_active_terminals(self) -> list[dict]:
+        self._normalize_record_names()
+        self._deduplicate_active_records_by_session()
         return [record.to_dict() for record in self.records.values() if record.status != TerminalStatus.closed]
 
     def monitor_layout(self) -> dict:
+        self._deduplicate_active_records_by_session()
         count = len([record for record in self.records.values() if record.status != TerminalStatus.closed])
         columns, rows = suggest_monitor_grid(count)
         return {"count": count, "columns": columns, "rows": rows}
@@ -418,6 +450,100 @@ class DashboardService:
             if candidate.lower() not in existing:
                 return candidate
             index += 1
+
+    def _normalize_record_names(self) -> None:
+        changed = False
+        for record in self.records.values():
+            normalized = _normalize_terminal_name(record.name)
+            if normalized and normalized != record.name:
+                record.name = normalized
+                record.updated_at = self._now()
+                self._pending_name_sync_terminal_ids.add(record.id)
+                changed = True
+        if changed:
+            self._schedule_terminal_state_save(delay=0.1)
+
+    def _find_active_record_by_session(self, session_id: str | None) -> TerminalRecord | None:
+        if not session_id:
+            return None
+        for record in self.records.values():
+            if record.status != TerminalStatus.closed and record.handle.session_id == session_id:
+                return record
+        return None
+
+    @staticmethod
+    def _merge_duplicate_session_record(keep: TerminalRecord, duplicate: TerminalRecord) -> None:
+        if not keep.screen_text and duplicate.screen_text:
+            keep.screen_text = duplicate.screen_text
+            keep.screen_html = duplicate.screen_html
+            keep.content_hash = duplicate.content_hash
+            keep.content_stable_since = duplicate.content_stable_since
+        if keep.frame is None and duplicate.frame is not None:
+            keep.frame = duplicate.frame
+        if not keep.cwd and duplicate.cwd:
+            keep.cwd = duplicate.cwd
+        if duplicate.is_primary:
+            keep.is_primary = True
+        if duplicate.tags:
+            keep.tags = list(dict.fromkeys([*keep.tags, *duplicate.tags]))
+        if keep.status == TerminalStatus.idle and duplicate.status not in {TerminalStatus.idle, TerminalStatus.closed}:
+            keep.status = duplicate.status
+            keep.markers = list(duplicate.markers)
+            keep.summary = duplicate.summary
+            keep.updated_at = duplicate.updated_at
+            keep.last_error = duplicate.last_error
+            keep.is_live = duplicate.is_live
+        if not keep.ai_summary and duplicate.ai_summary:
+            keep.ai_summary = duplicate.ai_summary
+            keep.ai_summary_at = duplicate.ai_summary_at
+            keep.ai_summary_status = duplicate.ai_summary_status
+            keep.ai_summary_reason = duplicate.ai_summary_reason
+            keep.ai_summary_error_detail = duplicate.ai_summary_error_detail
+
+    @staticmethod
+    def _current_task_or_none() -> asyncio.Task[Any] | None:
+        try:
+            return asyncio.current_task()
+        except RuntimeError:
+            return None
+
+    def _drop_duplicate_terminal_record(self, terminal_id: str) -> None:
+        current_task = self._current_task_or_none()
+        task = self.monitor_tasks.pop(terminal_id, None)
+        if task is not None and task is not current_task:
+            task.cancel()
+        timer = self._hook_done_timers.pop(terminal_id, None)
+        if timer is not None and timer is not current_task:
+            timer.cancel()
+        self.records.pop(terminal_id, None)
+        self._missing_session_scan_counts.pop(terminal_id, None)
+        self._focus_suppressed.discard(terminal_id)
+        self._summary_suspended_terminal_ids.discard(terminal_id)
+        self._summary_skipped_initial_hash.pop(terminal_id, None)
+        self._last_summary_status.pop(terminal_id, None)
+        self._pending_name_sync_terminal_ids.discard(terminal_id)
+
+    def _deduplicate_active_records_by_session(self) -> set[str]:
+        active_by_session: dict[str, TerminalRecord] = {}
+        duplicate_ids: set[str] = set()
+        for record in list(self.records.values()):
+            if record.status == TerminalStatus.closed:
+                continue
+            session_id = record.handle.session_id
+            if not session_id:
+                continue
+            existing = active_by_session.get(session_id)
+            if existing is None:
+                active_by_session[session_id] = record
+                continue
+            self._merge_duplicate_session_record(existing, record)
+            duplicate_ids.add(record.id)
+
+        for terminal_id in duplicate_ids:
+            self._drop_duplicate_terminal_record(terminal_id)
+        if duplicate_ids:
+            self._persist_terminal_state_now()
+        return duplicate_ids
 
     async def health_status(self) -> dict:
         return {
@@ -1040,10 +1166,22 @@ class DashboardService:
 
     async def adopt_terminal(self, session_id: str, name: str | None = None) -> dict:
         explicit_name = (name or '').strip() if name else None
+        existing_record = self._find_active_record_by_session(session_id)
+        if existing_record is not None:
+            return existing_record.to_dict()
+
         handle = await self.backend.adopt(session_id, explicit_name)
+        existing_record = self._find_active_record_by_session(handle.session_id)
+        if existing_record is not None:
+            try:
+                await self.backend.set_terminal_id(handle, existing_record.id)
+            except Exception:
+                pass
+            return existing_record.to_dict()
+
         restored_managed_terminal = handle.adopted_id is not None
         # 优先使用显式传入的名字，其次使用从 iTerm2 读取的原始名字，最后回退到默认名
-        final_name = explicit_name or (handle.adopted_name or '').strip() or self._next_default_name()
+        final_name = explicit_name or _normalize_terminal_name(handle.adopted_name) or self._next_default_name()
         # 把最终名字写回 iTerm2 自定义变量，确保下次重启/接管时不会丢失
         await self.backend.rename(handle, final_name)
         frame = await self.backend.get_frame(handle)
@@ -1064,8 +1202,19 @@ class DashboardService:
             await self.backend.set_terminal_id(handle, record.id)
         except Exception:
             pass
+        inserted = False
         async with self._records_lock():
-            self.records[record.id] = record
+            existing_record = self._find_active_record_by_session(record.handle.session_id)
+            if existing_record is None:
+                self.records[record.id] = record
+                inserted = True
+        if not inserted:
+            assert existing_record is not None
+            try:
+                await self.backend.set_terminal_id(handle, existing_record.id)
+            except Exception:
+                pass
+            return existing_record.to_dict()
         if record.is_primary:
             await self._set_primary_terminal(record.id)
         # 仅对首次接管的外部终端做兄弟窗口对齐；安全重启恢复的托管终端保留原布局。
@@ -1262,6 +1411,7 @@ class DashboardService:
     async def apply_grid_layout(self, params: GridLayoutParams) -> dict:
         columns = max(1, params.columns)
         rows = max(1, params.rows)
+        self._deduplicate_active_records_by_session()
         payload = {
             "type": "monitor-layout",
             "layout": {
@@ -1283,6 +1433,10 @@ class DashboardService:
         }
 
     def record_event(self, terminal_id: str) -> dict:
+        self._normalize_record_names()
+        duplicate_ids = self._deduplicate_active_records_by_session()
+        if terminal_id in duplicate_ids:
+            return self.snapshot_event()
         record = self._get_record(terminal_id)
         return {
             "type": "terminal-updated",
@@ -1331,6 +1485,8 @@ class DashboardService:
         first_sample = True
         try:
             async for text, screen_html in self.backend.stream_screen(record.handle):
+                if terminal_id not in self.records:
+                    return
                 old_hash = record.content_hash
                 old_status = record.status
                 old_program = record.program
@@ -1382,6 +1538,8 @@ class DashboardService:
 
                     async def _deferred_broadcast(tid: str, d: float) -> None:
                         await asyncio.sleep(d)
+                        if tid not in self.records:
+                            return
                         nonlocal last_broadcast_time
                         last_broadcast_time = time.time()
                         await self._broadcast(self.record_event(tid))
@@ -1404,7 +1562,8 @@ class DashboardService:
                 record.status = TerminalStatus.error
                 record.updated_at = self._now()
                 record.is_live = False
-                await self._broadcast(self.record_event(terminal_id))
+                if terminal_id in self.records:
+                    await self._broadcast(self.record_event(terminal_id))
         else:
             # 流正常结束（非异常、非取消），说明会话已消失
             if record.id in self.records and record.status != TerminalStatus.closed:
@@ -1793,8 +1952,24 @@ class DashboardService:
     async def _refresh_runtime_metadata(self, record: TerminalRecord) -> None:
         runtime_info = await self.backend.get_runtime_info(record.handle)
         record.program = detect_terminal_program(runtime_info, record.screen_text)
+        await self._sync_normalized_record_name(record)
         self._sync_agent_interaction_baseline(record)
         self._schedule_terminal_state_save()
+
+    async def _sync_normalized_record_name(self, record: TerminalRecord) -> None:
+        normalized = _normalize_terminal_name(record.name)
+        needs_sync = record.id in self._pending_name_sync_terminal_ids
+        if normalized and normalized != record.name:
+            record.name = normalized
+            record.updated_at = self._now()
+            needs_sync = True
+        if not needs_sync:
+            return
+        try:
+            await self.backend.rename(record.handle, record.name)
+        except Exception:
+            return
+        self._pending_name_sync_terminal_ids.discard(record.id)
 
     async def update_hook_status(self, iterm_session_id: str, status: str) -> str | None:
         """根据 hook 通知更新终端状态。
