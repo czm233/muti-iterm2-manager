@@ -7,6 +7,7 @@ const CONNECTION_DIALOG_SHOW_DELAY_MS = 600;
 const CONNECTION_RETRY_DELAY_MS = 3000;
 const CONNECTION_LONG_WAIT_MS = 30000;
 const CONNECTION_SUCCESS_HOLD_MS = 1000;
+const PRIMARY_COMPLETION_ALERT_STATUSES = new Set(["done", "error"]);
 
 const state = {
   terminals: new Map(),
@@ -37,6 +38,7 @@ const state = {
   defaultUiSettings: null,
   hiddenTerminalIds: new Set(),   // 用户手动隐藏的终端 ID 集合，持久化到 localStorage
   mutedTerminalIds: new Set(),    // 用户手动静默的终端 ID 集合，静默终端不进入队列
+  primaryCompletionAlerts: new Map(), // 最重要任务完成/异常后的待查看提醒: Map<terminalId, status>
   attentionSnapshot: null,        // 进入"待处理"筛选时快照的 ID 集合，避免处理后立即消失
   _rafPending: false,             // rAF 是否已调度
   _needFullRefresh: false,        // 是否需要全量刷新
@@ -58,6 +60,10 @@ const state = {
     showTimer: null,
     tickTimer: null,
     closeTimer: null,
+  },
+  renameDialog: {
+    terminalId: null,
+    saving: false,
   },
   ideaDialog: {
     selectedFolderKey: null,
@@ -95,6 +101,137 @@ function shouldTrackTerminalStatus(record) {
   return Boolean(record) && isAgentProgram(record.program);
 }
 
+function getPrimaryCompletionAlertStatus(recordOrId) {
+  const terminalId = typeof recordOrId === "string" ? recordOrId : recordOrId?.id;
+  if (!terminalId) {
+    return null;
+  }
+  const status = state.primaryCompletionAlerts.get(terminalId);
+  return PRIMARY_COMPLETION_ALERT_STATUSES.has(status) ? status : null;
+}
+
+function hasPrimaryCompletionAlert(record) {
+  if (!record?.isPrimary || record.status === "closed") {
+    return false;
+  }
+  return getPrimaryCompletionAlertStatus(record) === record.status;
+}
+
+function primaryCompletionAlertLabel(status) {
+  if (status === "error") {
+    return "异常待查看";
+  }
+  if (status === "done") {
+    return "已完成待查看";
+  }
+  if (status === "waiting") {
+    return "等待中";
+  }
+  return "待查看";
+}
+
+function getPrimaryVisualAttentionStatus(record) {
+  if (!record?.isPrimary || record.status === "closed") {
+    return null;
+  }
+  if (hasPrimaryCompletionAlert(record)) {
+    return getPrimaryCompletionAlertStatus(record);
+  }
+  if (record.status === "waiting") {
+    return "waiting";
+  }
+  return null;
+}
+
+function syncPrimaryCompletionAlertCard(terminalId) {
+  const card = document.getElementById(`card-${terminalId}`);
+  const record = state.terminals.get(terminalId);
+  if (!card || !record) {
+    return;
+  }
+  if (card.classList.contains("wall-card--brief")) {
+    rerenderBriefCard(card, record);
+    return;
+  }
+  card.className = getCardClassName(record, {
+    extraClasses: collectTransientCardClasses(card),
+  });
+  updateCardMeta(card, record);
+}
+
+function setPrimaryCompletionAlert(record, status) {
+  if (!record?.id || !PRIMARY_COMPLETION_ALERT_STATUSES.has(status)) {
+    return false;
+  }
+  let changed = false;
+  const clearedIds = [];
+  for (const id of [...state.primaryCompletionAlerts.keys()]) {
+    if (id !== record.id) {
+      state.primaryCompletionAlerts.delete(id);
+      clearedIds.push(id);
+      changed = true;
+    }
+  }
+  if (state.primaryCompletionAlerts.get(record.id) !== status) {
+    state.primaryCompletionAlerts.set(record.id, status);
+    changed = true;
+  }
+  if (changed) {
+    saveViewState();
+    for (const id of clearedIds) {
+      syncPrimaryCompletionAlertCard(id);
+    }
+  }
+  return changed;
+}
+
+function clearPrimaryCompletionAlert(terminalId) {
+  if (!terminalId || !state.primaryCompletionAlerts.has(terminalId)) {
+    return false;
+  }
+  state.primaryCompletionAlerts.delete(terminalId);
+  saveViewState();
+  syncPrimaryCompletionAlertCard(terminalId);
+  renderPrimaryFocus();
+  return true;
+}
+
+function syncPrimaryCompletionAlertFromUpdate(oldRecord, nextRecord) {
+  if (!nextRecord?.id) {
+    return;
+  }
+  const oldStatus = oldRecord?.status || null;
+  const nextStatus = nextRecord.status;
+  const shouldClear = !nextRecord.isPrimary
+    || !PRIMARY_COMPLETION_ALERT_STATUSES.has(nextStatus)
+    || nextStatus === "closed";
+  if (shouldClear) {
+    clearPrimaryCompletionAlert(nextRecord.id);
+    return;
+  }
+  if (oldStatus && oldStatus !== nextStatus) {
+    setPrimaryCompletionAlert(nextRecord, nextStatus);
+    return;
+  }
+  if (getPrimaryCompletionAlertStatus(nextRecord) !== nextStatus) {
+    clearPrimaryCompletionAlert(nextRecord.id);
+  }
+}
+
+function prunePrimaryCompletionAlerts() {
+  let changed = false;
+  for (const [id, status] of [...state.primaryCompletionAlerts.entries()]) {
+    const record = state.terminals.get(id);
+    if (!record || !record.isPrimary || record.status !== status || !PRIMARY_COMPLETION_ALERT_STATUSES.has(status)) {
+      state.primaryCompletionAlerts.delete(id);
+      changed = true;
+    }
+  }
+  if (changed) {
+    saveViewState();
+  }
+}
+
 function isTerminalHidden(recordOrId) {
   const terminalId = typeof recordOrId === "string" ? recordOrId : recordOrId?.id;
   return Boolean(terminalId) && state.hiddenTerminalIds.has(terminalId);
@@ -117,6 +254,7 @@ function saveViewState() {
       summaryCellAssignments: state.summaryCellAssignments,
       hiddenTerminalIds: [...state.hiddenTerminalIds],
       mutedTerminalIds: [...state.mutedTerminalIds],
+      primaryCompletionAlerts: [...state.primaryCompletionAlerts.entries()],
       queueDismissed: [...state.queueDismissed.entries()],
       selectedTag: state.selectedTag,
     };
@@ -149,6 +287,16 @@ function loadViewState() {
     }
     if (Array.isArray(payload.mutedTerminalIds)) {
       state.mutedTerminalIds = new Set(payload.mutedTerminalIds);
+    }
+    if (Array.isArray(payload.primaryCompletionAlerts)) {
+      state.primaryCompletionAlerts = new Map(
+        payload.primaryCompletionAlerts.filter((entry) =>
+          Array.isArray(entry)
+          && entry.length === 2
+          && typeof entry[0] === "string"
+          && PRIMARY_COMPLETION_ALERT_STATUSES.has(entry[1])
+        ),
+      );
     }
     if (Array.isArray(payload.queueDismissed)) {
       state.queueDismissed = new Map(
@@ -285,6 +433,13 @@ const connectionDialogDescription = document.getElementById("connection-dialog-d
 const connectionDialogDetail = document.getElementById("connection-dialog-detail");
 const connectionDialogAttempt = document.getElementById("connection-dialog-attempt");
 const connectionDialogRetry = document.getElementById("connection-dialog-retry");
+const renameDialog = document.getElementById("rename-dialog");
+const renameDialogForm = document.getElementById("rename-dialog-form");
+const renameDialogInput = document.getElementById("rename-dialog-input");
+const renameDialogError = document.getElementById("rename-dialog-error");
+const renameDialogClose = document.getElementById("rename-dialog-close");
+const renameDialogCancel = document.getElementById("rename-dialog-cancel");
+const renameDialogSubmit = document.getElementById("rename-dialog-submit");
 const ideaDialog = document.getElementById("idea-dialog");
 const ideaDialogContent = document.getElementById("idea-dialog-content");
 const ideaDialogClose = document.getElementById("idea-dialog-close");
@@ -1788,7 +1943,7 @@ async function runTerminalContextMenuAction(action) {
         break;
       case "rename":
         closeTerminalContextMenu();
-        await promptRenameTerminal(record);
+        openRenameDialog(record);
         break;
       case "split-vertical":
         closeTerminalContextMenu();
@@ -2701,6 +2856,38 @@ if (connectionDialog) {
   connectionDialog.addEventListener("cancel", (event) => {
     event.preventDefault();
   });
+}
+
+if (renameDialog) {
+  renameDialog.addEventListener("cancel", (event) => {
+    event.preventDefault();
+    closeRenameDialog();
+  });
+  renameDialog.addEventListener("click", (event) => {
+    if (event.target === renameDialog) {
+      closeRenameDialog();
+    }
+  });
+  bindPressedButtonFeedback(renameDialog, ".idea-dialog-button");
+}
+
+if (renameDialogForm) {
+  renameDialogForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    await submitRenameDialog();
+  });
+}
+
+if (renameDialogInput) {
+  renameDialogInput.addEventListener("input", () => setRenameDialogError(""));
+}
+
+if (renameDialogClose) {
+  renameDialogClose.onclick = () => closeRenameDialog();
+}
+
+if (renameDialogCancel) {
+  renameDialogCancel.onclick = () => closeRenameDialog();
 }
 
 function setMessage(text, isError = false) {
@@ -3671,6 +3858,10 @@ function getCardClassName(record, options = {}) {
   if (record.isPrimary && record.status !== "closed") {
     classes.push("wall-card--primary-focus");
   }
+  const primaryAttentionStatus = getPrimaryVisualAttentionStatus(record);
+  if (primaryAttentionStatus) {
+    classes.push("wall-card--primary-attention", `wall-card--primary-attention-${primaryAttentionStatus}`);
+  }
   if (Array.isArray(options.extraClasses) && options.extraClasses.length) {
     classes.push(...options.extraClasses);
   }
@@ -3739,6 +3930,10 @@ function buildBriefBadgesHtml(record, summary) {
   }
   if (summary?.badgeHtml) {
     badges.push(summary.badgeHtml);
+  }
+  const primaryAlertStatus = getPrimaryVisualAttentionStatus(record);
+  if (primaryAlertStatus) {
+    badges.push(`<span class="wall-card-brief-badge wall-card-brief-badge--primary-alert wall-card-brief-badge--primary-alert-${primaryAlertStatus}">${escapeHtml(primaryCompletionAlertLabel(primaryAlertStatus))}</span>`);
   }
   if (shouldTrackTerminalStatus(record)) {
     badges.push(`<span class="wall-card-brief-status-chip status-${record.status}">${escapeHtml(statusLabel(record.status))}</span>`);
@@ -4903,6 +5098,7 @@ async function focusTerminal(id, name) {
       browser_y: window.screenY
     })
   });
+  const clearedPrimaryAlert = clearPrimaryCompletionAlert(id);
   // 点击队列项视为“已处理”，状态不变前不再重复提醒
   const queuedItem = state.queue.find((q) => q.id === id);
   if (queuedItem) {
@@ -4912,7 +5108,9 @@ async function focusTerminal(id, name) {
   state.queue = state.queue.filter((q) => q.id !== id);
   _lastQueueKey = "__force__";
   renderQueue();
-  setMessage(`已切到 ${name}，已从队列移除`);
+  setMessage(clearedPrimaryAlert
+    ? `已切到 ${name}，已清除重要任务提醒`
+    : `已切到 ${name}，已从队列移除`);
 }
 
 async function refreshTerminalSnapshot(record) {
@@ -4964,18 +5162,33 @@ function renderPrimaryFocus() {
   container.classList.toggle("is-active", Boolean(record));
   if (!record) {
     container.removeAttribute("data-status");
+    delete container.dataset.primaryAttention;
+    delete container.dataset.primaryAttentionStatus;
     return;
   }
   container.dataset.status = record.status;
+  const attentionStatus = getPrimaryVisualAttentionStatus(record);
+  if (attentionStatus) {
+    container.dataset.primaryAttention = "true";
+    container.dataset.primaryAttentionStatus = attentionStatus;
+  } else {
+    delete container.dataset.primaryAttention;
+    delete container.dataset.primaryAttentionStatus;
+  }
 
+  const alertClass = attentionStatus
+    ? ` primary-focus-pill--attention primary-focus-pill--attention-${attentionStatus}`
+    : "";
   const button = document.createElement("button");
   button.type = "button";
-  button.className = `primary-focus-pill status-${record.status}`;
-  button.title = `当前最重要任务：${displayTitle(record)}`;
+  button.className = `primary-focus-pill status-${record.status}${alertClass}`;
+  button.title = attentionStatus
+    ? `当前最重要任务：${displayTitle(record)}，${primaryCompletionAlertLabel(attentionStatus)}`
+    : `当前最重要任务：${displayTitle(record)}`;
   button.innerHTML = `
     <span class="primary-focus-pill-label" aria-hidden="true">★</span>
     <span class="primary-focus-pill-name">${escapeHtml(displayTitle(record))}</span>
-    <span class="primary-focus-pill-status">${escapeHtml(statusLabel(record.status))}</span>
+    <span class="primary-focus-pill-status">${escapeHtml(attentionStatus ? primaryCompletionAlertLabel(attentionStatus) : statusLabel(record.status))}</span>
   `;
   button.onclick = async () => {
     try {
@@ -4998,11 +5211,18 @@ async function toggleTerminalPrimary(record) {
     for (const terminal of state.terminals.values()) {
       terminal.isPrimary = terminal.id === record.id;
     }
+    for (const id of [...state.primaryCompletionAlerts.keys()]) {
+      if (id !== record.id) {
+        clearPrimaryCompletionAlert(id);
+      }
+    }
+    clearPrimaryCompletionAlert(record.id);
   } else {
     const current = state.terminals.get(record.id);
     if (current) {
       current.isPrimary = false;
     }
+    clearPrimaryCompletionAlert(record.id);
   }
   if (result.item) {
     state.terminals.set(result.item.id, result.item);
@@ -5245,6 +5465,26 @@ async function renameTerminal(id, name) {
   });
 }
 
+function findDuplicateTerminalName(name, currentTerminalId) {
+  const normalizedName = String(name || "").trim().toLowerCase();
+  if (!normalizedName) {
+    return null;
+  }
+  for (const [id, terminal] of state.terminals) {
+    if (id === currentTerminalId || terminal.status === "closed") {
+      continue;
+    }
+    if (String(terminal.name || "").trim().toLowerCase() === normalizedName) {
+      return terminal;
+    }
+  }
+  return null;
+}
+
+function duplicateTerminalNameMessage(name) {
+  return `名称已存在：${name}`;
+}
+
 function syncRenamedTerminalLocally(terminalId, nextName) {
   const terminal = state.terminals.get(terminalId);
   if (terminal) {
@@ -5258,27 +5498,106 @@ function syncRenamedTerminalLocally(terminalId, nextName) {
   }
 }
 
-async function promptRenameTerminal(record) {
-  const currentName = record?.name || "";
-  const nextName = prompt("重命名终端", currentName);
-  if (nextName === null) {
+function setRenameDialogError(text) {
+  if (renameDialogError) {
+    renameDialogError.textContent = text || "";
+  }
+  if (renameDialogInput) {
+    renameDialogInput.setCustomValidity(text || "");
+  }
+}
+
+function closeRenameDialog() {
+  if (!renameDialog) {
     return;
   }
-  const cleanName = nextName.trim();
-  if (!cleanName) {
-    setMessage("名称不能为空", true);
+  state.renameDialog.terminalId = null;
+  state.renameDialog.saving = false;
+  setRenameDialogError("");
+  if (renameDialogSubmit) {
+    renameDialogSubmit.disabled = false;
+    renameDialogSubmit.textContent = "保存";
+  }
+  if (renameDialog.open) {
+    renameDialog.close();
+  }
+}
+
+function openRenameDialog(record) {
+  if (!record) {
     return;
   }
-  if (cleanName === currentName) {
+  if (!renameDialog || !renameDialogInput) {
     return;
+  }
+  closeAllTopbarMenus();
+  closeTerminalContextMenu();
+  state.renameDialog.terminalId = record.id;
+  state.renameDialog.saving = false;
+  renameDialogInput.value = record.name || "";
+  setRenameDialogError("");
+  if (renameDialogSubmit) {
+    renameDialogSubmit.disabled = false;
+    renameDialogSubmit.textContent = "保存";
   }
   try {
-    await renameTerminal(record.id, cleanName);
-    syncRenamedTerminalLocally(record.id, cleanName);
+    if (!renameDialog.open) {
+      renameDialog.showModal();
+    }
+  } catch {
+    renameDialog.setAttribute("open", "");
+  }
+  window.requestAnimationFrame(() => {
+    renameDialogInput.focus();
+    renameDialogInput.select();
+  });
+}
+
+async function submitRenameDialog() {
+  if (!renameDialog || !renameDialogInput || state.renameDialog.saving) {
+    return;
+  }
+  const record = state.terminals.get(state.renameDialog.terminalId);
+  if (!record) {
+    closeRenameDialog();
+    return;
+  }
+  const nextName = renameDialogInput.value.trim();
+  if (!nextName) {
+    setRenameDialogError("名称不能为空");
+    renameDialogInput.focus();
+    return;
+  }
+  if (nextName === record.name) {
+    closeRenameDialog();
+    return;
+  }
+  if (findDuplicateTerminalName(nextName, record.id)) {
+    setRenameDialogError(duplicateTerminalNameMessage(nextName));
+    renameDialogInput.focus();
+    renameDialogInput.select();
+    return;
+  }
+  state.renameDialog.saving = true;
+  if (renameDialogSubmit) {
+    renameDialogSubmit.disabled = true;
+    renameDialogSubmit.textContent = "保存中";
+  }
+  try {
+    await renameTerminal(record.id, nextName);
+    syncRenamedTerminalLocally(record.id, nextName);
+    closeRenameDialog();
     refreshWall();
-    setMessage(`已将终端重命名为 ${cleanName}`);
+    setMessage(`已将终端重命名为 ${nextName}`);
   } catch (error) {
-    setMessage(error.message, true);
+    state.renameDialog.saving = false;
+    if (renameDialogSubmit) {
+      renameDialogSubmit.disabled = false;
+      renameDialogSubmit.textContent = "保存";
+    }
+    setRenameDialogError(error.message);
+    renameDialogInput.focus();
+    renameDialogInput.select();
   }
 }
 
@@ -5319,6 +5638,7 @@ function bindCardActions(card, record) {
     title.hidden = true;
     titleInput.hidden = false;
     titleInput.value = record.name;
+    titleInput.setCustomValidity("");
     window.requestAnimationFrame(() => {
       titleInput.focus();
       titleInput.select();
@@ -5329,25 +5649,45 @@ function bindCardActions(card, record) {
     if (!title || !titleInput) return;
     if (state.editingTitleTerminalId !== record.id) return;
     const nextName = titleInput.value.trim();
-    titleInput.hidden = true;
-    title.hidden = false;
     if (!commit || !nextName || nextName === record.name) {
+      titleInput.setCustomValidity("");
+      titleInput.hidden = true;
+      title.hidden = false;
       state.editingTitleTerminalId = null;
       refreshWall();
       return;
     }
+    const duplicate = findDuplicateTerminalName(nextName, record.id);
+    if (duplicate) {
+      const message = duplicateTerminalNameMessage(nextName);
+      titleInput.setCustomValidity(message);
+      titleInput.reportValidity();
+      window.requestAnimationFrame(() => {
+        titleInput.focus();
+        titleInput.select();
+      });
+      setMessage(message, true);
+      return;
+    }
     try {
       await renameTerminal(record.id, nextName);
+      titleInput.hidden = true;
+      title.hidden = false;
       state.editingTitleTerminalId = null;
       syncRenamedTerminalLocally(record.id, nextName);
       // 刷新 UI 以退出编辑状态
       refreshWall();
       setMessage(`已将终端重命名为 ${nextName}`);
     } catch (error) {
+      titleInput.setCustomValidity(error.message);
+      titleInput.reportValidity();
       state.editingTitleTerminalId = record.id;
       title.hidden = true;
       titleInput.hidden = false;
-      window.requestAnimationFrame(() => titleInput.focus());
+      window.requestAnimationFrame(() => {
+        titleInput.focus();
+        titleInput.select();
+      });
       setMessage(error.message, true);
     }
   };
@@ -5366,6 +5706,7 @@ function bindCardActions(card, record) {
   }
   if (titleInput) {
     titleInput.onclick = (event) => event.stopPropagation();
+    titleInput.oninput = () => titleInput.setCustomValidity("");
     titleInput.onkeydown = async (event) => {
       event.stopPropagation();
       if (event.key === "Enter") {
@@ -5477,6 +5818,7 @@ function renderTerminal(record) {
         <h2 class="wall-card-title" ${state.editingTitleTerminalId === record.id ? 'hidden' : ''}>${escapeHtml(displayTitle(record))}</h2>
         <input class="wall-card-title-input" type="text" value="${escapeHtml(record.name)}" ${state.editingTitleTerminalId === record.id ? '' : 'hidden'} />
         <span class="wall-card-primary-badge" hidden></span>
+        <span class="wall-card-primary-alert-badge" hidden></span>
         <span class="wall-card-program-chip" hidden></span>
       </div>
     </div>
@@ -5707,6 +6049,17 @@ function updateCardMeta(card, record) {
       primaryBadge.setAttribute("aria-label", "当前最重要任务");
     }
   }
+  const primaryAlertBadge = card.querySelector(".wall-card-primary-alert-badge");
+  if (primaryAlertBadge) {
+    const alertStatus = getPrimaryVisualAttentionStatus(record);
+    primaryAlertBadge.hidden = !alertStatus;
+    if (!primaryAlertBadge.hidden) {
+      const label = primaryCompletionAlertLabel(alertStatus);
+      primaryAlertBadge.textContent = label;
+      primaryAlertBadge.setAttribute("title", label);
+      primaryAlertBadge.setAttribute("aria-label", label);
+    }
+  }
   const briefStatusChip = card.querySelector(".wall-card-brief-status-chip");
   if (briefStatusChip) {
     briefStatusChip.hidden = !shouldTrackTerminalStatus(record);
@@ -5854,6 +6207,7 @@ function applySnapshot(terminals, layout = null, allTags = null) {
   }
   // 后端重启早期可能先返回空/部分 snapshot，再由后台接管陆续补回终端。
   // 蜂巢位置是用户手动布局，不能因为这类瞬时缺席就删除。
+  prunePrimaryCompletionAlerts();
   syncTerminalOrder(terminals);
   syncLayoutTree();
   initQueueFromSnapshot();
@@ -6226,6 +6580,7 @@ function connectWebSocket() {
       playWaitingAlert();
     }
     state.terminals.set(payload.terminal.id, payload.terminal);
+    syncPrimaryCompletionAlertFromUpdate(oldRecord, payload.terminal);
     // 从后端同步隐藏状态（接管时恢复）
     if (payload.terminal.hidden) {
       state.hiddenTerminalIds.add(payload.terminal.id);

@@ -33,6 +33,12 @@
 - 重构或架构调整：优先考虑 `bmad-bmm-create-architecture`
 - 迭代规划：优先考虑 `bmad-bmm-sprint-planning`
 
+## Codex Web 壳开发提醒
+
+- 当用户讨论或实现基于 `codex app-server` 的 Web Codex Shell、Web 版 Codex TUI 替代层、多 Codex session 管理、脱离 iTerm2 的 Codex UI 时，必须先阅读 `docs/codex-web-shell-tui-parity-checklist.md`。
+- 每次完成这类功能后，必须按该文档输出 Codex TUI parity 差距报告，明确“已补齐 / 仍缺失 / 暂不做 / 影响验收的差距”。
+- 不要因为 POC 跑通就宣称已经替代 Codex TUI；POC 只能证明路线成立，不能代表 TUI parity。
+
 ## 活跃环境保护规则（强制执行）
 
 - 默认假设用户正在使用当前项目的现有前端、后端、浏览器页面、iTerm2 窗口与默认端口；未经用户明确许可，禁止擅自启动、停止、重启、kill、替换或接管这些正在使用的进程与窗口。

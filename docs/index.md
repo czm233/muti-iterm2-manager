@@ -32,6 +32,7 @@
 
 - [开发 / 验收工作流](./development-workflow.md) - 项目当前默认交付流程与服务启停约束
 - [实现路线](./implementation-plan.md) - 项目初版目标、模块划分与里程碑规划
+- [Codex Web Shell TUI 对齐清单](./codex-web-shell-tui-parity-checklist.md) - 未来用浏览器 UI 替代 Codex TUI 时的功能差距检查清单
 
 ## 快速开始
 

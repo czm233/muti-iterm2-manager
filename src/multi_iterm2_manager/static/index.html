@@ -306,6 +306,29 @@
       </div>
     </dialog>
 
+    <dialog id="rename-dialog" class="idea-dialog rename-dialog" aria-labelledby="rename-dialog-title">
+      <div class="idea-dialog-shell rename-dialog-shell">
+        <header class="idea-dialog-header rename-dialog-header">
+          <div>
+            <div class="idea-dialog-kicker">Terminal</div>
+            <h2 id="rename-dialog-title">重命名终端</h2>
+          </div>
+          <button type="button" class="idea-dialog-close" id="rename-dialog-close" aria-label="关闭重命名窗口">&times;</button>
+        </header>
+        <form id="rename-dialog-form" class="rename-dialog-form">
+          <label class="rename-dialog-field">
+            <span>名称</span>
+            <input id="rename-dialog-input" class="rename-dialog-input" type="text" maxlength="60" autocomplete="off" />
+          </label>
+          <div id="rename-dialog-error" class="rename-dialog-error" aria-live="polite"></div>
+          <div class="rename-dialog-actions">
+            <button type="button" class="idea-dialog-button" id="rename-dialog-cancel">取消</button>
+            <button type="submit" class="idea-dialog-button is-primary" id="rename-dialog-submit">保存</button>
+          </div>
+        </form>
+      </div>
+    </dialog>
+
     <dialog id="idea-dialog" class="idea-dialog" aria-labelledby="idea-dialog-title">
       <div class="idea-dialog-shell">
         <header class="idea-dialog-header">

@@ -13,6 +13,9 @@ logger = logging.getLogger(__name__)
 
 SUMMARY_MAX_CONCURRENCY = 3
 SYSTEM_PROMPT = "你是一个终端内容分析助手。请用一句简短的中文总结当前终端正在做什么，不超过80字。只输出总结内容，不要有任何额外文字。"
+DEFAULT_FREE_FALLBACK_MODEL = "glm-4.7-flash"
+DEFAULT_GLM_OPENAI_API_BASE = "https://open.bigmodel.cn/api/paas/v4"
+GLM_API_BASE_MARKERS = ("bigmodel.cn", "z.ai")
 
 
 @dataclass
@@ -20,6 +23,7 @@ class SummaryConfig:
     api_base: str = ""
     api_key: str = ""
     model: str = "glm-4.6"
+    free_fallback_model: str = DEFAULT_FREE_FALLBACK_MODEL
     max_input_chars: int = 2000
     interval_seconds: float = 30.0
     fallback_last_lines: int = 3
@@ -50,6 +54,18 @@ class TerminalSummarizer:
     @staticmethod
     def _content_hash(text: str) -> str:
         return hashlib.md5(text.encode()).hexdigest()[:12]
+
+    @staticmethod
+    def _is_glm_api_base(api_base: str) -> bool:
+        lower = api_base.lower()
+        return any(marker in lower for marker in GLM_API_BASE_MARKERS)
+
+    @staticmethod
+    def _free_fallback_api_base(api_base: str) -> str:
+        lower = api_base.lower().rstrip("/")
+        if "open.bigmodel.cn/api/anthropic" in lower:
+            return DEFAULT_GLM_OPENAI_API_BASE
+        return api_base
 
     @staticmethod
     def fallback_text(screen_text: str, last_lines: int = 3) -> str:
@@ -123,6 +139,53 @@ class TerminalSummarizer:
         message = " ".join(str(exc).split()).strip()
         return message[:120] if message else exc.__class__.__name__
 
+    def _should_try_free_fallback(self, api_base: str) -> bool:
+        fallback_model = self._config.free_fallback_model.strip()
+        primary_model = self._config.model.strip()
+        return (
+            bool(fallback_model)
+            and fallback_model.lower() != primary_model.lower()
+            and self._is_glm_api_base(api_base)
+        )
+
+    async def _try_free_fallback_api(
+        self,
+        client: httpx.AsyncClient,
+        api_base: str,
+        truncated: str,
+        *,
+        terminal_id: str,
+    ) -> tuple[str, str]:
+        if not self._should_try_free_fallback(api_base):
+            return "", ""
+
+        try:
+            summary = await self._call_openai_api(
+                client,
+                self._free_fallback_api_base(api_base),
+                truncated,
+                model=self._config.free_fallback_model,
+            )
+            if summary:
+                logger.info(
+                    "AI 摘要已使用免费兜底模型 terminal=%s model=%s",
+                    terminal_id,
+                    self._config.free_fallback_model,
+                )
+                return summary, ""
+            return "", "免费兜底模型返回空内容"
+        except Exception as exc:
+            logger.warning("免费摘要兜底失败 terminal=%s: %s", terminal_id, exc)
+            return "", self._format_error_detail(exc)
+
+    @staticmethod
+    def _append_free_fallback_error(primary_detail: str, fallback_detail: str) -> str:
+        if not fallback_detail:
+            return primary_detail
+        if not primary_detail:
+            return f"免费兜底失败：{fallback_detail}"
+        return f"{primary_detail}；免费兜底失败：{fallback_detail}"
+
     async def summarize(self, terminal_id: str, screen_text: str) -> SummaryResult:
         """生成终端内容摘要。
 
@@ -152,11 +215,10 @@ class TerminalSummarizer:
         reason = ""
         error_detail = ""
         async with self._semaphore:
+            truncated = text[-self._config.max_input_chars:]
+            client = self._get_client()
+            api_base = self._config.api_base.rstrip('/')
             try:
-                truncated = text[-self._config.max_input_chars:]
-                client = self._get_client()
-                api_base = self._config.api_base.rstrip('/')
-
                 # 根据 api_base 自动检测 API 类型
                 if "anthropic" in api_base.lower():
                     summary = await self._call_anthropic_api(client, api_base, truncated)
@@ -166,38 +228,69 @@ class TerminalSummarizer:
                 if summary:
                     used_ai = True
                 else:
-                    summary = self.fallback_text(text, self._config.fallback_last_lines)
-                    reason = "empty_response"
-                    error_detail = "模型返回空内容"
+                    fallback_summary, fallback_error = await self._try_free_fallback_api(
+                        client,
+                        api_base,
+                        truncated,
+                        terminal_id=terminal_id,
+                    )
+                    if fallback_summary:
+                        summary = fallback_summary
+                        used_ai = True
+                    else:
+                        summary = self.fallback_text(text, self._config.fallback_last_lines)
+                        reason = "empty_response"
+                        error_detail = self._append_free_fallback_error("模型返回空内容", fallback_error)
             except Exception as e:
                 logger.warning("AI 摘要失败 terminal=%s: %s", terminal_id, e)
-                reason = "api_error"
-                error_detail = self._format_error_detail(e)
-                summary = self.fallback_text(text, self._config.fallback_last_lines)
+                fallback_summary, fallback_error = await self._try_free_fallback_api(
+                    client,
+                    api_base,
+                    truncated,
+                    terminal_id=terminal_id,
+                )
+                if fallback_summary:
+                    summary = fallback_summary
+                    used_ai = True
+                else:
+                    reason = "api_error"
+                    error_detail = self._append_free_fallback_error(
+                        self._format_error_detail(e),
+                        fallback_error,
+                    )
+                    summary = self.fallback_text(text, self._config.fallback_last_lines)
 
         self._cache[terminal_id] = (summary, new_hash, time.time(), used_ai, reason, error_detail)
         return SummaryResult(summary, used_ai, False, reason, error_detail)
 
     async def _call_openai_api(
-        self, client: httpx.AsyncClient, api_base: str, truncated: str
+        self,
+        client: httpx.AsyncClient,
+        api_base: str,
+        truncated: str,
+        *,
+        model: str | None = None,
     ) -> str:
         """调用 OpenAI 兼容格式的摘要接口"""
         url = f"{api_base}/chat/completions"
+        payload = {
+            "model": model or self._config.model,
+            "messages": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": truncated},
+            ],
+            "max_tokens": 120,
+            "temperature": 0.3,
+        }
+        if self._is_glm_api_base(api_base):
+            payload["thinking"] = {"type": "disabled"}
         resp = await client.post(
             url,
             headers={
                 "Authorization": f"Bearer {self._config.api_key}",
                 "Content-Type": "application/json",
             },
-            json={
-                "model": self._config.model,
-                "messages": [
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": truncated},
-                ],
-                "max_tokens": 120,
-                "temperature": 0.3,
-            },
+            json=payload,
         )
         resp.raise_for_status()
         data = resp.json()
