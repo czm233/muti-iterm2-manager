@@ -1,0 +1,50 @@
+ui:
+  # UI layout settings
+  dashboard_padding_px: 0
+  monitor_stage_padding_px: 12
+  dashboard_gap_px: 5
+  monitor_grid_gap_px: 6
+  wall_card_padding_px: 10
+  wall_card_border_radius_px: 22
+  wall_card_border_width_px: 1.0
+  split_resizer_hit_area_px: 14
+  split_resizer_line_width_px: 2
+  grid_resizer_hit_area_px: 16
+  grid_resizer_line_width_px: 2
+  statusbar_font_size_px: 13
+  statusbar_meter_width_px: 90
+  statusbar_meter_height_px: 10
+  filter_tab_slide_duration_ms: 420
+  terminal_font_size_px: 10
+
+  # Summary view settings
+  summary_grid_gap_px: 10
+  summary_hex_side_px: 96
+  summary_card_width_px: 320
+  summary_card_min_height_px: 140
+  summary_card_padding_px: 10
+  summary_card_border_radius_px: 14
+  summary_gap_glow_color: "#ff70db"
+  summary_gap_glow_radius_px: 285
+  summary_gap_glow_strength: 0.88
+  summary_gap_glow_softness_px: 14
+  summary_gap_glow_line_width_px: 0
+
+  # Screen targeting
+  target_screen: -1
+  target_screen_id:
+  target_screen_name:
+  default_frames_by_screen:
+
+  # AI summary API settings
+  # Do not commit real keys. Keep real values in local ui-settings.yaml or env vars.
+  summary_api_base: https://open.bigmodel.cn/api/paas/v4
+  summary_api_key: ""
+  summary_model: glm-4.6
+  # Set to "" to disable the free fallback request after primary model failure.
+  summary_free_fallback_model: glm-4.7-flash
+  summary_interval_seconds: 30.0
+  summary_active_interval: 10.0
+  summary_fallback_retry_interval: 30.0
+
+screen_layouts: {}
