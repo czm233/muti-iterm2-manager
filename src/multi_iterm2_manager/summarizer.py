@@ -139,6 +139,12 @@ class TerminalSummarizer:
         message = " ".join(str(exc).split()).strip()
         return message[:120] if message else exc.__class__.__name__
 
+    @staticmethod
+    def _format_model_error(label: str, model: str, detail: str) -> str:
+        display_model = model.strip() or "未指定模型"
+        display_detail = detail.strip() or "请求失败"
+        return f"{label}({display_model})失败：{display_detail}"
+
     def _should_try_free_fallback(self, api_base: str) -> bool:
         fallback_model = self._config.free_fallback_model.strip()
         primary_model = self._config.model.strip()
@@ -159,32 +165,58 @@ class TerminalSummarizer:
         if not self._should_try_free_fallback(api_base):
             return "", ""
 
+        fallback_api_base = self._free_fallback_api_base(api_base)
+        fallback_model = self._config.free_fallback_model.strip()
+        started = time.monotonic()
         try:
+            logger.info(
+                "AI 摘要免费兜底请求开始 terminal=%s model=%s api_base=%s",
+                terminal_id,
+                fallback_model,
+                fallback_api_base,
+            )
             summary = await self._call_openai_api(
                 client,
-                self._free_fallback_api_base(api_base),
+                fallback_api_base,
                 truncated,
-                model=self._config.free_fallback_model,
+                model=fallback_model,
             )
+            elapsed = time.monotonic() - started
             if summary:
                 logger.info(
-                    "AI 摘要已使用免费兜底模型 terminal=%s model=%s",
+                    "AI 摘要免费兜底请求成功 terminal=%s model=%s elapsed=%.2fs",
                     terminal_id,
-                    self._config.free_fallback_model,
+                    fallback_model,
+                    elapsed,
                 )
                 return summary, ""
-            return "", "免费兜底模型返回空内容"
+            logger.warning(
+                "AI 摘要免费兜底返回空内容 terminal=%s model=%s elapsed=%.2fs",
+                terminal_id,
+                fallback_model,
+                elapsed,
+            )
+            return "", self._format_model_error("免费兜底", fallback_model, "模型返回空内容")
         except Exception as exc:
-            logger.warning("免费摘要兜底失败 terminal=%s: %s", terminal_id, exc)
-            return "", self._format_error_detail(exc)
+            elapsed = time.monotonic() - started
+            detail = self._format_error_detail(exc)
+            logger.warning(
+                "AI 摘要免费兜底请求失败 terminal=%s model=%s api_base=%s elapsed=%.2fs detail=%s",
+                terminal_id,
+                fallback_model,
+                fallback_api_base,
+                elapsed,
+                detail,
+            )
+            return "", self._format_model_error("免费兜底", fallback_model, detail)
 
     @staticmethod
     def _append_free_fallback_error(primary_detail: str, fallback_detail: str) -> str:
         if not fallback_detail:
             return primary_detail
         if not primary_detail:
-            return f"免费兜底失败：{fallback_detail}"
-        return f"{primary_detail}；免费兜底失败：{fallback_detail}"
+            return fallback_detail
+        return f"{primary_detail}；{fallback_detail}"
 
     async def summarize(self, terminal_id: str, screen_text: str) -> SummaryResult:
         """生成终端内容摘要。
@@ -218,16 +250,40 @@ class TerminalSummarizer:
             truncated = text[-self._config.max_input_chars:]
             client = self._get_client()
             api_base = self._config.api_base.rstrip('/')
+            primary_model = self._config.model.strip()
+            primary_protocol = "anthropic" if "anthropic" in api_base.lower() else "openai"
+            started = time.monotonic()
             try:
                 # 根据 api_base 自动检测 API 类型
+                logger.info(
+                    "AI 摘要主请求开始 terminal=%s model=%s api_base=%s protocol=%s",
+                    terminal_id,
+                    primary_model,
+                    api_base,
+                    primary_protocol,
+                )
                 if "anthropic" in api_base.lower():
                     summary = await self._call_anthropic_api(client, api_base, truncated)
                 else:
                     summary = await self._call_openai_api(client, api_base, truncated)
+                elapsed = time.monotonic() - started
 
                 if summary:
+                    logger.info(
+                        "AI 摘要主请求成功 terminal=%s model=%s elapsed=%.2fs",
+                        terminal_id,
+                        primary_model,
+                        elapsed,
+                    )
                     used_ai = True
                 else:
+                    primary_error = self._format_model_error("主模型", primary_model, "模型返回空内容")
+                    logger.warning(
+                        "AI 摘要主请求返回空内容 terminal=%s model=%s elapsed=%.2fs",
+                        terminal_id,
+                        primary_model,
+                        elapsed,
+                    )
                     fallback_summary, fallback_error = await self._try_free_fallback_api(
                         client,
                         api_base,
@@ -240,9 +296,20 @@ class TerminalSummarizer:
                     else:
                         summary = self.fallback_text(text, self._config.fallback_last_lines)
                         reason = "empty_response"
-                        error_detail = self._append_free_fallback_error("模型返回空内容", fallback_error)
+                        error_detail = self._append_free_fallback_error(primary_error, fallback_error)
             except Exception as e:
-                logger.warning("AI 摘要失败 terminal=%s: %s", terminal_id, e)
+                elapsed = time.monotonic() - started
+                primary_detail = self._format_error_detail(e)
+                primary_error = self._format_model_error("主模型", primary_model, primary_detail)
+                logger.warning(
+                    "AI 摘要主请求失败 terminal=%s model=%s api_base=%s protocol=%s elapsed=%.2fs detail=%s",
+                    terminal_id,
+                    primary_model,
+                    api_base,
+                    primary_protocol,
+                    elapsed,
+                    primary_detail,
+                )
                 fallback_summary, fallback_error = await self._try_free_fallback_api(
                     client,
                     api_base,
@@ -255,7 +322,7 @@ class TerminalSummarizer:
                 else:
                     reason = "api_error"
                     error_detail = self._append_free_fallback_error(
-                        self._format_error_detail(e),
+                        primary_error,
                         fallback_error,
                     )
                     summary = self.fallback_text(text, self._config.fallback_last_lines)

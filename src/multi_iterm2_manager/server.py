@@ -225,6 +225,7 @@ class SummaryConfigPayload(BaseModel):
     api_base: str = ""
     api_key: str = ""
     model: str = "glm-4.6"
+    free_fallback_model: str = "glm-4.7-flash"
     interval_seconds: float = 30.0
     active_interval: float = 10.0
     fallback_retry_interval: float = 30.0
@@ -594,6 +595,7 @@ async def get_summary_config() -> dict:
         "apiKey": mask_secret(ui.summary_api_key),
         "hasApiKey": bool(ui.summary_api_key),
         "model": ui.summary_model,
+        "freeFallbackModel": ui.summary_free_fallback_model,
         "intervalSeconds": ui.summary_interval_seconds,
         "activeInterval": ui.summary_active_interval,
         "fallbackRetryInterval": ui.summary_fallback_retry_interval,
@@ -609,6 +611,7 @@ async def put_summary_config(payload: SummaryConfigPayload) -> dict:
     if payload.api_key and not is_masked_secret(payload.api_key):
         s.summary_api_key = payload.api_key
     s.summary_model = payload.model
+    s.summary_free_fallback_model = payload.free_fallback_model.strip()
     s.summary_interval_seconds = payload.interval_seconds
     s.summary_active_interval = payload.active_interval
     s.summary_fallback_retry_interval = payload.fallback_retry_interval
@@ -618,6 +621,7 @@ async def put_summary_config(payload: SummaryConfigPayload) -> dict:
         summary_api_base=s.summary_api_base,
         summary_api_key=s.summary_api_key,
         summary_model=s.summary_model,
+        summary_free_fallback_model=s.summary_free_fallback_model,
         summary_interval_seconds=s.summary_interval_seconds,
         summary_active_interval=s.summary_active_interval,
         summary_fallback_retry_interval=s.summary_fallback_retry_interval,
@@ -633,6 +637,7 @@ async def put_summary_config(payload: SummaryConfigPayload) -> dict:
             api_base=s.summary_api_base,
             api_key=s.summary_api_key,
             model=s.summary_model,
+            free_fallback_model=s.summary_free_fallback_model,
             interval_seconds=s.summary_interval_seconds,
         ))
         if not service._summary_task or service._summary_task.done():

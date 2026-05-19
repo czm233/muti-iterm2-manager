@@ -4738,8 +4738,8 @@ body.is-resizing-split * {
   align-items: stretch;
   justify-content: center;
   min-height: 0;
-  padding-top: calc(var(--summary-hex-side-px) * 0.2);
-  padding-bottom: calc(var(--summary-hex-side-px) * 0.3);
+  padding-top: max(60px, calc(var(--summary-hex-height-px) * 0.34));
+  padding-bottom: max(32px, calc(var(--summary-hex-height-px) * 0.16));
   margin-inline: calc(var(--summary-hex-side-px) * -0.06);
 }
 
@@ -4898,8 +4898,8 @@ body.is-resizing-split * {
   color: var(--text);
   width: 100%;
   text-align: center;
-  font-size: clamp(0.68rem, calc(var(--summary-hex-side-px) * 0.009), 0.86rem);
-  line-height: 1.35;
+  font-size: clamp(0.78rem, calc(var(--summary-hex-side-px) * 0.0105), 1rem);
+  line-height: 1.32;
   display: -webkit-box;
   -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
@@ -5009,6 +5009,10 @@ body.is-resizing-split * {
   color: rgba(223, 227, 233, 0.74);
 }
 
+.wall-card-brief[data-summary-status="fallback"] .wall-card-brief-text {
+  -webkit-line-clamp: 2;
+}
+
 /* 等待状态 */
 .wall-card-brief-text--waiting {
   color: var(--text-dim, rgba(255, 255, 255, 0.35));
@@ -5048,6 +5052,10 @@ body.is-resizing-split * {
   font-size: 0.7rem;
   display: block;
   margin-top: 2px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* fallback 原因小字 - 警告色 */

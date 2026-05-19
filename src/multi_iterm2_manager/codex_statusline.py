@@ -26,6 +26,8 @@ _CONTEXT_SEGMENT_RE = re.compile(
 _STATUS_TO_TERMINAL = {
     "ready": TerminalStatus.done,
     "starting": TerminalStatus.running,
+    "thinking": TerminalStatus.running,
+    "waiting": TerminalStatus.done,
     "working": TerminalStatus.running,
 }
 
@@ -51,12 +53,29 @@ def parse_codex_statusline(line: str) -> CodexStatusLine | None:
     return None
 
 
-def find_codex_statusline(text: str, *, last_n_lines: int = 20) -> CodexStatusLine | None:
+def find_codex_statusline(
+    text: str,
+    *,
+    last_n_lines: int = 20,
+    max_wrapped_lines: int = 6,
+) -> CodexStatusLine | None:
     lines = (text or "").splitlines()
-    for line in reversed(lines[-last_n_lines:]):
-        statusline = parse_codex_statusline(line)
+    recent_lines = lines[-last_n_lines:]
+    for end_index in range(len(recent_lines) - 1, -1, -1):
+        statusline = parse_codex_statusline(recent_lines[end_index])
         if statusline is not None:
             return statusline
+
+        start_limit = max(0, end_index - max(1, max_wrapped_lines) + 1)
+        for start_index in range(end_index - 1, start_limit - 1, -1):
+            candidate = " ".join(
+                line.strip()
+                for line in recent_lines[start_index:end_index + 1]
+                if line.strip()
+            )
+            statusline = parse_codex_statusline(candidate)
+            if statusline is not None:
+                return statusline
     return None
 
 

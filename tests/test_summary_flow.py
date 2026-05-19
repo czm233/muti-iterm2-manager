@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import time
 
 import pytest
@@ -17,6 +19,22 @@ class FakeSummarizer:
 
     async def summarize(self, terminal_id: str, screen_text: str) -> SummaryResult:
         self.calls += 1
+        return self._result
+
+
+class BlockingSummarizer:
+    def __init__(self, result: SummaryResult) -> None:
+        self._result = result
+        self.calls = 0
+        self.started: asyncio.Event | None = None
+        self.finish: asyncio.Event | None = None
+
+    async def summarize(self, terminal_id: str, screen_text: str) -> SummaryResult:
+        self.calls += 1
+        if self.started is not None:
+            self.started.set()
+        if self.finish is not None:
+            await self.finish.wait()
         return self._result
 
 
@@ -132,7 +150,7 @@ async def test_cached_fallback_retry_restores_fallback_state() -> None:
 
     service._broadcast = fake_broadcast  # type: ignore[method-assign]
 
-    await service._generate_summary(record.id)
+    await service._generate_summary(record.id, force=True)
 
     assert events == [("summarizing", ""), ("fallback", "api_error")]
     assert record.ai_summary_status == "fallback"
@@ -174,27 +192,55 @@ async def test_failed_summary_retry_respects_cooldown() -> None:
 
 
 @pytest.mark.anyio
-async def test_failed_summary_retry_uses_fallback_retry_interval() -> None:
-    service = DashboardService(
-        Settings(
-            backend="mock",
-            summary_interval_seconds=300,
-            summary_fallback_retry_interval=5,
-        )
-    )
+async def test_failed_summary_same_effective_content_does_not_auto_retry_after_interval() -> None:
+    service = build_service()
     record = build_record()
     record.ai_summary_first = False
     record.ai_summary_status = "fallback"
     record.ai_summary_reason = "api_error"
     record.ai_summary_error_detail = "请求超时"
     record.ai_summary = "old fallback"
-    record.ai_summary_at = time.time() - 6
+    record.ai_summary_at = time.time() - 120
     service.records[record.id] = record
     service._last_summary_status[record.id] = record.status.value
+    service._failed_summary_fingerprints[record.id] = service._summary_effective_fingerprint(record)
+    fake = FakeSummarizer(
+        SummaryResult(text="should not run", used_ai=True, from_cache=False)
+    )
+    service._summarizer = fake
+
+    await service._generate_summary(record.id)
+
+    assert fake.calls == 0
+    assert record.ai_summary_status == "fallback"
+    assert record.ai_summary == "old fallback"
+
+
+@pytest.mark.anyio
+async def test_failed_summary_retries_after_effective_content_changes() -> None:
+    service = build_service()
+    record = build_record()
+    record.program = TerminalProgramInfo(key="codex", label="Codex")
+    record.screen_text = "user: old\nassistant: old\n"
+    record.content_hash = hashlib.md5(record.screen_text.encode()).hexdigest()
+    record.interaction_content_hash = service._agent_interaction_hash(record.screen_text)
+    record.ai_summary_first = False
+    record.ai_summary_status = "fallback"
+    record.ai_summary_reason = "api_error"
+    record.ai_summary_error_detail = "请求超时"
+    record.ai_summary = "old fallback"
+    record.ai_summary_at = time.time() - 120
+    service.records[record.id] = record
+    service._last_summary_status[record.id] = record.status.value
+    service._failed_summary_fingerprints[record.id] = service._summary_effective_fingerprint(record)
     fake = FakeSummarizer(
         SummaryResult(text="retry summary", used_ai=True, from_cache=False)
     )
     service._summarizer = fake
+
+    record.screen_text = "user: old\nassistant: new information\n"
+    record.content_hash = hashlib.md5(record.screen_text.encode()).hexdigest()
+    record.interaction_content_hash = service._agent_interaction_hash(record.screen_text)
 
     await service._generate_summary(record.id)
 
@@ -235,6 +281,36 @@ async def test_forced_summary_bypasses_failed_retry_cooldown() -> None:
     assert record.ai_summary == "new llm summary"
     assert record.ai_summary_reason == ""
     assert record.ai_summary_error_detail == ""
+
+
+@pytest.mark.anyio
+async def test_duplicate_summary_requests_are_deduplicated_while_inflight() -> None:
+    service = build_service()
+    record = build_record()
+    record.ai_summary_first = False
+    record.ai_summary_at = 0.0
+    service.records[record.id] = record
+    service._last_summary_status[record.id] = record.status.value
+    fake = BlockingSummarizer(
+        SummaryResult(text="llm summary", used_ai=True, from_cache=False)
+    )
+    fake.started = asyncio.Event()
+    fake.finish = asyncio.Event()
+    service._summarizer = fake
+
+    first = asyncio.create_task(service._generate_summary(record.id, force=True))
+    await fake.started.wait()
+    second = asyncio.create_task(service._generate_summary(record.id, force=True))
+    await asyncio.sleep(0)
+
+    assert fake.calls == 1
+
+    fake.finish.set()
+    await asyncio.gather(first, second)
+
+    assert fake.calls == 1
+    assert record.ai_summary_status == "done"
+    assert record.ai_summary == "llm summary"
 
 
 @pytest.mark.anyio
@@ -351,6 +427,92 @@ def test_focused_codex_working_bypasses_idle_to_running_focus_guard() -> None:
 
     assert record.status == TerminalStatus.running
     assert record.markers == ["codex-working-indicator"]
+    assert record.id not in service._focus_suppressed
+
+
+def test_focused_codex_thinking_statusline_bypasses_idle_to_running_focus_guard() -> None:
+    service = build_service()
+    record = build_record()
+    record.status = TerminalStatus.done
+    record.screen_text = "$ "
+    service.backend.is_session_focused = lambda session_id: True
+
+    service._apply_screen_text(
+        record,
+        (
+            "gpt-5.5 xhigh · ~/githubProject/muti-iterm2-manager · Context 27% used · "
+            "0.125.0 · Fast on · 380K window · Thinking · "
+            "019dc9b8-a26d-7ac0-9730-f17c57727b91"
+        ),
+        "<pre>thinking</pre>",
+        is_live=True,
+        queue_summary=False,
+    )
+
+    assert record.status == TerminalStatus.running
+    assert record.markers == ["codex-statusline-thinking"]
+    assert record.id not in service._focus_suppressed
+
+
+def test_marked_content_reconciles_error_to_codex_working_statusline() -> None:
+    service = build_service()
+    record = build_record()
+    record.status = TerminalStatus.error
+    record.last_error = "stream failed"
+    record.screen_text = (
+        "gpt-5.5 medium · ~/githubProject/vscode-side-translate · Context 53% used · "
+        "0.130.0 · Working · 019e1b6c-e886-7303-94e9-cdeac3c363a9 · "
+        "Fast off · main · 258K window"
+    )
+
+    changed = service._reconcile_marked_content_status(record)
+
+    assert changed is True
+    assert record.status == TerminalStatus.running
+    assert record.markers == ["codex-statusline-working"]
+    assert record.last_error is None
+
+
+def test_marked_content_reconciles_error_to_codex_waiting_statusline() -> None:
+    service = build_service()
+    record = build_record()
+    record.status = TerminalStatus.error
+    record.last_error = "stream failed"
+    record.screen_text = (
+        "gpt-5.5 medium · ~/githubProject/vscode-side-translate · Context 53% used · "
+        "0.130.0 · Waiting · 019e1b6c-e886-7303-94e9-cdeac3c363a9 · "
+        "Fast off · main · 258K window"
+    )
+
+    changed = service._reconcile_marked_content_status(record)
+
+    assert changed is True
+    assert record.status == TerminalStatus.done
+    assert record.markers == ["codex-statusline-waiting"]
+    assert record.last_error is None
+
+
+def test_focused_claude_code_active_bypasses_idle_to_running_focus_guard() -> None:
+    service = build_service()
+    record = build_record()
+    record.status = TerminalStatus.done
+    record.screen_text = "$ "
+    service.backend.is_session_focused = lambda session_id: True
+
+    service._apply_screen_text(
+        record,
+        "\n".join([
+            "Claude Code v2.1.114",
+            "✶ Metamorphosing… (16m 24s · ↓ 8.1k tokens · thought for 25s)",
+            "❯",
+        ]),
+        "<pre>working</pre>",
+        is_live=True,
+        queue_summary=False,
+    )
+
+    assert record.status == TerminalStatus.running
+    assert record.markers == ["claude-code-active-indicator"]
     assert record.id not in service._focus_suppressed
 
 

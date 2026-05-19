@@ -182,6 +182,15 @@ def analyze_timeout_only(
     if not normalized:
         return None
 
+    if find_codex_statusline(normalized) is not None:
+        return None
+
+    for rule in config.rules:
+        if rule.type != "content":
+            continue
+        if _match_content_rule(rule, normalized, config.default_last_n_lines):
+            return None
+
     for rule in config.rules:
         if rule.type != "timeout":
             continue

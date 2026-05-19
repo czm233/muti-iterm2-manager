@@ -89,6 +89,7 @@ class DashboardService:
                 api_base=settings.summary_api_base,
                 api_key=settings.summary_api_key,
                 model=settings.summary_model,
+                free_fallback_model=settings.summary_free_fallback_model,
                 interval_seconds=settings.summary_interval_seconds,
             ))
         self._summary_queue: asyncio.Queue[str] | None = None
@@ -100,6 +101,8 @@ class DashboardService:
         self._summary_skipped_initial_hash: dict[str, str] = {}
         # 新建/拆分终端默认暂停自动摘要，避免 shell prompt 初始重绘触发 LLM
         self._summary_suspended_terminal_ids: set[str] = set()
+        self._summary_inflight_terminal_ids: set[str] = set()
+        self._failed_summary_fingerprints: dict[str, str] = {}
         self._missing_session_scan_counts: dict[str, int] = {}
         self._pending_name_sync_terminal_ids: set[str] = set()
         self._terminal_state_store: TerminalStateStore | None = (
@@ -519,6 +522,8 @@ class DashboardService:
         self._missing_session_scan_counts.pop(terminal_id, None)
         self._focus_suppressed.discard(terminal_id)
         self._summary_suspended_terminal_ids.discard(terminal_id)
+        self._summary_inflight_terminal_ids.discard(terminal_id)
+        self._failed_summary_fingerprints.pop(terminal_id, None)
         self._summary_skipped_initial_hash.pop(terminal_id, None)
         self._last_summary_status.pop(terminal_id, None)
         self._pending_name_sync_terminal_ids.discard(terminal_id)
@@ -1275,6 +1280,7 @@ class DashboardService:
     def _resume_auto_summary_for_terminal(self, record: TerminalRecord) -> None:
         self._summary_suspended_terminal_ids.discard(record.id)
         self._summary_skipped_initial_hash.pop(record.id, None)
+        self._failed_summary_fingerprints.pop(record.id, None)
 
     def _resume_auto_summary_after_user_activation(self, record: TerminalRecord) -> None:
         was_suspended = (
@@ -1621,10 +1627,17 @@ class DashboardService:
         r"(?:esc|ctrl|tokens?|context|interrupt|\d+s)\s*$",
         re.IGNORECASE,
     )
+    _CLAUDE_ACTIVE_LINE_RE = re.compile(
+        r"^[ \t│|]*[✶✻✢✽✺✹✷●◐◓◒◑]?[ \t]*[A-Za-z][^\n]*?(?:…|\.{3})[ \t]*"
+        r"\([^)]*(?:tokens?|thought|context|esc|ctrl|\d+[ \t]*[smh])[^)]*\)\s*$",
+        re.IGNORECASE,
+    )
     _FOCUS_SUPPRESSION_BYPASS_MARKERS = frozenset({
         "codex-working-indicator",
         "codex-statusline-working",
         "codex-statusline-starting",
+        "codex-statusline-thinking",
+        "claude-code-active-indicator",
         "claude-code-team-running",
     })
 
@@ -1733,6 +1746,37 @@ class DashboardService:
             marker in cls._FOCUS_SUPPRESSION_BYPASS_MARKERS for marker in markers
         )
 
+    def _apply_status_analysis_result(
+        self,
+        record: TerminalRecord,
+        status: TerminalStatus,
+        markers: list[str],
+        summary: str,
+    ) -> bool:
+        """应用一次状态分析结果；返回状态是否发生变化。"""
+        if status == record.status:
+            return False
+        if (record.status in self._IDLE_STATUSES
+                and status == TerminalStatus.running
+                and not self._has_agent_running_evidence(status, markers)
+                and self._is_terminal_focused(record)):
+            self._focus_suppressed.add(record.id)
+            return False
+        record.status = status
+        record.markers = markers
+        record.summary = summary
+        record.updated_at = self._now()
+        if status != TerminalStatus.error:
+            record.last_error = None
+        return True
+
+    def _reconcile_marked_content_status(self, record: TerminalRecord) -> bool:
+        """用明确 content marker 纠正旧状态，例如 error 卡片里的 Codex Working statusline。"""
+        status, markers, summary = analyze_screen_text(record.screen_text, 0.0, self._rule_config)
+        if not markers:
+            return False
+        return self._apply_status_analysis_result(record, status, markers, summary)
+
     def _track_agent_interaction_change(
         self,
         record: TerminalRecord,
@@ -1790,6 +1834,7 @@ class DashboardService:
                 self._CODEX_CONTEXT_LINE_RE,
                 self._CODEX_MODEL_LINE_RE,
                 self._AGENT_PROGRESS_LINE_RE,
+                self._CLAUDE_ACTIVE_LINE_RE,
             )
         )
 
@@ -1919,6 +1964,10 @@ class DashboardService:
                     continue
                 if not record.screen_text.strip():
                     continue
+                if self._reconcile_marked_content_status(record):
+                    if record.id in self.records:
+                        await self._broadcast(self.record_event(record.id))
+                    continue
                 # 计算停滞时间
                 stable_seconds = 0.0
                 if record.content_stable_since > 0:
@@ -1929,19 +1978,7 @@ class DashboardService:
                 if result is None:
                     continue
                 new_status, markers, summary = result
-                if new_status != record.status:
-                    # 焦点守卫：终端有焦点时（用户正在交互），不要从空闲变为运行中
-                    if (record.status in self._IDLE_STATUSES
-                            and new_status == TerminalStatus.running
-                            and self._is_terminal_focused(record)):
-                        self._focus_suppressed.add(record.id)
-                        continue
-                    record.status = new_status
-                    record.markers = markers
-                    record.summary = summary
-                    record.updated_at = self._now()
-                    if new_status != TerminalStatus.error:
-                        record.last_error = None
+                if self._apply_status_analysis_result(record, new_status, markers, summary):
                     # 防止 record 在 await 期间被移除
                     if record.id in self.records:
                         await self._broadcast(self.record_event(record.id))
@@ -2098,6 +2135,10 @@ class DashboardService:
         if not force and skipped_initial_hash and skipped_initial_hash == record.content_hash:
             return
 
+        if not force and self._is_failed_summary_auto_retry_blocked(record, terminal_id):
+            self._last_summary_status[terminal_id] = current_status
+            return
+
         # 2. 首次总结 → 立即执行
         if force:
             await self._run_summary_attempt(record, terminal_id, force_announce=True)
@@ -2182,22 +2223,56 @@ class DashboardService:
         return True
 
     async def _run_summary_attempt(self, record: TerminalRecord, terminal_id: str, *, force_announce: bool = False) -> None:
+        if terminal_id in self._summary_inflight_terminal_ids:
+            return
+
         previous_status = record.ai_summary_status
         previous_reason = record.ai_summary_reason
         previous_error_detail = record.ai_summary_error_detail
         restore_on_cache = False
 
-        if force_announce or self._should_announce_summary_start(record):
-            restore_on_cache = await self._set_summary_in_progress(record, terminal_id)
+        self._summary_inflight_terminal_ids.add(terminal_id)
+        try:
+            if force_announce or self._should_announce_summary_start(record):
+                restore_on_cache = await self._set_summary_in_progress(record, terminal_id)
 
-        await self._do_summarize(
-            record,
-            terminal_id,
-            previous_status=previous_status,
-            previous_reason=previous_reason,
-            previous_error_detail=previous_error_detail,
-            restore_on_cache=restore_on_cache,
-        )
+            await self._do_summarize(
+                record,
+                terminal_id,
+                previous_status=previous_status,
+                previous_reason=previous_reason,
+                previous_error_detail=previous_error_detail,
+                restore_on_cache=restore_on_cache,
+            )
+        finally:
+            self._summary_inflight_terminal_ids.discard(terminal_id)
+
+    def _summary_effective_fingerprint(self, record: TerminalRecord) -> str:
+        if record.program.is_agent:
+            interaction_hash = record.interaction_content_hash or self._agent_interaction_hash(record.screen_text)
+            if interaction_hash:
+                return f"agent:{interaction_hash}"
+        if record.content_hash:
+            return f"raw:{record.content_hash}"
+        return f"raw:{hashlib.md5(record.screen_text.encode()).hexdigest()}"
+
+    def _is_failed_summary_auto_retry_blocked(self, record: TerminalRecord, terminal_id: str) -> bool:
+        if not self._is_retryable_failed_summary(record):
+            return False
+        if record.ai_summary_at <= 0:
+            return False
+        fingerprint = self._summary_effective_fingerprint(record)
+        failed_fingerprint = self._failed_summary_fingerprints.get(terminal_id)
+        if failed_fingerprint is None:
+            self._failed_summary_fingerprints[terminal_id] = fingerprint
+            return True
+        return failed_fingerprint == fingerprint
+
+    def _remember_summary_attempt_result(self, record: TerminalRecord, terminal_id: str) -> None:
+        if self._is_retryable_failed_summary(record):
+            self._failed_summary_fingerprints[terminal_id] = self._summary_effective_fingerprint(record)
+        else:
+            self._failed_summary_fingerprints.pop(terminal_id, None)
 
     async def _do_summarize(
         self,
@@ -2227,6 +2302,7 @@ class DashboardService:
                     record.ai_summary_status = "fallback"
                     record.ai_summary_reason = result.reason or previous_reason or "api_error"
                     record.ai_summary_error_detail = result.error_detail or previous_error_detail
+                self._remember_summary_attempt_result(record, terminal_id)
                 self._schedule_terminal_state_save()
                 await self._broadcast(self.record_event(terminal_id))
                 return
@@ -2244,5 +2320,6 @@ class DashboardService:
             from multi_iterm2_manager.summarizer import TerminalSummarizer
             record.ai_summary = TerminalSummarizer.fallback_text(record.screen_text)
             record.ai_summary_at = time.time()
+        self._remember_summary_attempt_result(record, terminal_id)
         self._schedule_terminal_state_save()
         await self._broadcast(self.record_event(terminal_id))

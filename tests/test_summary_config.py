@@ -53,3 +53,25 @@ def test_masked_summary_api_key_is_cleared_without_env(tmp_path, monkeypatch) ->
 
     assert settings.summary_api_key == ""
     assert settings.ui_settings.summary_api_key == ""
+
+
+def test_blank_summary_free_fallback_model_is_preserved(tmp_path, monkeypatch) -> None:
+    settings_file = tmp_path / "ui-settings.yaml"
+    settings_file.write_text(
+        "\n".join(
+            [
+                "ui:",
+                "  summary_api_base: https://example.test/api",
+                "  summary_api_key: real-secret-key",
+                "  summary_model: test-model",
+                "  summary_free_fallback_model: ''",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MITERM_UI_SETTINGS_FILE", str(settings_file))
+
+    settings = load_settings()
+
+    assert settings.summary_free_fallback_model == ""
+    assert settings.ui_settings.summary_free_fallback_model == ""
