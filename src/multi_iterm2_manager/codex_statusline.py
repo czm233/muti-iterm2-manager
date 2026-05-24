@@ -27,7 +27,7 @@ _STATUS_TO_TERMINAL = {
     "ready": TerminalStatus.done,
     "starting": TerminalStatus.running,
     "thinking": TerminalStatus.running,
-    "waiting": TerminalStatus.done,
+    "waiting": TerminalStatus.waiting,
     "working": TerminalStatus.running,
 }
 

@@ -90,17 +90,17 @@ def test_analyze_screen_text_maps_codex_active_statuslines_to_running() -> None:
         assert markers == [f"codex-statusline-{raw_status.casefold()}"]
 
 
-def test_analyze_screen_text_maps_codex_waiting_statusline_to_done() -> None:
+def test_analyze_screen_text_maps_codex_waiting_statusline_to_waiting() -> None:
     config = _load_config()
     text = (
-        "gpt-5.5 medium · ~/githubProject/vscode-side-translate · Context 53% used · "
-        "0.130.0 · Waiting · 019e1b6c-e886-7303-94e9-cdeac3c363a9 · "
-        "Fast off · main · 258K window"
+        "gpt-5.5 xhigh · ~/githubProject/muti-codex-manager · Context 50% used · "
+        "0.130.0 · Waiting · 019e5912-323f-7570-94e5-86166ce7f297 · "
+        "Fast off · main · 258K window · 5.53M used · 5.5M in · 24.2K out"
     )
 
     status, markers, _ = analyze_screen_text(text, 0.0, config)
 
-    assert status == TerminalStatus.done
+    assert status == TerminalStatus.waiting
     assert markers == ["codex-statusline-waiting"]
 
 

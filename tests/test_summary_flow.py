@@ -487,7 +487,7 @@ def test_marked_content_reconciles_error_to_codex_waiting_statusline() -> None:
     changed = service._reconcile_marked_content_status(record)
 
     assert changed is True
-    assert record.status == TerminalStatus.done
+    assert record.status == TerminalStatus.waiting
     assert record.markers == ["codex-statusline-waiting"]
     assert record.last_error is None
 

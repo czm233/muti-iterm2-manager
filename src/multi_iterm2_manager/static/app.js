@@ -107,9 +107,6 @@ function hasTerminalMarker(record, marker) {
 
 function getTerminalVisualStatus(record) {
   if (!record) return "";
-  if (hasTerminalMarker(record, "codex-statusline-waiting")) {
-    return "done";
-  }
   return record.status || "";
 }
 
