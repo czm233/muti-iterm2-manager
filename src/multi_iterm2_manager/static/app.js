@@ -7,6 +7,7 @@ const CONNECTION_DIALOG_SHOW_DELAY_MS = 600;
 const CONNECTION_RETRY_DELAY_MS = 3000;
 const CONNECTION_LONG_WAIT_MS = 30000;
 const CONNECTION_SUCCESS_HOLD_MS = 1000;
+const BACKEND_RESTART_RECOVER_MS = 60000;
 const PRIMARY_COMPLETION_ALERT_STATUSES = new Set(["done", "error"]);
 
 const state = {
@@ -60,6 +61,10 @@ const state = {
     showTimer: null,
     tickTimer: null,
     closeTimer: null,
+  },
+  backendRestart: {
+    inFlight: false,
+    resetTimer: null,
   },
   renameDialog: {
     terminalId: null,
@@ -426,6 +431,7 @@ const createForm = document.getElementById("create-form");
 const createDemoButton = document.getElementById("create-demo");
 const monitorModeButton = document.getElementById("monitor-mode");
 const refreshAllButton = document.getElementById("refresh-all");
+const restartBackendButton = document.getElementById("restart-backend");
 const closeAllButton = document.getElementById("close-all");
 const wallControls = document.getElementById("wall-controls");
 const wsStatus = document.getElementById("ws-status");
@@ -2476,6 +2482,9 @@ function bindTopbarNumberInputWheelGuard() {
       if (!(input instanceof HTMLInputElement)) {
         return;
       }
+      if (document.activeElement !== input) {
+        return;
+      }
       event.preventDefault();
       event.stopPropagation();
       stepNumberInputWithWheel(input, event);
@@ -2952,6 +2961,82 @@ async function request(url, options = {}) {
     throw new Error(humanizeErrorMessage(detail));
   }
   return data;
+}
+
+function setBackendRestartButtonBusy(busy) {
+  if (!restartBackendButton) {
+    return;
+  }
+  restartBackendButton.disabled = busy;
+  restartBackendButton.textContent = busy ? "重启中..." : "重启后端";
+}
+
+function finishBackendRestart(messageText = "后端已重启完成，监控数据已同步") {
+  if (!state.backendRestart.inFlight) {
+    return;
+  }
+  state.backendRestart.inFlight = false;
+  if (state.backendRestart.resetTimer) {
+    window.clearTimeout(state.backendRestart.resetTimer);
+    state.backendRestart.resetTimer = null;
+  }
+  setBackendRestartButtonBusy(false);
+  setMessage(messageText);
+}
+
+function scheduleBackendRestartRecoveryTimeout() {
+  if (state.backendRestart.resetTimer) {
+    window.clearTimeout(state.backendRestart.resetTimer);
+  }
+  state.backendRestart.resetTimer = window.setTimeout(() => {
+    state.backendRestart.resetTimer = null;
+    if (!state.backendRestart.inFlight) {
+      return;
+    }
+    state.backendRestart.inFlight = false;
+    setBackendRestartButtonBusy(false);
+    setMessage("后端重启还没有恢复，请查看 .run/restart-via-ui.log", true);
+  }, BACKEND_RESTART_RECOVER_MS);
+}
+
+function isBackendRestartTransportError(error) {
+  const text = String(error?.message || "").toLowerCase();
+  return text.includes("failed to fetch") || text.includes("load failed") || text.includes("networkerror");
+}
+
+async function handleBackendRestart() {
+  if (!restartBackendButton || state.backendRestart.inFlight) {
+    return;
+  }
+
+  state.backendRestart.inFlight = true;
+  setBackendRestartButtonBusy(true);
+  scheduleBackendRestartRecoveryTimeout();
+  setMessage("正在发起后端重启...");
+
+  try {
+    await request("/api/system/restart", { method: "POST" });
+    setMessage("已发起后端重启，等待服务恢复");
+  } catch (error) {
+    if (!isBackendRestartTransportError(error)) {
+      state.backendRestart.inFlight = false;
+      if (state.backendRestart.resetTimer) {
+        window.clearTimeout(state.backendRestart.resetTimer);
+        state.backendRestart.resetTimer = null;
+      }
+      setBackendRestartButtonBusy(false);
+      setMessage(error.message, true);
+      return;
+    }
+    setMessage("后端连接已中断，正在等待重启完成");
+  }
+
+  closeAllTopbarMenus();
+  setWebSocketStatus("reconnecting", "后端重启中");
+  setConnectionDialogStatus("reconnecting", {
+    attempt: state.connectionDialog.attempt + 1,
+    nextRetryAt: Date.now() + CONNECTION_RETRY_DELAY_MS,
+  });
 }
 
 function statusLabel(status) {
@@ -6683,6 +6768,7 @@ function connectWebSocket() {
       }
       applySnapshot(payload.terminals || [], payload.layout || null, payload.allTags || null);
       setConnectionDialogStatus("connected");
+      finishBackendRestart();
       return;
     }
     if (payload.type === "terminal-updated") {
@@ -6888,6 +6974,10 @@ refreshAllButton.onclick = async () => {
     setMessage(error.message, true);
   }
 };
+
+if (restartBackendButton) {
+  restartBackendButton.onclick = handleBackendRestart;
+}
 
 const adoptSessionList = document.getElementById("adopt-session-list");
 

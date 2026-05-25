@@ -798,6 +798,10 @@ input {
   flex: 0 1 auto;
 }
 
+.topbar-menu-actions--restart > button {
+  flex: 1 1 100%;
+}
+
 .topbar-menu-panel button {
   min-height: 34px;
   padding: 0.46rem 0.72rem;
@@ -826,6 +830,12 @@ input {
   background: #2a1014;
   border: 1px solid rgba(174, 67, 67, 0.3);
   color: #ffb4b4;
+}
+
+.topbar-menu-panel button.restart-backend-button {
+  background: #3a1016;
+  border-color: rgba(248, 113, 113, 0.46);
+  color: #fecaca;
 }
 
 .topbar-menu-section--create .topbar-menu-actions > button,

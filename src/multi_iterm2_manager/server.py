@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import subprocess
+import sys
+import time
 from contextlib import suppress
+from pathlib import Path
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -70,6 +75,66 @@ app = FastAPI(title="多 iTerm2 管理器", version=__version__)
 app.mount("/assets", CachedStaticFiles(directory=service.static_dir()), name="assets")
 set_service(service.app_monitor)
 app.include_router(app_monitor_router)
+
+_backend_restart_lock = asyncio.Lock()
+_backend_restart_requested = False
+
+_RESTART_CHILD_CODE = """
+import os
+import sys
+import time
+
+delay_seconds = float(sys.argv[1])
+project_root = sys.argv[2]
+start_script = sys.argv[3]
+
+time.sleep(delay_seconds)
+os.chdir(project_root)
+os.execv(start_script, [start_script])
+"""
+
+
+def _project_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def _spawn_backend_restart(delay_seconds: float = 0.5) -> dict:
+    root = _project_root()
+    start_script = root / "start.sh"
+    if not start_script.is_file():
+        raise FileNotFoundError(f"未找到启动脚本：{start_script}")
+
+    run_dir = root / ".run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    log_path = run_dir / "restart-via-ui.log"
+    with log_path.open("ab") as log_file:
+        log_file.write(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] restart requested from web UI\n".encode())
+        log_file.flush()
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                _RESTART_CHILD_CODE,
+                str(delay_seconds),
+                str(root),
+                str(start_script),
+            ],
+            cwd=str(root),
+            env={**os.environ, "MITERM_RESTART_SOURCE": "web-ui"},
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            close_fds=True,
+        )
+    return {"restartPid": process.pid, "log": str(log_path)}
+
+
+async def _reset_backend_restart_guard_after(delay_seconds: float = 10.0) -> None:
+    global _backend_restart_requested
+
+    await asyncio.sleep(delay_seconds)
+    async with _backend_restart_lock:
+        _backend_restart_requested = False
 
 
 async def _apply_screen_layout(
@@ -326,6 +391,28 @@ async def health() -> dict:
 async def system_stats() -> dict:
     """获取系统资源使用率（CPU、内存、磁盘）"""
     return await asyncio.to_thread(service.system_stats)
+
+
+@app.post("/api/system/restart")
+async def restart_backend() -> dict:
+    """从 Web UI 触发安全重启，复用 start.sh 的健康检查和进程接管逻辑。"""
+    global _backend_restart_requested
+
+    async with _backend_restart_lock:
+        if _backend_restart_requested:
+            return {"ok": True, "status": "already-restarting"}
+
+        try:
+            service._persist_terminal_state_now()
+            result = await asyncio.to_thread(_spawn_backend_restart)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"启动重启脚本失败：{exc}") from exc
+
+        _backend_restart_requested = True
+        asyncio.create_task(_reset_backend_restart_guard_after())
+        return {"ok": True, "status": "restarting", **result}
 
 
 @app.get("/api/screens")
