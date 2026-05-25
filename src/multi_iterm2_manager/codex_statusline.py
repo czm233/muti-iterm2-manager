@@ -27,7 +27,8 @@ _STATUS_TO_TERMINAL = {
     "ready": TerminalStatus.done,
     "starting": TerminalStatus.running,
     "thinking": TerminalStatus.running,
-    "waiting": TerminalStatus.waiting,
+    # Codex statusline "Waiting" means the TUI is idle and waiting for the next prompt.
+    "waiting": TerminalStatus.done,
     "working": TerminalStatus.running,
 }
 

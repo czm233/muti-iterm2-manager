@@ -90,7 +90,7 @@ def test_analyze_screen_text_maps_codex_active_statuslines_to_running() -> None:
         assert markers == [f"codex-statusline-{raw_status.casefold()}"]
 
 
-def test_analyze_screen_text_maps_codex_waiting_statusline_to_waiting() -> None:
+def test_analyze_screen_text_maps_codex_waiting_statusline_to_done() -> None:
     config = _load_config()
     text = (
         "gpt-5.5 xhigh · ~/githubProject/muti-codex-manager · Context 50% used · "
@@ -100,7 +100,7 @@ def test_analyze_screen_text_maps_codex_waiting_statusline_to_waiting() -> None:
 
     status, markers, _ = analyze_screen_text(text, 0.0, config)
 
-    assert status == TerminalStatus.waiting
+    assert status == TerminalStatus.done
     assert markers == ["codex-statusline-waiting"]
 
 

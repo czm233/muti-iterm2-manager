@@ -502,7 +502,7 @@ def test_marked_content_reconciles_error_to_codex_working_statusline() -> None:
     assert record.last_error is None
 
 
-def test_marked_content_reconciles_error_to_codex_waiting_statusline() -> None:
+def test_marked_content_reconciles_error_to_codex_waiting_statusline_as_done() -> None:
     service = build_service()
     record = build_record()
     record.status = TerminalStatus.error
@@ -516,7 +516,7 @@ def test_marked_content_reconciles_error_to_codex_waiting_statusline() -> None:
     changed = service._reconcile_marked_content_status(record)
 
     assert changed is True
-    assert record.status == TerminalStatus.waiting
+    assert record.status == TerminalStatus.done
     assert record.markers == ["codex-statusline-waiting"]
     assert record.last_error is None
 
