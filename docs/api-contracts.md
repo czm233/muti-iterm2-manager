@@ -185,6 +185,11 @@
 }
 ```
 
+### `POST /api/terminals/{terminal_id}/remember-default-frame`
+
+- **用途：** 实时读取指定终端窗口位置，并保存为默认窗口模板
+- **备注：** 如果已设置目标屏幕，则保存到目标屏幕名下；否则按窗口坐标推断屏幕。
+
 ### `POST /api/layouts/grid`
 
 - **用途：** 广播监控墙布局信息

@@ -803,6 +803,19 @@ async def set_frame(terminal_id: str, payload: FramePayload) -> dict:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+@app.post("/api/terminals/{terminal_id}/remember-default-frame")
+async def remember_default_frame(terminal_id: str) -> dict:
+    """读取终端实时窗口位置，并保存为当前目标屏幕的默认模板。"""
+    try:
+        return await service.remember_terminal_default_frame(terminal_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @app.post("/api/layouts/grid")
 async def layout_grid(payload: GridLayoutPayload) -> dict:
     try:

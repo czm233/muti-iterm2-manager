@@ -5244,13 +5244,9 @@ async function enterMonitorMode() {
 }
 
 async function setTerminalDefaultFrame(record) {
-  const frameData = await request(`/api/terminals/${record.id}/frame`);
-  await request("/api/default-frame", {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(frameData),
-  });
-  setMessage(`已将 ${record.name} 的位置设为默认模板`);
+  const result = await request(`/api/terminals/${record.id}/remember-default-frame`, { method: "POST" });
+  const screenSuffix = result.screenName ? `（${result.screenName}）` : "";
+  setMessage(`已将 ${record.name} 的当前位置设为默认模板${screenSuffix}`);
 }
 
 async function applyDefaultFrameToAll() {

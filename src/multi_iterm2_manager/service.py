@@ -1383,6 +1383,36 @@ class DashboardService:
         await self._broadcast(payload)
         return payload
 
+    def _resolve_default_frame_screen_name(self, frame: TerminalFrame) -> str | None:
+        """解析记住位置应归属的屏幕。"""
+        _, target_screen_name, _ = self.get_target_screen_info()
+        if target_screen_name:
+            return target_screen_name
+        return get_screen_name_from_coordinates(frame.x, frame.y)
+
+    async def remember_terminal_default_frame(self, terminal_id: str) -> dict:
+        """读取终端实时窗口位置，并保存为默认窗口模板。"""
+        record = self._get_record(terminal_id)
+        try:
+            frame = await self.backend.get_frame(record.handle)
+        except Exception as exc:
+            if self._is_missing_terminal_error(exc):
+                return await self._mark_terminal_closed(record, reason="真实窗口已被手动关闭")
+            raise
+        if frame is None:
+            raise ValueError("无法获取窗口坐标")
+
+        screen_name = self._resolve_default_frame_screen_name(frame)
+        if not screen_name:
+            raise ValueError("无法确定当前屏幕，请确保窗口在有效屏幕范围内")
+
+        record.frame = frame
+        record.updated_at = self._now()
+        payload = await self.set_default_frame(frame, screen_name=screen_name)
+        payload["terminalId"] = record.id
+        self._persist_terminal_state_now()
+        return payload
+
     async def apply_default_frame_to_all(self) -> dict:
         """根据每个终端所在的屏幕，应用对应的默认位置"""
         frames_map = self.ui_settings.default_frames_by_screen

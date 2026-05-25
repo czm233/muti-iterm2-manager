@@ -305,6 +305,41 @@ def test_focus_terminal_realigns_source_and_siblings_to_default_frame(monkeypatc
     assert sibling_record.frame == expected
 
 
+def test_remember_terminal_default_frame_uses_target_screen_when_configured(tmp_path, monkeypatch) -> None:
+    settings = Settings(
+        backend="mock",
+        ui_settings_file=str(tmp_path / "ui-settings.yaml"),
+        ui_settings=UiSettings(target_screen=1),
+    )
+    service = DashboardService(settings)
+    monkeypatch.setattr(service, "get_screens", lambda: _mock_screens())
+
+    handle = TerminalHandle(window_id="mock-window-1", session_id="mock-session-1", tab_id="mock-tab-1")
+    live_frame = TerminalFrame(x=42.0, y=42.0, width=1180.0, height=760.0)
+    service.backend._items[handle.session_id] = {
+        "name": "selected",
+        "command": "",
+        "text": "",
+        "frame": live_frame,
+    }
+    record = TerminalRecord(id="task-1", name="selected", handle=handle, frame=None)
+    service.records = {record.id: record}
+
+    result = asyncio.run(service.remember_terminal_default_frame(record.id))
+
+    assert result["screenName"] == "外接屏幕 1"
+    assert record.frame == live_frame
+    assert service.ui_settings.default_frames_by_screen == {
+        "外接屏幕 1": {
+            "x": 42.0,
+            "y": 42.0,
+            "width": 1180.0,
+            "height": 760.0,
+        }
+    }
+    assert service.backend._items[handle.session_id]["frame"] == live_frame
+
+
 def test_split_terminal_creates_new_window_and_reuses_cwd(monkeypatch) -> None:
     settings = Settings(backend="mock")
     service = DashboardService(settings)
