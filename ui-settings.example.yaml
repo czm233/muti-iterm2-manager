@@ -43,6 +43,7 @@ ui:
   summary_model: glm-4.6
   # Set to "" to disable the free fallback request after primary model failure.
   summary_free_fallback_model: glm-4.7-flash
+  summary_title_max_chars: 12
   summary_interval_seconds: 30.0
   summary_active_interval: 10.0
   summary_fallback_retry_interval: 30.0

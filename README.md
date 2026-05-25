@@ -96,6 +96,7 @@ ui:
   summary_api_key: ""
   summary_model: glm-4.6
   summary_free_fallback_model: glm-4.7-flash
+  summary_title_max_chars: 12
 ```
 
 ---

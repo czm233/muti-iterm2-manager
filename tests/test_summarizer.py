@@ -9,6 +9,41 @@ from multi_iterm2_manager.summarizer import DEFAULT_FREE_FALLBACK_MODEL, Summary
 
 
 @pytest.mark.anyio
+async def test_json_summary_response_extracts_configurable_title() -> None:
+    requests: list[dict] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content.decode("utf-8"))
+        requests.append(payload)
+        content = json.dumps(
+            {
+                "summary": "正在执行 pytest 回归测试并修复失败用例",
+                "title": "测试修复推进",
+            },
+            ensure_ascii=False,
+        )
+        return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
+
+    summarizer = TerminalSummarizer(
+        SummaryConfig(
+            api_base="https://api.openai.example/v1",
+            api_key="test-key",
+            model="gpt-example",
+            title_max_chars=4,
+        )
+    )
+    summarizer._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        result = await summarizer.summarize("terminal-1", "pytest tests\n")
+    finally:
+        await summarizer.close()
+
+    assert result.text == "正在执行 pytest 回归测试并修复失败用例"
+    assert result.title == "测试修复"
+    assert "最多4个字" in requests[0]["messages"][0]["content"]
+
+
+@pytest.mark.anyio
 async def test_glm_free_fallback_model_used_after_primary_quota_error() -> None:
     requests: list[dict] = []
 

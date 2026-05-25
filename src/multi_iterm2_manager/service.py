@@ -91,6 +91,7 @@ class DashboardService:
                 model=settings.summary_model,
                 free_fallback_model=settings.summary_free_fallback_model,
                 interval_seconds=settings.summary_interval_seconds,
+                title_max_chars=settings.summary_title_max_chars,
             ))
         self._summary_queue: asyncio.Queue[str] | None = None
         self._summary_task: asyncio.Task[None] | None = None
@@ -502,6 +503,9 @@ class DashboardService:
             keep.ai_summary_status = duplicate.ai_summary_status
             keep.ai_summary_reason = duplicate.ai_summary_reason
             keep.ai_summary_error_detail = duplicate.ai_summary_error_detail
+        if not keep.summary_title and duplicate.summary_title:
+            keep.summary_title = duplicate.summary_title
+            keep.summary_title_at = duplicate.summary_title_at
 
     @staticmethod
     def _current_task_or_none() -> asyncio.Task[Any] | None:
@@ -2291,9 +2295,15 @@ class DashboardService:
             if result.from_cache:
                 if not restore_on_cache:
                     return
+                now = time.time()
                 record.ai_summary = result.text
                 if record.ai_summary_at <= 0:
-                    record.ai_summary_at = time.time()
+                    record.ai_summary_at = now
+                record.summary_title = result.title or TerminalSummarizer.fallback_title(
+                    result.text,
+                    self.settings.summary_title_max_chars,
+                )
+                record.summary_title_at = record.ai_summary_at if record.summary_title else 0.0
                 if result.used_ai:
                     record.ai_summary_status = "done"
                     record.ai_summary_reason = ""
@@ -2306,8 +2316,14 @@ class DashboardService:
                 self._schedule_terminal_state_save()
                 await self._broadcast(self.record_event(terminal_id))
                 return
+            now = time.time()
             record.ai_summary = result.text
-            record.ai_summary_at = time.time()
+            record.ai_summary_at = now
+            record.summary_title = result.title or TerminalSummarizer.fallback_title(
+                result.text,
+                self.settings.summary_title_max_chars,
+            )
+            record.summary_title_at = now if record.summary_title else 0.0
             record.ai_summary_status = "done" if result.used_ai else "fallback"
             record.ai_summary_reason = "" if result.used_ai else (result.reason or previous_reason or "api_error")
             record.ai_summary_error_detail = "" if result.used_ai else (result.error_detail or previous_error_detail)
@@ -2317,9 +2333,13 @@ class DashboardService:
             record.ai_summary_reason = "api_error"
             record.ai_summary_error_detail = " ".join(str(exc).split()).strip()[:120]
             # 使用截断文本作为降级内容
-            from multi_iterm2_manager.summarizer import TerminalSummarizer
             record.ai_summary = TerminalSummarizer.fallback_text(record.screen_text)
             record.ai_summary_at = time.time()
+            record.summary_title = TerminalSummarizer.fallback_title(
+                record.ai_summary,
+                self.settings.summary_title_max_chars,
+            )
+            record.summary_title_at = record.ai_summary_at if record.summary_title else 0.0
         self._remember_summary_attempt_result(record, terminal_id)
         self._schedule_terminal_state_save()
         await self._broadcast(self.record_event(terminal_id))

@@ -226,6 +226,7 @@ class SummaryConfigPayload(BaseModel):
     api_key: str = ""
     model: str = "glm-4.6"
     free_fallback_model: str = "glm-4.7-flash"
+    title_max_chars: int = Field(default=12, ge=1, le=60)
     interval_seconds: float = 30.0
     active_interval: float = 10.0
     fallback_retry_interval: float = 30.0
@@ -596,6 +597,7 @@ async def get_summary_config() -> dict:
         "hasApiKey": bool(ui.summary_api_key),
         "model": ui.summary_model,
         "freeFallbackModel": ui.summary_free_fallback_model,
+        "titleMaxChars": ui.summary_title_max_chars,
         "intervalSeconds": ui.summary_interval_seconds,
         "activeInterval": ui.summary_active_interval,
         "fallbackRetryInterval": ui.summary_fallback_retry_interval,
@@ -612,6 +614,7 @@ async def put_summary_config(payload: SummaryConfigPayload) -> dict:
         s.summary_api_key = payload.api_key
     s.summary_model = payload.model
     s.summary_free_fallback_model = payload.free_fallback_model.strip()
+    s.summary_title_max_chars = payload.title_max_chars
     s.summary_interval_seconds = payload.interval_seconds
     s.summary_active_interval = payload.active_interval
     s.summary_fallback_retry_interval = payload.fallback_retry_interval
@@ -622,6 +625,7 @@ async def put_summary_config(payload: SummaryConfigPayload) -> dict:
         summary_api_key=s.summary_api_key,
         summary_model=s.summary_model,
         summary_free_fallback_model=s.summary_free_fallback_model,
+        summary_title_max_chars=s.summary_title_max_chars,
         summary_interval_seconds=s.summary_interval_seconds,
         summary_active_interval=s.summary_active_interval,
         summary_fallback_retry_interval=s.summary_fallback_retry_interval,
@@ -639,6 +643,7 @@ async def put_summary_config(payload: SummaryConfigPayload) -> dict:
             model=s.summary_model,
             free_fallback_model=s.summary_free_fallback_model,
             interval_seconds=s.summary_interval_seconds,
+            title_max_chars=s.summary_title_max_chars,
         ))
         if not service._summary_task or service._summary_task.done():
             service._summary_task = asyncio.create_task(service._summary_loop())
@@ -649,6 +654,8 @@ async def put_summary_config(payload: SummaryConfigPayload) -> dict:
 @app.post("/api/terminals/{terminal_id}/summarize")
 async def trigger_summarize(terminal_id: str) -> dict:
     import time
+    from multi_iterm2_manager.summarizer import TerminalSummarizer
+
     if terminal_id not in service.records:
         raise HTTPException(status_code=404, detail="终端不存在")
     record = service.records[terminal_id]
@@ -661,15 +668,21 @@ async def trigger_summarize(terminal_id: str) -> dict:
         record.ai_summary_status = "done" if result.used_ai else "fallback"
         record.ai_summary_reason = "" if result.used_ai else result.reason
         record.ai_summary_error_detail = "" if result.used_ai else result.error_detail
-        return {"summary": result.text}
-    from multi_iterm2_manager.summarizer import TerminalSummarizer
+        record.summary_title = result.title or TerminalSummarizer.fallback_title(
+            result.text,
+            service.settings.summary_title_max_chars,
+        )
+        record.summary_title_at = record.ai_summary_at if record.summary_title else 0.0
+        return {"summary": result.text, "title": record.summary_title}
     fallback = TerminalSummarizer.fallback_text(record.screen_text)
     record.ai_summary = fallback
     record.ai_summary_at = time.time()
     record.ai_summary_status = "fallback"
     record.ai_summary_reason = "no_api"
     record.ai_summary_error_detail = "未配置 API"
-    return {"summary": fallback}
+    record.summary_title = TerminalSummarizer.fallback_title(fallback, service.settings.summary_title_max_chars)
+    record.summary_title_at = record.ai_summary_at if record.summary_title else 0.0
+    return {"summary": fallback, "title": record.summary_title}
 
 
 @app.post("/api/terminals/{terminal_id}/send-text")

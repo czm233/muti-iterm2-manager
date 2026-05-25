@@ -4000,7 +4000,7 @@ function rerenderBriefCard(card, record) {
           </div>
         </div>
 	        <div class="wall-card-brief-title-line">
-	          <h2 class="wall-card-title">${escapeHtml(record.name || "")}</h2>
+	          <h2 class="wall-card-title">${escapeHtml(terminalDisplayName(record))}</h2>
         </div>
         <div class="wall-card-brief-time-row">${timeHtml}</div>
       </div>
@@ -4019,9 +4019,22 @@ function escapeHtml(text) {
     .replaceAll("'", "&#39;");
 }
 
+function isDefaultTerminalName(name) {
+  return /^终端\s+\d+$/.test(String(name || "").trim());
+}
+
+function terminalDisplayName(record) {
+  const name = record.name || "";
+  const summaryTitle = String(record.summaryTitle || "").trim();
+  if (summaryTitle && isDefaultTerminalName(name)) {
+    return summaryTitle;
+  }
+  return name;
+}
+
 /** 生成卡片显示标题：终端名 · 文件夹名 */
 function displayTitle(record) {
-  const name = record.name || "";
+  const name = terminalDisplayName(record);
   if (!record.cwd) return name;
   const parts = record.cwd.replace(/\/+$/, "").split("/");
   const folder = parts[parts.length - 1] || "";
@@ -6053,7 +6066,7 @@ function updateCardMeta(card, record) {
   const title = card.querySelector(".wall-card-title");
   if (title) {
     title.textContent = card.classList.contains("wall-card--brief")
-      ? (record.name || "")
+      ? terminalDisplayName(record)
       : displayTitle(record);
   }
   const folderTitle = card.querySelector(".wall-card-folder-title");
@@ -7484,6 +7497,7 @@ if (summaryForm) {
     summaryForm.api_key.placeholder = data.hasApiKey ? "已保存 API Key，留空则不修改" : "输入 API Key";
     summaryForm.model.value = data.model || "glm-4.6";
     summaryForm.free_fallback_model.value = data.freeFallbackModel ?? "glm-4.7-flash";
+    summaryForm.title_max_chars.value = data.titleMaxChars || 12;
     summaryForm.interval_seconds.value = data.intervalSeconds || 30;
     summaryForm.active_interval.value = data.activeInterval || 10;
     summaryForm.fallback_retry_interval.value = data.fallbackRetryInterval || 30;
@@ -7501,6 +7515,7 @@ if (summaryForm) {
         api_key: summaryForm.api_key.value,
         model: summaryForm.model.value || "glm-4.6",
         free_fallback_model: summaryForm.free_fallback_model.value.trim(),
+        title_max_chars: parseInt(summaryForm.title_max_chars.value, 10) || 12,
         interval_seconds: parseFloat(summaryForm.interval_seconds.value) || 30,
         active_interval: parseFloat(summaryForm.active_interval.value) || 10,
         fallback_retry_interval: parseFloat(summaryForm.fallback_retry_interval.value) || 30,
@@ -7513,6 +7528,7 @@ if (summaryForm) {
         state.summaryConfig.apiBase = summaryForm.api_base.value;
         state.summaryConfig.model = summaryForm.model.value || "glm-4.6";
         state.summaryConfig.freeFallbackModel = summaryForm.free_fallback_model.value.trim();
+        state.summaryConfig.titleMaxChars = parseInt(summaryForm.title_max_chars.value, 10) || 12;
         state.summaryConfig.intervalSeconds = parseFloat(summaryForm.interval_seconds.value) || 30;
         state.summaryConfig.activeInterval = parseFloat(summaryForm.active_interval.value) || 10;
         state.summaryConfig.fallbackRetryInterval = parseFloat(summaryForm.fallback_retry_interval.value) || 30;

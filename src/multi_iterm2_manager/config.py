@@ -64,6 +64,7 @@ class UiSettings:
     summary_api_key: str = ""
     summary_model: str = "glm-4.6"
     summary_free_fallback_model: str = "glm-4.7-flash"
+    summary_title_max_chars: int = 12
     summary_interval_seconds: float = 30.0
     summary_active_interval: float = 10.0  # 运行中终端的总结间隔（秒）
     summary_fallback_retry_interval: float = 30.0  # fallback 后重试间隔（秒）
@@ -90,6 +91,7 @@ class Settings:
     summary_api_key: str = ""
     summary_model: str = "glm-4.6"
     summary_free_fallback_model: str = "glm-4.7-flash"
+    summary_title_max_chars: int = 12
     summary_interval_seconds: float = 30.0
     summary_active_interval: float = 10.0
     summary_fallback_retry_interval: float = 30.0
@@ -187,6 +189,7 @@ def save_ui_settings(path_value: str, ui_settings: UiSettings) -> Path:
             "summary_api_key": ui_settings.summary_api_key,
             "summary_model": ui_settings.summary_model,
             "summary_free_fallback_model": ui_settings.summary_free_fallback_model,
+            "summary_title_max_chars": ui_settings.summary_title_max_chars,
             "summary_interval_seconds": ui_settings.summary_interval_seconds,
             "summary_active_interval": ui_settings.summary_active_interval,
             "summary_fallback_retry_interval": ui_settings.summary_fallback_retry_interval,
@@ -212,6 +215,7 @@ def load_settings() -> Settings:
         summary_api_key = ui_settings.summary_api_key or env_summary_api_key
     summary_model = ui_settings.summary_model or os.getenv("MITERM_SUMMARY_MODEL", "glm-4.6")
     summary_free_fallback_model = ui_settings.summary_free_fallback_model
+    summary_title_max_chars = ui_settings.summary_title_max_chars or int(os.getenv("MITERM_SUMMARY_TITLE_MAX_CHARS", "12"))
     summary_interval = ui_settings.summary_interval_seconds or float(os.getenv("MITERM_SUMMARY_INTERVAL", "30"))
     summary_active_interval = ui_settings.summary_active_interval or float(os.getenv("MITERM_SUMMARY_ACTIVE_INTERVAL", "10"))
     summary_fallback_retry_interval = ui_settings.summary_fallback_retry_interval or float(os.getenv("MITERM_SUMMARY_FALLBACK_RETRY_INTERVAL", "30"))
@@ -228,6 +232,7 @@ def load_settings() -> Settings:
         summary_api_key=summary_api_key,
         summary_model=summary_model,
         summary_free_fallback_model=summary_free_fallback_model,
+        summary_title_max_chars=summary_title_max_chars,
         summary_interval_seconds=summary_interval,
         summary_active_interval=summary_active_interval,
         summary_fallback_retry_interval=summary_fallback_retry_interval,

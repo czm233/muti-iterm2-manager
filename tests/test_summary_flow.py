@@ -121,6 +121,35 @@ async def test_retry_from_fallback_broadcasts_summarizing_before_ai_result() -> 
 
 
 @pytest.mark.anyio
+async def test_ai_summary_title_is_stored_and_broadcast() -> None:
+    service = build_service()
+    record = build_record()
+    record.name = "终端 1"
+    service.records[record.id] = record
+    service._summarizer = FakeSummarizer(
+        SummaryResult(
+            text="正在执行回归测试并修复失败用例",
+            used_ai=True,
+            from_cache=False,
+            title="测试修复",
+        )
+    )
+
+    events: list[str] = []
+
+    async def fake_broadcast(payload: dict) -> None:
+        events.append(payload["terminal"]["summaryTitle"])
+
+    service._broadcast = fake_broadcast  # type: ignore[method-assign]
+
+    await service._generate_summary(record.id)
+
+    assert events == ["", "测试修复"]
+    assert record.summary_title == "测试修复"
+    assert record.summary_title_at == record.ai_summary_at
+
+
+@pytest.mark.anyio
 async def test_cached_fallback_retry_restores_fallback_state() -> None:
     service = build_service()
     record = build_record()

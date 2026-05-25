@@ -38,6 +38,8 @@ def test_terminal_state_store_round_trips_active_record(tmp_path) -> None:
         program=TerminalProgramInfo(key="codex", label="Codex", source="runtime", pid=123, command_line="codex"),
         ai_summary="cached summary",
         ai_summary_status="done",
+        summary_title="缓存任务",
+        summary_title_at=43.0,
         ai_summary_first=False,
         last_interaction_at=42.0,
         interaction_content_hash="abc",
@@ -58,6 +60,8 @@ def test_terminal_state_store_round_trips_active_record(tmp_path) -> None:
     assert loaded.tags == ["ai"]
     assert loaded.program.key == "codex"
     assert loaded.ai_summary == "cached summary"
+    assert loaded.summary_title == "缓存任务"
+    assert loaded.summary_title_at == 43.0
     assert loaded.ai_summary_first is False
 
 
