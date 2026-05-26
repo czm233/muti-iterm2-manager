@@ -172,6 +172,34 @@ def test_analyze_screen_text_prefers_latest_codex_statusline() -> None:
     assert markers == ["codex-statusline-ready"]
 
 
+def test_analyze_screen_text_uses_final_codex_status_only_line() -> None:
+    config = _load_config()
+    text = "\n".join([
+        "Working (9s • Ctrl+C to interrupt)",
+        "gpt-5.5 xhigh · ~/repo",
+        "Context 27% used",
+        "Ready",
+    ])
+
+    status, markers, _ = analyze_screen_text(text, 0.0, config)
+
+    assert status == TerminalStatus.done
+    assert markers == ["codex-statusline-ready"]
+
+
+def test_analyze_screen_text_ignores_stale_codex_statusline_not_at_bottom() -> None:
+    config = _load_config()
+    text = "\n".join([
+        "gpt-5.5 xhigh · ~/repo · Context 27% used · 0.125.0 · Fast on · 380K window · Ready · 019dc9b8-a26d-7ac0-9730-f17c57727b91",
+        "build still streaming",
+    ])
+
+    status, markers, _ = analyze_screen_text(text, 0.0, config)
+
+    assert status == TerminalStatus.running
+    assert markers == []
+
+
 def test_analyze_screen_text_does_not_tag_generic_working_text_as_codex() -> None:
     config = _load_config()
 
