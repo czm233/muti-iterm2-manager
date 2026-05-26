@@ -373,21 +373,14 @@ class ITerm2Backend:
 
         return await self._run_with_reconnect(_inner)
 
-    # 最大捕获行数（监控场景只需看近期输出）
+    # 最大捕获行数（只读当前可见 mutable area 的底部，避免 scrollback 旧状态污染判断）
     SCREEN_MAX_LINES = 80
 
     async def get_screen_render(self, handle: TerminalHandle) -> tuple[str, str]:
         async def _inner():
             session = await self._get_session(handle.session_id)
             line_info = await session.async_get_line_info()
-            history = line_info.scrollback_buffer_height
-            height = line_info.mutable_area_height
-            overflow = line_info.overflow
-            total = history + height
-            max_lines = min(total, self.SCREEN_MAX_LINES)
-            start_y = overflow + total - max_lines
-            end_y = overflow + total
-
+            start_y, end_y = self._visible_screen_y_range(line_info)
 
             coord_range = iterm2.util.CoordRange(
                 iterm2.util.Point(0, start_y),
@@ -415,6 +408,14 @@ class ITerm2Backend:
                 plain_text = self._screen_to_text(contents)
                 return plain_text, f'<pre class="terminal-mirror">{html.escape(plain_text or "暂无输出")}</pre>'
             return await self._run_with_reconnect(_fallback)
+
+    def _visible_screen_y_range(self, line_info: Any) -> tuple[int, int]:
+        height = max(0, int(getattr(line_info, "mutable_area_height", 0) or 0))
+        history = max(0, int(getattr(line_info, "scrollback_buffer_height", 0) or 0))
+        overflow = max(0, int(getattr(line_info, "overflow", 0) or 0))
+        max_lines = min(height, self.SCREEN_MAX_LINES)
+        visible_end_y = overflow + history + height
+        return visible_end_y - max_lines, visible_end_y
 
     async def get_screen_text(self, handle: TerminalHandle) -> str:
         text, _ = await self.get_screen_render(handle)
