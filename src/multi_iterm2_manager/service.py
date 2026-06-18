@@ -838,16 +838,14 @@ class DashboardService:
 
     async def _move_to_target_screen(self, record: TerminalRecord) -> None:
         """如果设置了目标屏幕，确保窗口在目标屏幕上"""
-        target_index, _, _ = self.get_target_screen_info()
+        target_index, _, target_screen = self.get_target_screen_info()
         if target_index >= 0:
             from multi_iterm2_manager.display import get_screen_bounds
             bounds = get_screen_bounds(target_index)
             if bounds is not None:
                 current_frame = await self.backend.get_frame(record.handle)
                 if current_frame is not None:
-                    # 检查窗口是否已经在目标屏幕范围内
-                    in_screen = (bounds.x <= current_frame.x < bounds.x + bounds.width
-                                 and bounds.y <= current_frame.y < bounds.y + bounds.height)
+                    in_screen = self._frame_on_screen(current_frame, target_screen)
                     if not in_screen:
                         # 保持窗口大小，移动到目标屏幕中心区域
                         new_frame = TerminalFrame(
@@ -868,6 +866,62 @@ class DashboardService:
             and abs(left.height - right.height) <= tolerance
         )
 
+    @staticmethod
+    def _frame_on_screen(frame: TerminalFrame, screen: dict | None) -> bool:
+        if screen is None:
+            return False
+        return is_point_on_screen(screen, frame.x, frame.y)
+
+    def _get_screen_by_index(self, screen_index: int) -> dict | None:
+        if screen_index < 0:
+            return None
+        return next((screen for screen in self.get_screens() if screen.get("index") == screen_index), None)
+
+    @staticmethod
+    def _rebase_frame_to_screen(frame: TerminalFrame, screen: dict) -> TerminalFrame:
+        padding = 18.0
+        sx = float(screen.get("visibleX", screen.get("x", 0.0)))
+        sy = float(screen.get("visibleY", screen.get("y", 0.0)))
+        sw = float(screen.get("visibleWidth", screen.get("width", 0.0)))
+        sh = float(screen.get("visibleHeight", screen.get("height", 0.0)))
+
+        max_width = max(100.0, sw - padding * 2)
+        max_height = max(100.0, sh - padding * 2)
+        width = round(max(100.0, min(float(frame.width), max_width)), 2)
+        height = round(max(100.0, min(float(frame.height), max_height)), 2)
+
+        x = float(frame.x) if sx <= frame.x < sx + sw else sx + padding
+        y = float(frame.y) if sy <= frame.y < sy + sh else sy + padding
+
+        min_x = sx + padding
+        min_y = sy + padding
+        max_x = sx + max(0.0, sw - width - padding)
+        max_y = sy + max(0.0, sh - height - padding)
+        x = min(max(x, min_x), max_x)
+        y = min(max(y, min_y), max_y)
+
+        return TerminalFrame(
+            x=round(x, 2),
+            y=round(y, 2),
+            width=width,
+            height=height,
+        )
+
+    def _default_frame_for_screen(self, frame_data: dict, screen: dict | None) -> dict | None:
+        try:
+            frame = TerminalFrame(
+                x=float(frame_data["x"]),
+                y=float(frame_data.get("y", 0.0)),
+                width=float(frame_data["width"]),
+                height=float(frame_data["height"]),
+            )
+        except Exception:
+            return None
+
+        if screen is None or self._frame_on_screen(frame, screen):
+            return frame.to_dict()
+        return self._rebase_frame_to_screen(frame, screen).to_dict()
+
     def _build_screen_target_frame(
         self,
         screen_name: str | None,
@@ -887,8 +941,6 @@ class DashboardService:
     async def focus_terminal(self, terminal_id: str, browser_x: float | None = None, browser_y: float | None = None) -> dict:
         record = self._get_record(terminal_id)
         try:
-            await self.backend.focus(record.handle)
-            self._resume_auto_summary_after_user_activation(record)
             screen_index, screen_name = self._resolve_preferred_screen(
                 browser_x=browser_x,
                 browser_y=browser_y,
@@ -896,6 +948,7 @@ class DashboardService:
             if screen_index >= 0:
                 from multi_iterm2_manager.display import get_screen_bounds
                 bounds = get_screen_bounds(screen_index)
+                target_screen = self._get_screen_by_index(screen_index)
                 if bounds is not None:
                     current_frame = await self.backend.get_frame(record.handle)
                     if current_frame is not None:
@@ -904,8 +957,7 @@ class DashboardService:
                             bounds,
                             current_frame,
                         )
-                        in_screen = (bounds.x <= current_frame.x < bounds.x + bounds.width
-                                     and bounds.y <= current_frame.y < bounds.y + bounds.height)
+                        in_screen = self._frame_on_screen(current_frame, target_screen)
                         should_move = not in_screen or (
                             has_default_frame and not self._frames_match(current_frame, target_frame)
                         )
@@ -913,7 +965,13 @@ class DashboardService:
                             await self.backend.set_frame(record.handle, target_frame)
                             record.frame = target_frame
                     # 让其他可见终端也跟随移动到同一屏幕
-                    await self._move_siblings_to_screen(record, screen_name, bounds)
+                    await self._move_siblings_to_screen(record, screen_name, bounds, target_screen)
+                    await self.backend.focus(record.handle)
+                else:
+                    await self.backend.focus(record.handle)
+            else:
+                await self.backend.focus(record.handle)
+            self._resume_auto_summary_after_user_activation(record)
         except Exception as exc:
             if self._is_missing_terminal_error(exc):
                 return await self._mark_terminal_closed(record, reason="真实窗口已被手动关闭")
@@ -1037,7 +1095,13 @@ class DashboardService:
                 all_tags.update(record.tags)
         return sorted(all_tags)
 
-    async def _move_siblings_to_screen(self, source_record: TerminalRecord, screen_name: str | None, bounds) -> None:
+    async def _move_siblings_to_screen(
+        self,
+        source_record: TerminalRecord,
+        screen_name: str | None,
+        bounds,
+        target_screen: dict | None,
+    ) -> None:
         """将其他可见终端移动到与源终端相同的屏幕，并优先对齐到默认模板。"""
         for sibling in self.records.values():
             if sibling.id == source_record.id:
@@ -1052,8 +1116,7 @@ class DashboardService:
                         bounds,
                         current_frame,
                     )
-                    in_screen = (bounds.x <= current_frame.x < bounds.x + bounds.width
-                                 and bounds.y <= current_frame.y < bounds.y + bounds.height)
+                    in_screen = self._frame_on_screen(current_frame, target_screen)
                     should_move = not in_screen or (
                         has_default_frame and not self._frames_match(current_frame, target_frame)
                     )
@@ -1347,10 +1410,12 @@ class DashboardService:
         frames_map = self.ui_settings.default_frames_by_screen
         if not frames_map or not isinstance(frames_map, dict):
             return None
+        target_screen = get_screen_by_name(screen_name, self.get_screens()) if screen_name else None
         if screen_name and screen_name in frames_map:
-            return frames_map[screen_name]
+            frame_data = frames_map[screen_name]
+            if isinstance(frame_data, dict):
+                return self._default_frame_for_screen(frame_data, target_screen)
         if screen_name:
-            target_screen = get_screen_by_name(screen_name, self.get_screens())
             if target_screen is not None:
                 for frame_data in frames_map.values():
                     if not isinstance(frame_data, dict):
@@ -1360,7 +1425,7 @@ class DashboardService:
                     if x is None:
                         continue
                     if is_point_on_screen(target_screen, x, y):
-                        return frame_data
+                        return self._default_frame_for_screen(frame_data, target_screen)
         return None
 
     async def set_default_frame(self, frame: TerminalFrame, screen_name: str) -> dict:

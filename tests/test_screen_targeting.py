@@ -208,6 +208,34 @@ def test_get_default_frame_matches_saved_alias_by_coordinates(monkeypatch) -> No
     assert frame["width"] == 2560.0
 
 
+def test_get_default_frame_rebases_named_screen_after_display_rearrangement(monkeypatch) -> None:
+    settings = Settings(
+        backend="mock",
+        ui_settings=UiSettings(
+            default_frames_by_screen={
+                "外接屏幕 1": {
+                    "x": -2542.0,
+                    "y": 32.0,
+                    "width": 1200.0,
+                    "height": 700.0,
+                }
+            }
+        ),
+    )
+    service = DashboardService(settings)
+    monkeypatch.setattr(service, "get_screens", lambda: _mock_screens())
+
+    frame = service.get_default_frame("外接屏幕 1")
+
+    assert frame is not None
+    assert frame == {
+        "x": 1728.0,
+        "y": 32.0,
+        "width": 1200.0,
+        "height": 700.0,
+    }
+
+
 def test_align_frame_to_siblings_keeps_explicit_target_screen(monkeypatch) -> None:
     settings = Settings(
         backend="mock",
@@ -303,6 +331,71 @@ def test_focus_terminal_realigns_source_and_siblings_to_default_frame(monkeypatc
     expected = TerminalFrame(x=1760.0, y=32.0, width=900.0, height=560.0)
     assert selected_record.frame == expected
     assert sibling_record.frame == expected
+
+
+def test_focus_terminal_rebases_stale_default_frame_without_focus_traversal(monkeypatch) -> None:
+    settings = Settings(
+        backend="mock",
+        ui_settings=UiSettings(
+            target_screen=1,
+            default_frames_by_screen={
+                "外接屏幕 1": {
+                    "x": -2542.0,
+                    "y": 32.0,
+                    "width": 1200.0,
+                    "height": 700.0,
+                }
+            },
+        ),
+    )
+    service = DashboardService(settings)
+    monkeypatch.setattr(service, "get_screens", lambda: _mock_screens())
+    monkeypatch.setattr(
+        display,
+        "get_screen_bounds",
+        lambda screen_index: display.DisplayBounds(x=1710.0, y=0.0, width=2560.0, height=1440.0)
+        if screen_index == 1
+        else None,
+    )
+
+    focus_calls: list[str] = []
+
+    async def fake_focus(handle: TerminalHandle) -> None:
+        focus_calls.append(handle.session_id)
+
+    service.backend.focus = fake_focus  # type: ignore[method-assign]
+
+    selected_handle = TerminalHandle(window_id="mock-window-1", session_id="mock-session-1", tab_id="mock-tab-1")
+    sibling_handle = TerminalHandle(window_id="mock-window-2", session_id="mock-session-2", tab_id="mock-tab-2")
+    selected_frame = TerminalFrame(x=-2542.0, y=32.0, width=1200.0, height=700.0)
+    sibling_frame = TerminalFrame(x=-2542.0, y=32.0, width=1200.0, height=700.0)
+
+    service.backend._items[selected_handle.session_id] = {
+        "name": "selected",
+        "command": "",
+        "text": "",
+        "frame": selected_frame,
+    }
+    service.backend._items[sibling_handle.session_id] = {
+        "name": "sibling",
+        "command": "",
+        "text": "",
+        "frame": sibling_frame,
+    }
+
+    selected_record = TerminalRecord(id="task-1", name="selected", handle=selected_handle, frame=selected_frame)
+    sibling_record = TerminalRecord(id="task-2", name="sibling", handle=sibling_handle, frame=sibling_frame)
+    service.records = {
+        selected_record.id: selected_record,
+        sibling_record.id: sibling_record,
+    }
+
+    asyncio.run(service.focus_terminal(selected_record.id))
+
+    expected = TerminalFrame(x=1728.0, y=32.0, width=1200.0, height=700.0)
+    assert selected_record.frame == expected
+    assert sibling_record.frame == expected
+    assert focus_calls == [selected_handle.session_id]
 
 
 def test_remember_terminal_default_frame_uses_target_screen_when_configured(tmp_path, monkeypatch) -> None:
