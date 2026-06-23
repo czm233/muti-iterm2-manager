@@ -3,6 +3,7 @@
 __pycache__/
 *.pyc
 .DS_Store
+ui-settings.yaml
 src/*.egg-info/
 src/multi_iterm2_manager.egg-info/
 

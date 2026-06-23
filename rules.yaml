@@ -12,6 +12,15 @@ rules:
     patterns:
       - "\\bWorking\\s*\\([^\\n)]*(?:esc|ctrl\\s*[+-]?\\s*c|control\\s*[+-]?\\s*c|interrupt)[^\\n)]*\\)"
 
+  # --- 内容规则：Claude Code 正在工作（动态底部状态行） ---
+  - name: claude-code-active-indicator
+    status: running
+    type: content
+    priority: 94
+    last_n_lines: 12
+    patterns:
+      - "(?:^|\\n)[ \\t│|]*[✶✻✢✽✺✹✷●◐◓◒◑]?[ \\t]*[A-Za-z][^\\n]*?(?:…|\\.\\.\\.)[ \\t]*\\([^\\n)]*(?:tokens?|thought|context|esc|ctrl|\\d+[ \\t]*[smh])[^\\n)]*\\)"
+
   # --- 内容规则：等待人类（Claude Code 特征） ---
   - name: claude-code-permission
     status: waiting

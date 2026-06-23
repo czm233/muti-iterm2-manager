@@ -67,6 +67,27 @@ def test_detect_terminal_program_from_screen_heuristic(monkeypatch) -> None:
     assert program.is_agent is True
 
 
+def test_detect_terminal_program_from_claude_code_active_footer(monkeypatch) -> None:
+    runtime = TerminalRuntimeInfo(
+        job_name="tmux",
+        command_line="tmux attach",
+        job_pid=30501,
+    )
+
+    monkeypatch.setattr(pd, "_detect_from_process_tree", lambda pid: None)
+    monkeypatch.setattr(pd, "_is_process_alive", lambda pid: True)
+
+    screen = "\n".join([
+        "Claude Code v2.1.114",
+        "✶ Metamorphosing… (16m 24s · ↓ 8.1k tokens · thought for 25s)",
+    ])
+    program = pd.detect_terminal_program(runtime, screen)
+
+    assert program.key == "claude-code"
+    assert program.source == "screen-heuristic"
+    assert program.is_agent is True
+
+
 def test_detect_terminal_program_from_codex_working_screen_heuristic(monkeypatch) -> None:
     runtime = TerminalRuntimeInfo(
         job_name="tmux",
@@ -104,6 +125,28 @@ def test_detect_terminal_program_from_codex_statusline_screen_heuristic(monkeypa
         "0.125.0 · Fast on · 380K window · Ready · "
         "019dc9b8-a26d-7ac0-9730-f17c57727b91"
     )
+    program = pd.detect_terminal_program(runtime, screen)
+
+    assert program.key == "codex"
+    assert program.source == "screen-heuristic"
+    assert program.is_agent is True
+
+
+def test_detect_terminal_program_from_wrapped_codex_statusline_screen_heuristic(monkeypatch) -> None:
+    runtime = TerminalRuntimeInfo(
+        job_name="tmux",
+        command_line="tmux attach",
+        job_pid=31502,
+    )
+
+    monkeypatch.setattr(pd, "_detect_from_process_tree", lambda pid: None)
+    monkeypatch.setattr(pd, "_is_process_alive", lambda pid: True)
+
+    screen = "\n".join([
+        "gpt-5.5 medium · ~/githubProject/muti-codex-manager ·",
+        "Context 31% used · 0.130.0 · Working ·",
+        "019e2442-85f1-7552-99e6-d6dd522c4e21 · Fast off · main · 258K window",
+    ])
     program = pd.detect_terminal_program(runtime, screen)
 
     assert program.key == "codex"

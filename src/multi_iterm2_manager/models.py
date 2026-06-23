@@ -200,6 +200,8 @@ class TerminalRecord:
     ai_summary_status: str = "none"  # "none" | "summarizing" | "done" | "fallback"
     ai_summary_reason: str = ""  # 状态原因："" | "no_api" | "cooldown" | "idle" | "content_changing" | "api_error" | "empty_response"
     ai_summary_error_detail: str = ""
+    summary_title: str = ""
+    summary_title_at: float = 0.0
     ai_summary_first: bool = True  # 首次总结标记（启动后立即执行）
     last_interaction_at: float = 0.0  # 首次接管只建基线；后续 LLM 屏幕内容变化才更新
     interaction_content_hash: str = ""  # 过滤状态行后的 LLM 内容指纹，不对外展示
@@ -233,6 +235,8 @@ class TerminalRecord:
             "aiSummaryStatus": self.ai_summary_status,
             "aiSummaryReason": self.ai_summary_reason,
             "aiSummaryErrorDetail": self.ai_summary_error_detail,
+            "summaryTitle": self.summary_title,
+            "summaryTitleAt": self.summary_title_at,
             "lastInteractionAt": self.last_interaction_at,
         }
 

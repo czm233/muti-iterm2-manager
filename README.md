@@ -87,13 +87,16 @@ MITERM_BACKEND=mock python -m multi_iterm2_manager
 
 ## 界面配置
 
-项目根目录 `ui-settings.yaml` 为默认配置，也可在页面菜单中直接修改并保存。
+项目根目录 `ui-settings.yaml` 为本机配置，也可在页面菜单中直接修改并保存。
+该文件可能包含 `summary_api_key`，默认不应提交到 Git。首次配置可以复制 `ui-settings.example.yaml` 后再填写真实值。
 
 ```yaml
-card_gap: 12
-card_padding: 8
-border_radius: 8
-# ... 更多选项
+ui:
+  summary_api_base: https://open.bigmodel.cn/api/paas/v4
+  summary_api_key: ""
+  summary_model: glm-4.6
+  summary_free_fallback_model: glm-4.7-flash
+  summary_title_max_chars: 12
 ```
 
 ---

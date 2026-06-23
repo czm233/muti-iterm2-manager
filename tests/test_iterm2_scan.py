@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from multi_iterm2_manager.backend.iterm2_backend import ITerm2Backend
@@ -50,3 +52,25 @@ async def test_scan_unmanaged_sessions_skips_known_sessions_even_without_managed
 
     assert [item["session_id"] for item in result] == ["session-unmanaged"]
     assert known.read_keys == []
+
+
+def test_visible_screen_y_range_uses_mutable_area_not_scrollback() -> None:
+    backend = object.__new__(ITerm2Backend)
+    line_info = SimpleNamespace(
+        scrollback_buffer_height=500,
+        mutable_area_height=40,
+        overflow=7,
+    )
+
+    assert backend._visible_screen_y_range(line_info) == (507, 547)
+
+
+def test_visible_screen_y_range_caps_large_visible_area_to_bottom() -> None:
+    backend = object.__new__(ITerm2Backend)
+    line_info = SimpleNamespace(
+        scrollback_buffer_height=500,
+        mutable_area_height=120,
+        overflow=7,
+    )
+
+    assert backend._visible_screen_y_range(line_info) == (547, 627)

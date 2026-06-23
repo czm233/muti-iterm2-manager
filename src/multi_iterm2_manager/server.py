@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import subprocess
+import sys
+import time
 from contextlib import suppress
+from pathlib import Path
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -70,6 +75,66 @@ app = FastAPI(title="多 iTerm2 管理器", version=__version__)
 app.mount("/assets", CachedStaticFiles(directory=service.static_dir()), name="assets")
 set_service(service.app_monitor)
 app.include_router(app_monitor_router)
+
+_backend_restart_lock = asyncio.Lock()
+_backend_restart_requested = False
+
+_RESTART_CHILD_CODE = """
+import os
+import sys
+import time
+
+delay_seconds = float(sys.argv[1])
+project_root = sys.argv[2]
+start_script = sys.argv[3]
+
+time.sleep(delay_seconds)
+os.chdir(project_root)
+os.execv(start_script, [start_script])
+"""
+
+
+def _project_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def _spawn_backend_restart(delay_seconds: float = 0.5) -> dict:
+    root = _project_root()
+    start_script = root / "start.sh"
+    if not start_script.is_file():
+        raise FileNotFoundError(f"未找到启动脚本：{start_script}")
+
+    run_dir = root / ".run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    log_path = run_dir / "restart-via-ui.log"
+    with log_path.open("ab") as log_file:
+        log_file.write(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] restart requested from web UI\n".encode())
+        log_file.flush()
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                _RESTART_CHILD_CODE,
+                str(delay_seconds),
+                str(root),
+                str(start_script),
+            ],
+            cwd=str(root),
+            env={**os.environ, "MITERM_RESTART_SOURCE": "web-ui"},
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            close_fds=True,
+        )
+    return {"restartPid": process.pid, "log": str(log_path)}
+
+
+async def _reset_backend_restart_guard_after(delay_seconds: float = 10.0) -> None:
+    global _backend_restart_requested
+
+    await asyncio.sleep(delay_seconds)
+    async with _backend_restart_lock:
+        _backend_restart_requested = False
 
 
 async def _apply_screen_layout(
@@ -225,6 +290,8 @@ class SummaryConfigPayload(BaseModel):
     api_base: str = ""
     api_key: str = ""
     model: str = "glm-4.6"
+    free_fallback_model: str = "glm-4.7-flash"
+    title_max_chars: int = Field(default=12, ge=1, le=60)
     interval_seconds: float = 30.0
     active_interval: float = 10.0
     fallback_retry_interval: float = 30.0
@@ -324,6 +391,28 @@ async def health() -> dict:
 async def system_stats() -> dict:
     """获取系统资源使用率（CPU、内存、磁盘）"""
     return await asyncio.to_thread(service.system_stats)
+
+
+@app.post("/api/system/restart")
+async def restart_backend() -> dict:
+    """从 Web UI 触发安全重启，复用 start.sh 的健康检查和进程接管逻辑。"""
+    global _backend_restart_requested
+
+    async with _backend_restart_lock:
+        if _backend_restart_requested:
+            return {"ok": True, "status": "already-restarting"}
+
+        try:
+            service._persist_terminal_state_now()
+            result = await asyncio.to_thread(_spawn_backend_restart)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"启动重启脚本失败：{exc}") from exc
+
+        _backend_restart_requested = True
+        asyncio.create_task(_reset_backend_restart_guard_after())
+        return {"ok": True, "status": "restarting", **result}
 
 
 @app.get("/api/screens")
@@ -594,6 +683,8 @@ async def get_summary_config() -> dict:
         "apiKey": mask_secret(ui.summary_api_key),
         "hasApiKey": bool(ui.summary_api_key),
         "model": ui.summary_model,
+        "freeFallbackModel": ui.summary_free_fallback_model,
+        "titleMaxChars": ui.summary_title_max_chars,
         "intervalSeconds": ui.summary_interval_seconds,
         "activeInterval": ui.summary_active_interval,
         "fallbackRetryInterval": ui.summary_fallback_retry_interval,
@@ -609,6 +700,8 @@ async def put_summary_config(payload: SummaryConfigPayload) -> dict:
     if payload.api_key and not is_masked_secret(payload.api_key):
         s.summary_api_key = payload.api_key
     s.summary_model = payload.model
+    s.summary_free_fallback_model = payload.free_fallback_model.strip()
+    s.summary_title_max_chars = payload.title_max_chars
     s.summary_interval_seconds = payload.interval_seconds
     s.summary_active_interval = payload.active_interval
     s.summary_fallback_retry_interval = payload.fallback_retry_interval
@@ -618,6 +711,8 @@ async def put_summary_config(payload: SummaryConfigPayload) -> dict:
         summary_api_base=s.summary_api_base,
         summary_api_key=s.summary_api_key,
         summary_model=s.summary_model,
+        summary_free_fallback_model=s.summary_free_fallback_model,
+        summary_title_max_chars=s.summary_title_max_chars,
         summary_interval_seconds=s.summary_interval_seconds,
         summary_active_interval=s.summary_active_interval,
         summary_fallback_retry_interval=s.summary_fallback_retry_interval,
@@ -633,7 +728,9 @@ async def put_summary_config(payload: SummaryConfigPayload) -> dict:
             api_base=s.summary_api_base,
             api_key=s.summary_api_key,
             model=s.summary_model,
+            free_fallback_model=s.summary_free_fallback_model,
             interval_seconds=s.summary_interval_seconds,
+            title_max_chars=s.summary_title_max_chars,
         ))
         if not service._summary_task or service._summary_task.done():
             service._summary_task = asyncio.create_task(service._summary_loop())
@@ -644,6 +741,8 @@ async def put_summary_config(payload: SummaryConfigPayload) -> dict:
 @app.post("/api/terminals/{terminal_id}/summarize")
 async def trigger_summarize(terminal_id: str) -> dict:
     import time
+    from multi_iterm2_manager.summarizer import TerminalSummarizer
+
     if terminal_id not in service.records:
         raise HTTPException(status_code=404, detail="终端不存在")
     record = service.records[terminal_id]
@@ -656,15 +755,21 @@ async def trigger_summarize(terminal_id: str) -> dict:
         record.ai_summary_status = "done" if result.used_ai else "fallback"
         record.ai_summary_reason = "" if result.used_ai else result.reason
         record.ai_summary_error_detail = "" if result.used_ai else result.error_detail
-        return {"summary": result.text}
-    from multi_iterm2_manager.summarizer import TerminalSummarizer
+        record.summary_title = result.title or TerminalSummarizer.fallback_title(
+            result.text,
+            service.settings.summary_title_max_chars,
+        )
+        record.summary_title_at = record.ai_summary_at if record.summary_title else 0.0
+        return {"summary": result.text, "title": record.summary_title}
     fallback = TerminalSummarizer.fallback_text(record.screen_text)
     record.ai_summary = fallback
     record.ai_summary_at = time.time()
     record.ai_summary_status = "fallback"
     record.ai_summary_reason = "no_api"
     record.ai_summary_error_detail = "未配置 API"
-    return {"summary": fallback}
+    record.summary_title = TerminalSummarizer.fallback_title(fallback, service.settings.summary_title_max_chars)
+    record.summary_title_at = record.ai_summary_at if record.summary_title else 0.0
+    return {"summary": fallback, "title": record.summary_title}
 
 
 @app.post("/api/terminals/{terminal_id}/send-text")
@@ -694,6 +799,19 @@ async def set_frame(terminal_id: str, payload: FramePayload) -> dict:
         return {"item": await service.set_frame(terminal_id, TerminalFrame(**payload.model_dump())), "layout": service.monitor_layout()}
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/terminals/{terminal_id}/remember-default-frame")
+async def remember_default_frame(terminal_id: str) -> dict:
+    """读取终端实时窗口位置，并保存为当前目标屏幕的默认模板。"""
+    try:
+        return await service.remember_terminal_default_frame(terminal_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 

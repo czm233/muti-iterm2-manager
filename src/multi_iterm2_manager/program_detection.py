@@ -44,10 +44,16 @@ _SHELL_NAMES = frozenset({
 })
 
 _CLAUDE_SCREEN_PATTERNS = (
+    re.compile(r"\bclaude\s+code\b", re.IGNORECASE),
     re.compile(r"allow this action\?", re.IGNORECASE),
     re.compile(r"askuserquestion", re.IGNORECASE),
     re.compile(r"teammates running", re.IGNORECASE),
     re.compile(r"yes.*no.*always", re.IGNORECASE | re.DOTALL),
+    re.compile(
+        r"^[ \t│|]*[✶✻✢✽✺✹✷●◐◓◒◑]?[ \t]*[A-Za-z][^\n]*?(?:…|\.{3})[ \t]*"
+        r"\([^)]*(?:tokens?|thought|context|esc|ctrl|\d+[ \t]*[smh])[^)]*\)",
+        re.IGNORECASE | re.MULTILINE,
+    ),
 )
 
 _CODEX_SCREEN_PATTERNS = (

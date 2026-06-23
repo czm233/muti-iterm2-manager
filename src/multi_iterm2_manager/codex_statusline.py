@@ -26,8 +26,14 @@ _CONTEXT_SEGMENT_RE = re.compile(
 _STATUS_TO_TERMINAL = {
     "ready": TerminalStatus.done,
     "starting": TerminalStatus.running,
+    "thinking": TerminalStatus.running,
+    # Codex statusline "Waiting" means the TUI is idle and waiting for the next prompt.
+    "waiting": TerminalStatus.done,
     "working": TerminalStatus.running,
 }
+_CODEX_UUID_RE = re.compile(r"\b[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\b", re.IGNORECASE)
+_CODEX_FAST_MODE_RE = re.compile(r"\bFast\s+(?:on|off)\b", re.IGNORECASE)
+_CODEX_WINDOW_RE = re.compile(r"\b\d+\s*K\s+window\b", re.IGNORECASE)
 
 
 def parse_codex_statusline(line: str) -> CodexStatusLine | None:
@@ -51,14 +57,84 @@ def parse_codex_statusline(line: str) -> CodexStatusLine | None:
     return None
 
 
-def find_codex_statusline(text: str, *, last_n_lines: int = 20) -> CodexStatusLine | None:
+def find_codex_statusline(
+    text: str,
+    *,
+    last_n_lines: int = 20,
+    max_wrapped_lines: int = 6,
+) -> CodexStatusLine | None:
     lines = (text or "").splitlines()
-    for line in reversed(lines[-last_n_lines:]):
-        statusline = parse_codex_statusline(line)
-        if statusline is not None:
-            return statusline
+    recent_lines = lines[-last_n_lines:]
+    end_index = _last_non_empty_line_index(recent_lines)
+    if end_index is None:
+        return None
+
+    # Codex TUI state is authoritative only on the current statusline: the last
+    # non-empty terminal line, or a wrapped statusline ending at that line.
+    statusline = parse_codex_statusline(recent_lines[end_index])
+    if statusline is not None:
+        return statusline
+
+    if _could_end_codex_statusline(recent_lines[end_index]):
+        start_limit = max(0, end_index - max(1, max_wrapped_lines) + 1)
+        for start_index in range(end_index - 1, start_limit - 1, -1):
+            candidate = " ".join(
+                line.strip()
+                for line in recent_lines[start_index:end_index + 1]
+                if line.strip()
+            )
+            statusline = parse_codex_statusline(candidate)
+            if statusline is not None:
+                return statusline
+
+    if _looks_like_codex_screen(recent_lines):
+        return _parse_status_only_line(recent_lines[end_index])
     return None
 
 
 def _strip_ansi(value: str) -> str:
     return _ANSI_RE.sub("", value or "")
+
+
+def _last_non_empty_line_index(lines: list[str]) -> int | None:
+    for index in range(len(lines) - 1, -1, -1):
+        if _strip_ansi(lines[index]).strip():
+            return index
+    return None
+
+
+def _looks_like_codex_screen(lines: list[str]) -> bool:
+    normalized = "\n".join(_strip_ansi(line) for line in lines)
+    return (
+        _MODEL_SEGMENT_RE.search(normalized) is not None
+        or _CONTEXT_SEGMENT_RE.search(normalized) is not None
+        or _CODEX_UUID_RE.search(normalized) is not None
+        or _CODEX_FAST_MODE_RE.search(normalized) is not None
+    )
+
+
+def _could_end_codex_statusline(line: str) -> bool:
+    normalized = _strip_ansi(line).strip()
+    return (
+        _SEGMENT_SPLIT_RE.search(normalized) is not None
+        or _CODEX_UUID_RE.search(normalized) is not None
+        or _CODEX_FAST_MODE_RE.search(normalized) is not None
+        or _CODEX_WINDOW_RE.search(normalized) is not None
+        or _parse_status_only_line(normalized) is not None
+    )
+
+
+def _parse_status_only_line(line: str) -> CodexStatusLine | None:
+    normalized = _strip_ansi(line).strip()
+    if not normalized:
+        return None
+
+    segments = [segment.strip() for segment in _SEGMENT_SPLIT_RE.split(normalized) if segment.strip()]
+    if not segments:
+        segments = [normalized]
+
+    for segment in reversed(segments):
+        status = _STATUS_TO_TERMINAL.get(segment.casefold())
+        if status is not None:
+            return CodexStatusLine(raw_status=segment, status=status, line=normalized)
+    return None

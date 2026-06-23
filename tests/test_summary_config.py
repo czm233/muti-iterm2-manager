@@ -25,12 +25,12 @@ def test_masked_summary_api_key_falls_back_to_env(tmp_path, monkeypatch) -> None
         encoding="utf-8",
     )
     monkeypatch.setenv("MITERM_UI_SETTINGS_FILE", str(settings_file))
-    monkeypatch.setenv("MITERM_SUMMARY_API_KEY", "real-secret-key")
+    monkeypatch.setenv("MITERM_SUMMARY_API_KEY", "placeholder-secret-key")
 
     settings = load_settings()
 
-    assert settings.summary_api_key == "real-secret-key"
-    assert settings.ui_settings.summary_api_key == "real-secret-key"
+    assert settings.summary_api_key == "placeholder-secret-key"
+    assert settings.ui_settings.summary_api_key == "placeholder-secret-key"
 
 
 def test_masked_summary_api_key_is_cleared_without_env(tmp_path, monkeypatch) -> None:
@@ -53,3 +53,47 @@ def test_masked_summary_api_key_is_cleared_without_env(tmp_path, monkeypatch) ->
 
     assert settings.summary_api_key == ""
     assert settings.ui_settings.summary_api_key == ""
+
+
+def test_blank_summary_free_fallback_model_is_preserved(tmp_path, monkeypatch) -> None:
+    settings_file = tmp_path / "ui-settings.yaml"
+    settings_file.write_text(
+        "\n".join(
+            [
+                "ui:",
+                "  summary_api_base: https://example.test/api",
+                "  summary_api_key: placeholder-secret-key",
+                "  summary_model: test-model",
+                "  summary_free_fallback_model: ''",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MITERM_UI_SETTINGS_FILE", str(settings_file))
+
+    settings = load_settings()
+
+    assert settings.summary_free_fallback_model == ""
+    assert settings.ui_settings.summary_free_fallback_model == ""
+
+
+def test_summary_title_max_chars_is_loaded_from_ui_settings(tmp_path, monkeypatch) -> None:
+    settings_file = tmp_path / "ui-settings.yaml"
+    settings_file.write_text(
+        "\n".join(
+            [
+                "ui:",
+                "  summary_api_base: https://example.test/api",
+                "  summary_api_key: placeholder-secret-key",
+                "  summary_model: test-model",
+                "  summary_title_max_chars: 18",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MITERM_UI_SETTINGS_FILE", str(settings_file))
+
+    settings = load_settings()
+
+    assert settings.summary_title_max_chars == 18
+    assert settings.ui_settings.summary_title_max_chars == 18

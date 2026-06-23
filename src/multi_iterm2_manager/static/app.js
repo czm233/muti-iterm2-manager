@@ -7,6 +7,7 @@ const CONNECTION_DIALOG_SHOW_DELAY_MS = 600;
 const CONNECTION_RETRY_DELAY_MS = 3000;
 const CONNECTION_LONG_WAIT_MS = 30000;
 const CONNECTION_SUCCESS_HOLD_MS = 1000;
+const BACKEND_RESTART_RECOVER_MS = 60000;
 const PRIMARY_COMPLETION_ALERT_STATUSES = new Set(["done", "error"]);
 
 const state = {
@@ -61,6 +62,10 @@ const state = {
     tickTimer: null,
     closeTimer: null,
   },
+  backendRestart: {
+    inFlight: false,
+    resetTimer: null,
+  },
   renameDialog: {
     terminalId: null,
     saving: false,
@@ -101,6 +106,15 @@ function shouldTrackTerminalStatus(record) {
   return Boolean(record) && isAgentProgram(record.program);
 }
 
+function hasTerminalMarker(record, marker) {
+  return Array.isArray(record?.markers) && record.markers.includes(marker);
+}
+
+function getTerminalVisualStatus(record) {
+  if (!record) return "";
+  return record.status || "";
+}
+
 function getPrimaryCompletionAlertStatus(recordOrId) {
   const terminalId = typeof recordOrId === "string" ? recordOrId : recordOrId?.id;
   if (!terminalId) {
@@ -111,10 +125,11 @@ function getPrimaryCompletionAlertStatus(recordOrId) {
 }
 
 function hasPrimaryCompletionAlert(record) {
-  if (!record?.isPrimary || record.status === "closed") {
+  const visualStatus = getTerminalVisualStatus(record);
+  if (!record?.isPrimary || visualStatus === "closed") {
     return false;
   }
-  return getPrimaryCompletionAlertStatus(record) === record.status;
+  return getPrimaryCompletionAlertStatus(record) === visualStatus;
 }
 
 function primaryCompletionAlertLabel(status) {
@@ -131,13 +146,14 @@ function primaryCompletionAlertLabel(status) {
 }
 
 function getPrimaryVisualAttentionStatus(record) {
-  if (!record?.isPrimary || record.status === "closed") {
+  const visualStatus = getTerminalVisualStatus(record);
+  if (!record?.isPrimary || visualStatus === "closed") {
     return null;
   }
   if (hasPrimaryCompletionAlert(record)) {
     return getPrimaryCompletionAlertStatus(record);
   }
-  if (record.status === "waiting") {
+  if (visualStatus === "waiting") {
     return "waiting";
   }
   return null;
@@ -415,6 +431,7 @@ const createForm = document.getElementById("create-form");
 const createDemoButton = document.getElementById("create-demo");
 const monitorModeButton = document.getElementById("monitor-mode");
 const refreshAllButton = document.getElementById("refresh-all");
+const restartBackendButton = document.getElementById("restart-backend");
 const closeAllButton = document.getElementById("close-all");
 const wallControls = document.getElementById("wall-controls");
 const wsStatus = document.getElementById("ws-status");
@@ -1795,7 +1812,7 @@ function buildTerminalContextMenuMarkup(record) {
           <div class="terminal-context-menu-title">${escapeHtml(title)}</div>
           <div class="terminal-context-menu-subtitle">${escapeHtml(program.label)}</div>
         </div>
-        <span class="terminal-context-menu-status">${escapeHtml(statusLabel(record.status))}</span>
+        <span class="terminal-context-menu-status">${escapeHtml(statusLabel(getTerminalVisualStatus(record)))}</span>
       </div>
     </div>
     ${groups.map((group, index) => `
@@ -1871,7 +1888,7 @@ function renderOpenTerminalContextMenu() {
     return;
   }
   terminalContextMenu.dataset.terminalId = record.id;
-  terminalContextMenu.dataset.status = record.status;
+  terminalContextMenu.dataset.status = getTerminalVisualStatus(record);
   terminalContextMenu.innerHTML = buildTerminalContextMenuMarkup(record);
   terminalContextMenu.hidden = false;
   terminalContextMenu.setAttribute("aria-hidden", "false");
@@ -2465,6 +2482,9 @@ function bindTopbarNumberInputWheelGuard() {
       if (!(input instanceof HTMLInputElement)) {
         return;
       }
+      if (document.activeElement !== input) {
+        return;
+      }
       event.preventDefault();
       event.stopPropagation();
       stepNumberInputWithWheel(input, event);
@@ -2504,6 +2524,7 @@ const DEFAULT_UI_SETTINGS = {
 const MIN_GRID_TRACK_RATIO = 0.18;
 const MIN_SPLIT_TRACK_RATIO = 0.12;
 const CARD_DRAG_START_THRESHOLD_PX = 6;
+const SUMMARY_CARD_DRAG_START_THRESHOLD_PX = 14;
 
 function normalizeSummaryCellAssignments(raw = {}) {
   const next = {};
@@ -2942,6 +2963,82 @@ async function request(url, options = {}) {
   return data;
 }
 
+function setBackendRestartButtonBusy(busy) {
+  if (!restartBackendButton) {
+    return;
+  }
+  restartBackendButton.disabled = busy;
+  restartBackendButton.textContent = busy ? "重启中..." : "重启后端";
+}
+
+function finishBackendRestart(messageText = "后端已重启完成，监控数据已同步") {
+  if (!state.backendRestart.inFlight) {
+    return;
+  }
+  state.backendRestart.inFlight = false;
+  if (state.backendRestart.resetTimer) {
+    window.clearTimeout(state.backendRestart.resetTimer);
+    state.backendRestart.resetTimer = null;
+  }
+  setBackendRestartButtonBusy(false);
+  setMessage(messageText);
+}
+
+function scheduleBackendRestartRecoveryTimeout() {
+  if (state.backendRestart.resetTimer) {
+    window.clearTimeout(state.backendRestart.resetTimer);
+  }
+  state.backendRestart.resetTimer = window.setTimeout(() => {
+    state.backendRestart.resetTimer = null;
+    if (!state.backendRestart.inFlight) {
+      return;
+    }
+    state.backendRestart.inFlight = false;
+    setBackendRestartButtonBusy(false);
+    setMessage("后端重启还没有恢复，请查看 .run/restart-via-ui.log", true);
+  }, BACKEND_RESTART_RECOVER_MS);
+}
+
+function isBackendRestartTransportError(error) {
+  const text = String(error?.message || "").toLowerCase();
+  return text.includes("failed to fetch") || text.includes("load failed") || text.includes("networkerror");
+}
+
+async function handleBackendRestart() {
+  if (!restartBackendButton || state.backendRestart.inFlight) {
+    return;
+  }
+
+  state.backendRestart.inFlight = true;
+  setBackendRestartButtonBusy(true);
+  scheduleBackendRestartRecoveryTimeout();
+  setMessage("正在发起后端重启...");
+
+  try {
+    await request("/api/system/restart", { method: "POST" });
+    setMessage("已发起后端重启，等待服务恢复");
+  } catch (error) {
+    if (!isBackendRestartTransportError(error)) {
+      state.backendRestart.inFlight = false;
+      if (state.backendRestart.resetTimer) {
+        window.clearTimeout(state.backendRestart.resetTimer);
+        state.backendRestart.resetTimer = null;
+      }
+      setBackendRestartButtonBusy(false);
+      setMessage(error.message, true);
+      return;
+    }
+    setMessage("后端连接已中断，正在等待重启完成");
+  }
+
+  closeAllTopbarMenus();
+  setWebSocketStatus("reconnecting", "后端重启中");
+  setConnectionDialogStatus("reconnecting", {
+    attempt: state.connectionDialog.attempt + 1,
+    nextRetryAt: Date.now() + CONNECTION_RETRY_DELAY_MS,
+  });
+}
+
 function statusLabel(status) {
   return {
     idle: "空闲",
@@ -3354,7 +3451,7 @@ function insertSplitTerminalIntoLayout(sourceId, terminal, zone, layout = null) 
   if (state.layoutTree) {
     mergeVisibleIds(getTerminalIdsFromTree(state.layoutTree).filter((id) => activeIds.includes(id)), activeIds);
   }
-  updateQueue(terminal.id, null, terminal.status);
+  updateQueue(terminal.id, null, getTerminalVisualStatus(terminal));
   clearSplitDropPreview();
   saveViewState();
   refreshWall(layout);
@@ -3629,14 +3726,14 @@ function stopCardPointerDrag() {
 
 function commitCardPointerDrag(clientX, clientY) {
   if (state.viewMode === "brief") {
-    commitSummaryCellDrag(clientX, clientY);
-    return;
+    return commitSummaryCellDrag(clientX, clientY);
   }
   const target = getDropTargetAtPoint(clientX, clientY);
   if (!target || !state.draggedTerminalId) {
-    return;
+    return false;
   }
   reorderTerminalsByZone(state.draggedTerminalId, target.terminalId, target.zone || 'right');
+  return true;
 }
 
 let _cardDragRafId = 0;
@@ -3650,7 +3747,10 @@ function handleCardPointerMove(event) {
   }
   const moveX = event.clientX - session.startX;
   const moveY = event.clientY - session.startY;
-  const movedEnough = Math.hypot(moveX, moveY) >= CARD_DRAG_START_THRESHOLD_PX;
+  const dragThreshold = state.viewMode === "brief"
+    ? SUMMARY_CARD_DRAG_START_THRESHOLD_PX
+    : CARD_DRAG_START_THRESHOLD_PX;
+  const movedEnough = Math.hypot(moveX, moveY) >= dragThreshold;
   if (!session.started && !movedEnough) {
     return;
   }
@@ -3692,14 +3792,16 @@ function handleCardPointerUp(event) {
   }
   const shouldCommit = session.started;
   if (shouldCommit) {
-    event.preventDefault();
-    state.suppressNextTerminalClickId = session.terminalId;
-    window.setTimeout(() => {
-      if (state.suppressNextTerminalClickId === session.terminalId) {
-        state.suppressNextTerminalClickId = null;
-      }
-    }, 200);
-    commitCardPointerDrag(event.clientX, event.clientY);
+    const didCommit = commitCardPointerDrag(event.clientX, event.clientY);
+    if (didCommit || state.viewMode !== "brief") {
+      event.preventDefault();
+      state.suppressNextTerminalClickId = session.terminalId;
+      window.setTimeout(() => {
+        if (state.suppressNextTerminalClickId === session.terminalId) {
+          state.suppressNextTerminalClickId = null;
+        }
+      }, 200);
+    }
   }
   stopCardPointerDrag();
 }
@@ -3830,9 +3932,9 @@ function buildFallbackReasonNoteHtml(reason, errorDetail = "") {
   const detail = errorDetail ? escapeHtml(errorDetail) : "";
   switch (reason) {
     case "api_error":
-      return `<span class="wall-card-brief-reason-note">${detail || "请求失败"} · 稍后重试</span>`;
+      return `<span class="wall-card-brief-reason-note">${detail || "请求失败"} · 已暂停自动重试</span>`;
     case "empty_response":
-      return `<span class="wall-card-brief-reason-note">模型返回空内容 · 稍后重试</span>`;
+      return `<span class="wall-card-brief-reason-note">模型返回空内容 · 已暂停自动重试</span>`;
     case "no_api":
       return `<span class="wall-card-brief-reason-note wall-card-brief-reason-note--warn">未配置API</span>`;
     default:
@@ -3851,11 +3953,12 @@ function collectTransientCardClasses(card) {
 
 function getCardClassName(record, options = {}) {
   const classes = ["wall-card"];
+  const visualStatus = getTerminalVisualStatus(record);
   if (options.brief) {
     classes.push("wall-card--brief", "wall-card--brief-detail");
   }
-  classes.push(`status-${record.status}`);
-  if (record.isPrimary && record.status !== "closed") {
+  classes.push(`status-${visualStatus}`);
+  if (record.isPrimary && visualStatus !== "closed") {
     classes.push("wall-card--primary-focus");
   }
   const primaryAttentionStatus = getPrimaryVisualAttentionStatus(record);
@@ -3919,6 +4022,7 @@ function buildBriefContentModel(record) {
 
 function buildBriefBadgesHtml(record, summary) {
   const program = getProgramInfo(record);
+  const visualStatus = getTerminalVisualStatus(record);
   const badges = [];
   if (shouldShowProgramChip(record)) {
     badges.push(`
@@ -3936,7 +4040,7 @@ function buildBriefBadgesHtml(record, summary) {
     badges.push(`<span class="wall-card-brief-badge wall-card-brief-badge--primary-alert wall-card-brief-badge--primary-alert-${primaryAlertStatus}">${escapeHtml(primaryCompletionAlertLabel(primaryAlertStatus))}</span>`);
   }
   if (shouldTrackTerminalStatus(record)) {
-    badges.push(`<span class="wall-card-brief-status-chip status-${record.status}">${escapeHtml(statusLabel(record.status))}</span>`);
+    badges.push(`<span class="wall-card-brief-status-chip status-${visualStatus}">${escapeHtml(statusLabel(visualStatus))}</span>`);
   }
   if (!badges.length) {
     return `
@@ -3981,7 +4085,7 @@ function rerenderBriefCard(card, record) {
           </div>
         </div>
 	        <div class="wall-card-brief-title-line">
-	          <h2 class="wall-card-title">${escapeHtml(record.name || "")}</h2>
+	          <h2 class="wall-card-title">${escapeHtml(terminalDisplayName(record))}</h2>
         </div>
         <div class="wall-card-brief-time-row">${timeHtml}</div>
       </div>
@@ -4000,9 +4104,22 @@ function escapeHtml(text) {
     .replaceAll("'", "&#39;");
 }
 
+function isDefaultTerminalName(name) {
+  return /^终端\s+\d+$/.test(String(name || "").trim());
+}
+
+function terminalDisplayName(record) {
+  const name = record.name || "";
+  const summaryTitle = String(record.summaryTitle || "").trim();
+  if (summaryTitle && isDefaultTerminalName(name)) {
+    return summaryTitle;
+  }
+  return name;
+}
+
 /** 生成卡片显示标题：终端名 · 文件夹名 */
 function displayTitle(record) {
-  const name = record.name || "";
+  const name = terminalDisplayName(record);
   if (!record.cwd) return name;
   const parts = record.cwd.replace(/\/+$/, "").split("/");
   const folder = parts[parts.length - 1] || "";
@@ -4617,16 +4734,16 @@ function applySummaryCellPreview(target) {
 
 function moveSummaryTerminalToCell(sourceId, targetIndex) {
   if (!sourceId || !Number.isInteger(targetIndex) || targetIndex < 0) {
-    return;
+    return false;
   }
   const visibleRecords = getPagedTerminals().items;
   if (!visibleRecords.some((record) => record.id === sourceId)) {
-    return;
+    return false;
   }
   const model = ensureSummaryCellAssignments(visibleRecords);
   const sourceIndex = state.summaryCellAssignments[sourceId];
   if (!Number.isInteger(sourceIndex) || sourceIndex === targetIndex) {
-    return;
+    return false;
   }
 
   const sourceRecord = state.terminals.get(sourceId);
@@ -4643,14 +4760,15 @@ function moveSummaryTerminalToCell(sourceId, targetIndex) {
   } else {
     setMessage(`已移动 ${sourceRecord?.name || sourceId} 到摘要格子`);
   }
+  return true;
 }
 
 function commitSummaryCellDrag(clientX, clientY) {
   const target = getSummaryDropTargetAtPoint(clientX, clientY);
   if (!target) {
-    return;
+    return false;
   }
-  moveSummaryTerminalToCell(state.draggedTerminalId, target.cellIndex);
+  return moveSummaryTerminalToCell(state.draggedTerminalId, target.cellIndex);
 }
 
 function getProgramInfo(record) {
@@ -4766,14 +4884,14 @@ function getFilteredTerminals() {
   }
   if (state.filter === "all") return pool.filter((record) => record.status !== "closed");
   if (state.filter === "hidden") return pool.filter((record) => state.hiddenTerminalIds.has(record.id));
-  if (state.filter === "done") return pool.filter((record) => shouldTrackTerminalStatus(record) && record.status === "done" && !state.hiddenTerminalIds.has(record.id));
-  if (state.filter === "running") return pool.filter((record) => shouldTrackTerminalStatus(record) && record.status === "running" && !state.hiddenTerminalIds.has(record.id));
+  if (state.filter === "done") return pool.filter((record) => shouldTrackTerminalStatus(record) && getTerminalVisualStatus(record) === "done" && !state.hiddenTerminalIds.has(record.id));
+  if (state.filter === "running") return pool.filter((record) => shouldTrackTerminalStatus(record) && getTerminalVisualStatus(record) === "running" && !state.hiddenTerminalIds.has(record.id));
   if (state.filter === "attention") {
     // 进入"待处理"时会生成快照，快照期间不随状态变化自动删除终端
     if (state.attentionSnapshot) {
       return pool.filter((record) => shouldTrackTerminalStatus(record) && state.attentionSnapshot.has(record.id));
     }
-    return pool.filter((record) => shouldTrackTerminalStatus(record) && ["error", "waiting"].includes(record.status) && !state.hiddenTerminalIds.has(record.id));
+    return pool.filter((record) => shouldTrackTerminalStatus(record) && ["error", "waiting"].includes(getTerminalVisualStatus(record)) && !state.hiddenTerminalIds.has(record.id));
   }
   // default：不显示已隐藏和已关闭的终端
   return pool.filter((record) => record.status !== "closed" && !state.hiddenTerminalIds.has(record.id));
@@ -4803,9 +4921,10 @@ function syncFilterTabs() {
     const isHidden = state.hiddenTerminalIds.has(r.id);
     if (isHidden) { hiddenCount++; continue; }
     if (!shouldTrackTerminalStatus(r)) continue;
-    if (r.status === "error" || r.status === "waiting") attentionCount++;
-    else if (r.status === "done") doneCount++;
-    else if (r.status === "running") runningCount++;
+    const visualStatus = getTerminalVisualStatus(r);
+    if (visualStatus === "error" || visualStatus === "waiting") attentionCount++;
+    else if (visualStatus === "done") doneCount++;
+    else if (visualStatus === "running") runningCount++;
   }
   const attentionBadge = document.getElementById("filter-attention-badge");
   if (attentionBadge) {
@@ -4966,8 +5085,8 @@ function getPagedTerminals() {
 }
 
 function getNextAttentionTerminal() {
-  return [...state.terminals.values()].find((record) => shouldTrackTerminalStatus(record) && record.status === "error")
-    || [...state.terminals.values()].find((record) => shouldTrackTerminalStatus(record) && record.status === "waiting");
+  return [...state.terminals.values()].find((record) => shouldTrackTerminalStatus(record) && getTerminalVisualStatus(record) === "error")
+    || [...state.terminals.values()].find((record) => shouldTrackTerminalStatus(record) && getTerminalVisualStatus(record) === "waiting");
 }
 
 
@@ -5074,7 +5193,8 @@ function renderStats() {
   for (const record of state.terminals.values()) {
     if (state.hiddenTerminalIds.has(record.id)) continue;
     if (!shouldTrackTerminalStatus(record)) continue;
-    counts[record.status] = (counts[record.status] || 0) + 1;
+    const visualStatus = getTerminalVisualStatus(record);
+    counts[visualStatus] = (counts[visualStatus] || 0) + 1;
   }
   const page = getPagedTerminals();
   if (!stats) return;
@@ -5124,13 +5244,9 @@ async function enterMonitorMode() {
 }
 
 async function setTerminalDefaultFrame(record) {
-  const frameData = await request(`/api/terminals/${record.id}/frame`);
-  await request("/api/default-frame", {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(frameData),
-  });
-  setMessage(`已将 ${record.name} 的位置设为默认模板`);
+  const result = await request(`/api/terminals/${record.id}/remember-default-frame`, { method: "POST" });
+  const screenSuffix = result.screenName ? `（${result.screenName}）` : "";
+  setMessage(`已将 ${record.name} 的当前位置设为默认模板${screenSuffix}`);
 }
 
 async function applyDefaultFrameToAll() {
@@ -5166,7 +5282,8 @@ function renderPrimaryFocus() {
     delete container.dataset.primaryAttentionStatus;
     return;
   }
-  container.dataset.status = record.status;
+  const visualStatus = getTerminalVisualStatus(record);
+  container.dataset.status = visualStatus;
   const attentionStatus = getPrimaryVisualAttentionStatus(record);
   if (attentionStatus) {
     container.dataset.primaryAttention = "true";
@@ -5181,14 +5298,14 @@ function renderPrimaryFocus() {
     : "";
   const button = document.createElement("button");
   button.type = "button";
-  button.className = `primary-focus-pill status-${record.status}${alertClass}`;
+  button.className = `primary-focus-pill status-${visualStatus}${alertClass}`;
   button.title = attentionStatus
     ? `当前最重要任务：${displayTitle(record)}，${primaryCompletionAlertLabel(attentionStatus)}`
     : `当前最重要任务：${displayTitle(record)}`;
   button.innerHTML = `
     <span class="primary-focus-pill-label" aria-hidden="true">★</span>
     <span class="primary-focus-pill-name">${escapeHtml(displayTitle(record))}</span>
-    <span class="primary-focus-pill-status">${escapeHtml(attentionStatus ? primaryCompletionAlertLabel(attentionStatus) : statusLabel(record.status))}</span>
+    <span class="primary-focus-pill-status">${escapeHtml(attentionStatus ? primaryCompletionAlertLabel(attentionStatus) : statusLabel(visualStatus))}</span>
   `;
   button.onclick = async () => {
     try {
@@ -5249,10 +5366,11 @@ async function toggleTerminalHidden(record) {
     setMessage(`已取消隐藏 ${record.name}`);
     const terminal = state.terminals.get(record.id);
     if (terminal && shouldTrackTerminalStatus(terminal) && !state.queue.some((q) => q.id === record.id)) {
-      if (ATTENTION_STATUSES.has(terminal.status)) {
-        state.queue.unshift({ id: record.id, name: terminal.name || record.id, status: terminal.status });
-      } else if (terminal.status === "done") {
-        state.queue.push({ id: record.id, name: terminal.name || record.id, status: terminal.status });
+      const visualStatus = getTerminalVisualStatus(terminal);
+      if (ATTENTION_STATUSES.has(visualStatus)) {
+        state.queue.unshift({ id: record.id, name: terminal.name || record.id, status: visualStatus });
+      } else if (visualStatus === "done") {
+        state.queue.push({ id: record.id, name: terminal.name || record.id, status: visualStatus });
       }
     }
   }
@@ -5330,6 +5448,10 @@ async function sendTextToTerminal(record, text) {
 
 /* ---- 顶部队列 ---- */
 const ATTENTION_STATUSES = new Set(["waiting", "error"]);
+
+function isAttentionTerminal(record) {
+  return ATTENTION_STATUSES.has(getTerminalVisualStatus(record));
+}
 
 function syncQueueCardHighlights() {
   const queuedStatusById = new Map(state.queue.map((item) => [item.id, item.status]));
@@ -5441,17 +5563,18 @@ function initQueueFromSnapshot() {
     if (state.mutedTerminalIds.has(id)) continue;
     if (!shouldTrackTerminalStatus(terminal)) continue;
     const dismissedStatus = state.queueDismissed.get(id);
+    const visualStatus = getTerminalVisualStatus(terminal);
     if (dismissedStatus !== undefined) {
-      if (dismissedStatus === terminal.status) {
+      if (dismissedStatus === visualStatus) {
         continue;
       }
       clearDismissedQueueItem(id);
     }
     const name = terminal.name || id;
-    if (ATTENTION_STATUSES.has(terminal.status)) {
-      attentionItems.push({ id, name, status: terminal.status });
-    } else if (terminal.status === "done") {
-      doneItems.push({ id, name, status: terminal.status });
+    if (ATTENTION_STATUSES.has(visualStatus)) {
+      attentionItems.push({ id, name, status: visualStatus });
+    } else if (visualStatus === "done") {
+      doneItems.push({ id, name, status: visualStatus });
     }
     // running/idle 不入队
   }
@@ -6024,7 +6147,7 @@ function updateCardMeta(card, record) {
   const title = card.querySelector(".wall-card-title");
   if (title) {
     title.textContent = card.classList.contains("wall-card--brief")
-      ? (record.name || "")
+      ? terminalDisplayName(record)
       : displayTitle(record);
   }
   const folderTitle = card.querySelector(".wall-card-folder-title");
@@ -6062,10 +6185,11 @@ function updateCardMeta(card, record) {
   }
   const briefStatusChip = card.querySelector(".wall-card-brief-status-chip");
   if (briefStatusChip) {
+    const visualStatus = getTerminalVisualStatus(record);
     briefStatusChip.hidden = !shouldTrackTerminalStatus(record);
     if (!briefStatusChip.hidden) {
-      briefStatusChip.className = `wall-card-brief-status-chip status-${record.status}`;
-      briefStatusChip.textContent = statusLabel(record.status);
+      briefStatusChip.className = `wall-card-brief-status-chip status-${visualStatus}`;
+      briefStatusChip.textContent = statusLabel(visualStatus);
     }
   }
   const hideButton = card.querySelector("[data-action='toggle-hide']");
@@ -6076,8 +6200,9 @@ function updateCardMeta(card, record) {
   // 更新状态 badge
   const badge = card.querySelector(".badge");
   if (badge) {
-    badge.className = `badge status-${record.status}`;
-    badge.textContent = statusLabel(record.status);
+    const visualStatus = getTerminalVisualStatus(record);
+    badge.className = `badge status-${visualStatus}`;
+    badge.textContent = statusLabel(visualStatus);
   }
   const programBadge = card.querySelector(".wall-card-program-badge");
   if (programBadge) {
@@ -6575,8 +6700,9 @@ function connectWebSocket() {
   // 处理一条 terminal-updated 消息（限速后实际执行）
   function _applyTerminalUpdate(payload) {
     const oldRecord = state.terminals.get(payload.terminal.id);
-    const oldStatus = oldRecord ? oldRecord.status : null;
-    if (payload.terminal.status === "waiting" && oldStatus !== "waiting" && shouldTrackTerminalStatus(payload.terminal)) {
+    const oldStatus = oldRecord ? getTerminalVisualStatus(oldRecord) : null;
+    const newStatus = getTerminalVisualStatus(payload.terminal);
+    if (newStatus === "waiting" && oldStatus !== "waiting" && shouldTrackTerminalStatus(payload.terminal)) {
       playWaitingAlert();
     }
     state.terminals.set(payload.terminal.id, payload.terminal);
@@ -6605,7 +6731,7 @@ function connectWebSocket() {
       saveViewState();
     }
     syncLayoutTree();
-    updateQueue(payload.terminal.id, oldStatus, payload.terminal.status);
+    updateQueue(payload.terminal.id, oldStatus, newStatus);
     if (payload.terminal.status === "closed") {
       state.terminals.delete(payload.terminal.id);
       state.orderedTerminalIds = state.orderedTerminalIds.filter((id) => id !== payload.terminal.id);
@@ -6638,6 +6764,7 @@ function connectWebSocket() {
       }
       applySnapshot(payload.terminals || [], payload.layout || null, payload.allTags || null);
       setConnectionDialogStatus("connected");
+      finishBackendRestart();
       return;
     }
     if (payload.type === "terminal-updated") {
@@ -6843,6 +6970,10 @@ refreshAllButton.onclick = async () => {
     setMessage(error.message, true);
   }
 };
+
+if (restartBackendButton) {
+  restartBackendButton.onclick = handleBackendRestart;
+}
 
 const adoptSessionList = document.getElementById("adopt-session-list");
 
@@ -7451,6 +7582,8 @@ if (summaryForm) {
     summaryForm.api_key.value = "";
     summaryForm.api_key.placeholder = data.hasApiKey ? "已保存 API Key，留空则不修改" : "输入 API Key";
     summaryForm.model.value = data.model || "glm-4.6";
+    summaryForm.free_fallback_model.value = data.freeFallbackModel ?? "glm-4.7-flash";
+    summaryForm.title_max_chars.value = data.titleMaxChars || 12;
     summaryForm.interval_seconds.value = data.intervalSeconds || 30;
     summaryForm.active_interval.value = data.activeInterval || 10;
     summaryForm.fallback_retry_interval.value = data.fallbackRetryInterval || 30;
@@ -7467,6 +7600,8 @@ if (summaryForm) {
         api_base: summaryForm.api_base.value,
         api_key: summaryForm.api_key.value,
         model: summaryForm.model.value || "glm-4.6",
+        free_fallback_model: summaryForm.free_fallback_model.value.trim(),
+        title_max_chars: parseInt(summaryForm.title_max_chars.value, 10) || 12,
         interval_seconds: parseFloat(summaryForm.interval_seconds.value) || 30,
         active_interval: parseFloat(summaryForm.active_interval.value) || 10,
         fallback_retry_interval: parseFloat(summaryForm.fallback_retry_interval.value) || 30,
@@ -7478,6 +7613,8 @@ if (summaryForm) {
         // 更新本地缓存的配置
         state.summaryConfig.apiBase = summaryForm.api_base.value;
         state.summaryConfig.model = summaryForm.model.value || "glm-4.6";
+        state.summaryConfig.freeFallbackModel = summaryForm.free_fallback_model.value.trim();
+        state.summaryConfig.titleMaxChars = parseInt(summaryForm.title_max_chars.value, 10) || 12;
         state.summaryConfig.intervalSeconds = parseFloat(summaryForm.interval_seconds.value) || 30;
         state.summaryConfig.activeInterval = parseFloat(summaryForm.active_interval.value) || 10;
         state.summaryConfig.fallbackRetryInterval = parseFloat(summaryForm.fallback_retry_interval.value) || 30;
@@ -7513,7 +7650,7 @@ document.querySelectorAll("#topbar-filters .filter-tab").forEach((tab) => {
       // 进入"待处理"时对当前待处理终端做快照，避免处理后立即消失
       state.attentionSnapshot = new Set(
         [...state.terminals.values()]
-          .filter((r) => shouldTrackTerminalStatus(r) && ["error", "waiting"].includes(r.status) && !state.hiddenTerminalIds.has(r.id))
+          .filter((r) => shouldTrackTerminalStatus(r) && ["error", "waiting"].includes(getTerminalVisualStatus(r)) && !state.hiddenTerminalIds.has(r.id))
           .map((r) => r.id)
       );
     } else if (filter !== "attention") {
